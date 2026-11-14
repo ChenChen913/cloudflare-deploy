@@ -1,6 +1,16 @@
 # 部署计划：{{项目名}}
 
-> 依据 `detect-project.mjs` 和仓库检查填写。控制在一屏内，不适用的字段删掉。
+> 依据第 0 步的链路探针、可行性判定和 `detect-project.mjs` 填写。控制在一屏内，不适用的字段删掉。
+
+## 前置结论（第 0 步，先填这个）
+
+| 项 | 结论 |
+|---|---|
+| 链路探针 | {{ready / limited / blocked}}；**blocked 时本计划不执行** |
+| 可行性 | {{可行 / 不可行 + 依据，写明查了哪些官方文档}} |
+| 当前套餐 | {{免费 / Workers Paid / 未知}} |
+| 成本档 | {{免费 / $5 月起 / 按量}} |
+| 不可行时的选项 | {{换依赖 / 换方案 / 换平台 + 各自代价}} |
 
 ## 现状
 
@@ -8,8 +18,9 @@
 |---|---|
 | 仓库 | {{repo_url}} |
 | 框架 / 类型 | {{framework}} / {{静态、SPA、SSR、API 或全栈}} |
-| 站点模式 | {{static / ssg / spa}}（构建检查和验收共用） |
+| 站点模式 | {{static / ssg / spa / ssr}}（构建检查和验收共用；ssr 不做产物检查） |
 | 包管理器 / 运行时 | {{manager}} / Node {{version}} |
+| 构建环境 | {{本地 / Git 集成或 Workers Builds 平台构建}}（Windows + 适配器优先选平台构建） |
 | 构建命令 | `{{build_command}}` |
 | 输出目录 | `{{output_dir}}` |
 | 当前托管 | {{GitHub Pages / 其他 / 无}} |
@@ -49,7 +60,7 @@
 {{npm run build}}
 
 # 产物检查
-node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{static|ssg|spa}}"
+node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{static|ssg|spa|ssr}}"
 
 # 部署（先预览）
 {{npx wrangler pages deploy ... | npx wrangler deploy}}
@@ -67,7 +78,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 ## 验收
 
 - [ ] 首页 200 + 标题正确
-- [ ] 未知路径符合所选模式（static/ssg 为 404；spa 为 200 + app shell）
+- [ ] 未知路径符合所选模式（static/ssg 为 404；spa 为 200 + app shell；ssr 通常 404，200 需确认不是 catch-all）
+- [ ] SSR 专项：服务端渲染内容、`--api` 接口状态/JSON、数据库读写、登录会话（仅 ssr，人工或专项验证）
 - [ ] 同源资源 200（记录检查数量）
 - [ ] SPA 深链 + 刷新（如果是 SPA）
 - [ ] `_headers` / `_redirects` 生效（如果用了）
@@ -83,6 +95,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 | {{改 base 后资源 404}} | 中 | 先在预览验收再加域名 |
 | {{...}} | {{...}} | {{...}} |
 
+止损线：同一构建步骤连续失败 2 次，或单次超过 15 分钟无实质进展 → 停止调优，换构建环境或换方案，并说明原因。
+
 回滚：{{控制台回滚 / revert commit / 重新添加 GitHub 自定义域名 + 改 DNS}}。
 回滚耗时：{{...}}。
 
@@ -97,3 +111,4 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 - [ ] 删除旧部署/旧数据
 - [ ] 不可逆配置（Pages Direct Upload / 重建项目）
 - [ ] 套餐/计费
+- [ ] 临时部署探针（`probe.mjs --deploy` 会真实创建并删除一个临时 Worker）

@@ -1,12 +1,14 @@
 ---
 name: cloudflare-deploy
-description: 把 GitHub 项目部署或迁移到 Cloudflare Pages / Workers 的端到端技能。当用户要求部署、托管、迁移到 Cloudflare，选择 Pages 还是 Workers，保留 GitHub Pages 作为备用站，检查部署后的页面/路由/静态资源/CORS/索引，或排查 Cloudflare 部署失败时使用。先只读识别项目，再给出部署方案；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
+description: 把 GitHub 项目部署或迁移到 Cloudflare Pages / Workers 的端到端技能。当用户要求部署、托管、迁移到 Cloudflare，选择 Pages 还是 Workers，保留 GitHub Pages 作为备用站，检查部署后的页面/路由/静态资源/CORS/索引，或排查 Cloudflare 部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目并给出部署方案；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
 agent_created: true
 ---
 
 # Cloudflare 部署
 
-把 GitHub 仓库变成一次**经过验证**的 Cloudflare 部署。不要套模板：先识别项目，再选产品，写计划，部署到预览地址，用真实请求验收，最后写报告。
+把 GitHub 仓库变成一次**经过验证**的 Cloudflare 部署。顺序是：**先验证链路与可行性** → 只读识别项目 → 选产品 → 写计划 → 部署到预览地址 → 用真实请求验收 → 写报告。前提不成立就停下来，不要靠「先构建一下看看」去发现问题。
+
+> **能力边界（先读这条）**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当作**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容），数据库写入、登录会话、第三方回调仍需专项验证。运行时兼容性、套餐与成本见 `references/runtime-compat.md`。
 
 ## 一、先决条件
 
@@ -23,6 +25,8 @@ agent_created: true
 | 域名 / DNS | 只有绑自定义域名才需要 | 域名的 NS 在哪、是否有 CAA | Pages 的 apex 需要 NS 在 Cloudflare；子域可用外部 CNAME；Workers 必须 NS 在 Cloudflare |
 | R2 订阅 | 只有用 R2 才需要 | 控制台 Storage & databases → R2 | 首次使用要走一次 checkout（免费额度也需开通） |
 | GitHub CLI | 可选 | `gh --version`、`gh auth status` | 只影响仓库/DNS 自动化，不影响 `wrangler` 部署 |
+| Docker | 只有用 Containers | `docker info` | Containers 需要本地构建镜像；没有 Docker 就直接排除该方案 |
+| 账号套餐 / 订阅 | 用付费能力时必须 | Manage Account → Billing → Subscriptions | 免费计划不能用 Containers；R2 首次使用需完成一次 checkout |
 | 付款方式 | 只有付费功能才需要 | 控制台 Billing | Pages/Workers 免费额度不要求绑卡；Workers Paid、R2 超额等需要 |
 
 Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官方文档没有要求绑卡。R2 是例外：首次使用需要完成一次订阅 checkout，即使只用免费额度。
@@ -84,16 +88,35 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 
 ## 四、工作流
 
-### 0. 判断用户要什么
+### 意图路由
 
 | 用户意图 | 做什么 |
 |---|---|
-| “部署到 Cloudflare” / “迁移这个仓库” | 完整流程，第 1–7 步 |
-| “Pages 还是 Workers？” | 只做第 1–2 步，给结论，不部署 |
+| “部署到 Cloudflare” / “迁移这个仓库” | 完整流程，第 0–7 步 |
+| “Pages 还是 Workers？” | 只做第 1–2 步（识别 + 选型），给结论，不部署 |
 | “检查现有部署” | 第 6 步 + `references/verification.md`，不改文件 |
 | “保留 GitHub Pages 备用” | `references/github-pages-backup.md`，再做第 6 步 |
-| “部署失败 / 502 / 404 / CORS” | `scripts/check-env.mjs` + `references/troubleshooting.md` |
-| “迁数据库 / 后端” | 第 1–3 步；读 `references/platform-selection.md` 和 `references/migration-guide.md`；数据库操作必须确认 |
+| “部署失败 / 502 / 404 / CORS” | 先 `scripts/probe.mjs`，再 `scripts/check-env.mjs` + `references/troubleshooting.md` |
+| “迁数据库 / 后端” | 第 0–3 步；读 `references/runtime-compat.md`、`platform-selection.md`、`migration-guide.md`；数据库操作必须确认 |
+
+### 0. 链路探针与可行性熔断（先于一切工程动作）
+
+部署任务的第一优先级是**链路通不通**，不是产物对不对。碰到项目文件之前先做：
+
+```bash
+node "<技能目录>/scripts/probe.mjs"
+```
+
+- 退出码 `0` = ready；`1` = limited（先读 warn，判断缺口是否影响本次目标）；`2` = blocked（**硬停**）。
+- blocked 时不要改配置、装适配器或跑构建。给出具体下一步（`npx wrangler login`，或 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`）；**不要让用户在聊天里粘贴 Token**。
+- `npx wrangler deploy --temporary` 只在未登录时可用，用的是临时账号，**不能验证用户的账号、权限或套餐**，且会过期；它只能证明网络可达。
+- `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。没有账号时不要声称已验证部署链路。
+
+接着用 10 分钟做**可行性判定**（只查文档，不写代码）：框架有没有适配器且版本匹配？ORM / 驱动能否跑在 workerd（WASM、原生模块、Node API）？体积和套餐够不够？产出「可行 / 不可行 + 依据」。三问、已知不可行组合、现行额度与成本表见 `references/runtime-compat.md`。
+
+- **判为不可行就立刻决策，不要闷头试**：把「换依赖 / 换方案 / 换平台」的代价摆给用户。「本技术栈目前不适合 Cloudflare」也是合格结论。
+- **止损线**：同一构建步骤连续失败 2 次，或单次超过 15 分钟无实质进展 → 停止调优，换构建环境或换方案，并说明原因。
+- SSR 项目本地 `wrangler dev` 跑通 ≠ 线上跑通；Windows 本地构建适配器失败时，优先走 Git 集成 / Workers Builds 让平台构建。
 
 ### 1. 只读识别项目
 
@@ -111,7 +134,7 @@ node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 - `target.confidence`：`high`（有 Wrangler 配置或硬阻断）、`medium`（按类型推断）、`low`（没识别出来）；
 - `evidence.*.confidence`：每个关键字段是 `confirmed`（直接读到）、`inferred`（按默认值推断）还是 `unknown`。
 
-**`suggested` 只是候选建议，不是部署决定。** 只有 `confidence: high` 且依据是现有 Wrangler 配置时，才可以照着做；`medium` 必须结合第 2 步的三个问题再定。
+**`suggested` 只是候选建议，不是部署决定。** 只有 `confidence: high` 且依据是现有 Wrangler 配置时，才可以照着做；`medium` 必须结合第 2 步的三个问题再定。`project.suggestedMode` 给出建议的验收模式，`risks` 会标出需要核对的 ORM / 驱动 / 原生模块——两者都只是**待核对信号**，不是可行性结论。
 
 同时按需读取：`package.json`、锁文件、框架配置、`.github/workflows/*`、`wrangler.*`、`_headers`、`_redirects`、`CNAME`、`.env.example`。**不要为了识别而安装依赖。**
 
@@ -127,6 +150,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 - **静态前端 + Supabase/Firebase/外部 API** → 只迁前端，后端不动。
 - **Next.js SSR/ISR** → Workers + vinext/OpenNext，不能当纯静态上传。
 - **原生模块、`node:fs`、长驻进程、运行时不受支持** → 直接说明不适合，建议保留原主机或容器，不要硬迁。
+- **SSR / 全栈、ORM、数据库驱动** → 先读 `references/runtime-compat.md` 判可行性，再谈部署方式；硬阻断时给「换依赖 / 换方案 / 换平台」的代价，不要强迁。
 
 但**不要只凭框架名决定**。静态站（含 SPA）Pages 和 Workers 都能托管，真正决定的是三个问题：
 
@@ -134,11 +158,11 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 2. 是否要零配置 `git push` 部署？（Pages 的 Git 集成更省事）
 3. 以后是否要 Cloudflare 侧后端（D1/DO/Queues/Cron）？（要就直接 Workers）
 
-给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。
+给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。**同时给出成本档**（免费 / $5 月起 / 按量计费）和套餐前提：Containers 必须 Workers Paid 加本地 Docker，免费计划直接排除。现行额度查官方 Limits / Pricing 页，不要沿用旧数字；见 `references/runtime-compat.md`。
 
 ### 3. 写部署计划
 
-填 `templates/deployment-plan.md`。保持一屏以内：当前架构、目标、部署方式、要改的文件、命令、环境变量/密钥、数据/文件/API 影响、GitHub Pages 取舍、风险、回滚。
+填 `templates/deployment-plan.md`。保持一屏以内：可行性结论、当前架构、目标与成本档、部署方式、构建环境、要改的文件、命令、环境变量/密钥、数据/文件/API 影响、GitHub Pages 取舍、风险、**止损线**、回滚。
 
 低风险且符合用户请求时，可以直接继续。碰到下面任何一项，**停下来问**：
 
@@ -158,25 +182,26 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 node "<技能目录>/scripts/check-env.mjs"
 ```
 
-阻断项：Node 缺失/过旧、git 缺失、既没有 wrangler 也没有 `npx`。登录缺失是警告：部署前必须解决，给出准确命令，**不要让用户在聊天里粘贴 Token**。
+退出码就是结论：`0` 可部署、`1` 可构建但不可部署、`2` 连构建条件都不满足。**不要忽略非零退出码继续往下走。** 只想本地构建、不打算部署时用 `--build-only`。登录缺失会给出准确命令，**不要让用户在聊天里粘贴 Token**。
 
 用项目自己的构建命令，然后检查产物：
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg>"
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg|ssr>"
 ```
 
 **先定站点模式，再构建检查，最后用同一个模式验收。** 中间换模式，前面的结论就作废：
 
-| 模式 | 用在 | 未知路径的期望 |
-|---|---|---|
-| `static` | 预渲染的多页站 | 404 |
-| `ssg` | Hugo / Jekyll / Astro 等生成的静态站 | 404 |
-| `spa` | 客户端路由（React/Vue/Vite SPA） | 200 + app shell |
+| 模式 | 用在 | 未知路径的期望 | 产物检查 |
+|---|---|---|---|
+| `static` | 预渲染的多页站 | 404 | 适用 |
+| `ssg` | Hugo / Jekyll / Astro 等生成的静态站 | 404 | 适用 |
+| `spa` | 客户端路由（React/Vue/Vite SPA） | 200 + app shell | 适用，不要求 `404.html` |
+| `ssr` | 服务端渲染 / 全栈 | 通常 404；200 要确认不是 catch-all | **不适用**，脚本只报 `skip` |
 
-`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。
+`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
-部署前修掉阻断项（输出目录不存在、文件数 > 20,000、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。
+部署前修掉阻断项（输出目录不存在、文件数 > 20,000、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。构建失败按第 0 步的止损线处理，不要原样重试。
 
 ### 5. 部署
 
@@ -201,17 +226,20 @@ npx wrangler deploy
 ### 6. 验收
 
 ```bash
-node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg>" --json
+node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）。
 
 `--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
 
 - `static`/`ssg`：未知路径**必须** 404。返回 200 判失败（SPA 回退或 rewrite 吞掉了未知路径）。
 - `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
+- `ssr`：未知路径通常 404；返回 200 只给警告，须人工确认是自定义 404 还是 catch-all。额外检查首页服务端渲染的可见文本长度与单次 TTFB——**单次采样不是性能结论**。
 
-脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS、备用站独立性。
+脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS、备用站独立性，以及 `--api` 接口的状态 / JSON / 期望内容。
+
+**HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。
 
 同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
@@ -223,6 +251,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 ## 五、必须遵守的判断
 
+- **链路 blocked 就不往下走。** 环境问题先于工程问题，构建成功不等于能上线。
+- **允许得出「不建议迁移」的结论。** 运行时硬冲突时，给换依赖 / 换方案 / 换平台的代价，别闷头试。
+- **本地 `wrangler dev` 跑通 ≠ 线上跑通。** 体积上限、TLS/TCP、冷启动、真实 Secrets、本地数据库都不同。
+- **`wrangler deploy --temporary` 用的是临时账号。** 不能验证用户的账号、权限或套餐。
+- **额度与价格查官方现行页面。** 旧资料里的 3 MB / 10 MB 脚本上限、1,000 子请求都已过时。
 - **前端迁了不等于后端要迁。** 默认只迁前端。
 - **新站稳定前不要删 GitHub Pages。**
 - **`github.io` 301 到自定义域名，就不是备用站。** 必须直接请求确认。
@@ -235,7 +268,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 ## 六、失败处理
 
-- **构建失败** → 看真实报错；查 Node 版本、锁文件、框架适配器。不要原样重试。
+- **构建失败** → 看真实报错；查 Node 版本、锁文件、框架适配器。不要原样重试；连续 2 次或 15 分钟无进展就按止损线换路径（优先 Git 集成 / Workers Builds 在平台构建）。
 - **部署失败** → 读 `references/troubleshooting.md`；查认证、项目名、文件限制、账号是否开通 Pages/Workers。
 - **所有路径 404** → 输出目录错了或产物为空；检查产物。
 - **子页面显示首页** → 缺 `404.html`，或 SPA 回退过宽。
@@ -252,7 +285,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 | `references/prerequisites.md` | 账号、Token、Account ID、R2 订阅、Node/Wrangler 前提 |
 | `references/console-paths.md` | 登录后各功能在控制台的路径 |
 | `references/cross-platform.md` | Windows / macOS / Linux / WSL / 容器 / CI 的差异 |
-| `references/platform-selection.md` | 选 Pages 还是 Workers、额度、价格、域名限制 |
+| `references/platform-selection.md` | 选 Pages 还是 Workers、域名限制、Git 集成 |
+| `references/runtime-compat.md` | **可行性判定**：已知不可行组合、ORM × 运行时、现行额度/成本、构建环境、止损线 |
 | `references/deployment-workflows.md` | 构建/部署、Git 与 Direct、环境变量、Jekyll、Next.js |
 | `references/pages-runtime.md` | 响应头、重定向、404/SPA、缓存、CORS、Functions |
 | `references/github-pages-backup.md` | 保留或验证 GitHub Pages 备用站 |
@@ -264,10 +298,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 模板：`templates/deployment-plan.md`、`templates/deployment-report.md`、`templates/wrangler.workers.jsonc`、`templates/wrangler.pages.toml`。
 
-脚本：`scripts/detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
+脚本：`scripts/probe.mjs`（链路探针）、`detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
 
 ## 八、输出要求
 
-部署前：一份一分钟能读完的计划。
+部署前：一份一分钟能读完的计划（含可行性结论与成本档）。
+不可行时：结论 + 依据 + 换依赖 / 换方案 / 换平台的选项与代价，不要伪装成已完成。
 部署后：一份带 URL、检查表、明确“未验证”项的报告。
 不要只回一句“完成了”。

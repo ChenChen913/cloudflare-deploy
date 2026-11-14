@@ -15,7 +15,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 56 项：识别、产物检查、真实 HTTP 验收
+node tests/run-tests.mjs     # 77 项：识别、产物检查、真实 HTTP 验收、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -32,8 +32,8 @@ python <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     56/56 通过
-node tests/check-skill.mjs   通过（SKILL.md 273 行，引用路径 23 个，无绝对路径）
+node tests/run-tests.mjs     77/77 通过
+node tests/check-skill.mjs   通过（SKILL.md 308 行，引用路径 25 个，无绝对路径）
 quick_validate.py            Skill is valid!
 ```
 
@@ -54,7 +54,7 @@ quick_validate.py            Skill is valid!
 | 9 | 动态 Vite 配置（函数 + `loadEnv`） | `basePath` 标 `unknown` | 候选 | 风险提示构建后核对产物 |
 | 10 | 两个 `index.html`（site / docs） | 2 个入口，框架 unknown | `undetermined` | 要求确认站点根，不猜 |
 | 11 | 有 `functions/` 的静态站 | `vite/spa`，`functionsDir=true` | `pages`，`medium` | 已按 Pages Functions 组织，不因“全栈”改推 Workers |
-| 11 | 有 `functions/` 的静态站 | `vite/spa`，`functionsDir=true` | `pages`，`medium` | 已按 Pages Functions 组织，不因“全栈”改推 Workers |
+| 12 | Next.js + Prisma + Drizzle + Neon HTTP | `nextjs/ssr`，`suggestedMode=ssr` | `workers` | 运行时依赖只标「待核对」、Neon HTTP 交互式事务提示，不把待核对写成不可行 |
 
 ### 构建产物
 
@@ -63,6 +63,7 @@ quick_validate.py            Skill is valid!
 | 完整产物（index + 404 + `_headers` + 坏资源） | 通过但有警告；报告实际检查的资源数 |
 | 无 `404.html` | `static` 警告；`spa` 通过；`--spa` 与 `--mode spa` 等价 |
 | 60+ 文件的嵌套产物 | 递归统计 62 个文件；`assets/css/site.css` 能解析 |
+| 无 `--dir` + `--mode ssr` | 退出码 0，明确报 `skip`；不假装检查过产物 |
 
 ### HTTP 验收（真实服务器，不是 mock）
 
@@ -80,6 +81,12 @@ quick_validate.py            Skill is valid!
 | 重复 canonical 标签 | 判 `fail` |
 | 备用站 301 到主站 | 判 `fail` |
 | 站点挂在 `/repo/` 子路径 | 未知路径、`index.html`、相对资源都按 `/repo/` 解析，检查通过 |
+| SSR 服务器 + `--mode ssr` | 未知路径 404 通过；服务端渲染可见文本 339 字符通过；记录单次 TTFB |
+| SSR + `--api /api/health --expect-json` | 2xx + JSON + 内容匹配 → 通过 |
+| SSR + `--api /api/broken`（text/plain） | 非 JSON → `fail`，退出码 1 |
+| SSR + `--expect-json` 内容不匹配 | → `fail`，退出码 1 |
+| `--expect-json` 未配 `--api` | → `warn` |
+| SPA 服务器 + `--mode ssr` | 未知路径 200 → 只 `warn`，不判失败 |
 
 ## 真实项目探测（只读）
 
@@ -95,6 +102,10 @@ quick_validate.py            Skill is valid!
 - 部署目标只给候选；只有现有 Wrangler 配置或硬阻断才会给出高置信度结论。
 - 构建检查和验收用同一个 `--mode`，404 结论不会互相矛盾。
 - 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical 和假备用站。
+- `ssr` 模式不会把静态产物检查套到 SSR 项目上；未知路径返回 200 只警告，不误判为失败。
+- `--api` 能区分 JSON / 非 JSON / 期望内容不匹配；`--expect-json` 缺 `--api` 会警告。
+- 链路探针在 `whoami --json` 不被支持时仍判定为已登录，能从纯文本提取 Account ID；明确未登录时返回 `blocked` + 退出码 2。
+- `check-env.mjs` 的退出码与 `canBuild` / `canDeploy` 一致，`--build-only` 只按可构建判定。
 
 ## 没有测试什么
 
@@ -107,6 +118,8 @@ quick_validate.py            Skill is valid!
 | GitHub Pages 自定义域名移除 | 没有仓库管理员权限 | 按 `github-pages-backup.md` 操作后 curl `github.io` |
 | Search Console canonical | 没有站点权限 | 部署后用“网址检查” |
 | GitHub Actions 部署 | 当前环境没有对应仓库/CI | 在测试仓库跑生成的 workflow |
+| 链路探针 `--deploy` 的真实写入/删除 | 没有 Cloudflare 账号，且属于写操作 | 获用户同意后在小规模测试账号跑一次，核对临时 Worker 被删除 |
+| 真实账号的套餐 / R2 / Containers 可用性 | 没有账号与 Token | 用 API Token 查订阅，或在控制台 Billing 核对 |
 
 ## 测试中发现并修复的问题
 
@@ -116,3 +129,4 @@ quick_validate.py            Skill is valid!
 4. **结构检查把运行期产物当成缺失路径。** `tests/.work` 只在测试运行时存在，已加入忽略列表。
 5. **测试夹具目录删除失败会中断整轮测试。** 本机的安全删除钩子把 `fs.rmSync(tests/.work)` 转成回收站操作，文件被占用时抛 `Some operations were aborted`，整套断言直接不执行。改为每次用 `tests/.work/<timestamp>/`，不删旧目录。
 6. 早前修复：`verify-deployment.mjs` 漏写 `async`；重依赖项目被误判成 Workers（改为 `assess`）；忽略 `wrangler` 的 `assets.directory`；源码扫描把 `tests/` 误当噪声目录。
+7. **`check-env.mjs` 新增的退出码逻辑引用了未定义的 `argv`。** 脚本会先输出 JSON，再抛 `ReferenceError`，因此任何情况都固定以 1 退出；第一次「退出码与结论一致」断言是碰巧通过（`canDeploy=false` 恰好也是 1）。改用 `process.argv`、补 `--build-only` 断言后锁住；同时把 `process.exit()` 换成 `process.exitCode`，避免 Windows 上偶发的 0xC0000409 崩溃码。

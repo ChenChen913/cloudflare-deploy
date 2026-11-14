@@ -42,7 +42,7 @@ gh auth status
 ## 2. 构建产物
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|spa|ssg>"
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|spa|ssg|ssr>"
 ```
 
 检查：

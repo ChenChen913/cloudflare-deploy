@@ -4,13 +4,15 @@
  *
  * 用法：
  *   node scripts/verify-deployment.mjs --url https://site.example.com \
- *     [--mode static|spa|ssg] [--backup https://owner.github.io/repo/] \
+ *     [--mode static|spa|ssg|ssr] [--backup https://owner.github.io/repo/] \
  *     [--origin https://app.example.com] [--cors-url https://api.example.com/items] \
+ *     [--api /api/health --expect-json '{"ok":true}'] \
  *     [--expect-404 /__missing__] [--assets-limit 20] [--json]
  *
  * 模式必须和 check-build.mjs 用同一个值：
  *   static / ssg  未知路径应当 404
  *   spa           未知路径应当回退到 app shell（200 + HTML）
+ *   ssr           未知路径通常 404；额外检查服务端渲染内容、TTFB 和 --api 接口
  *
  * 只读：只发 GET/HEAD/OPTIONS。不会跟随跨主机重定向而不报告。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
@@ -29,11 +31,13 @@ const origin = getArg("--origin");
 const notFoundPath = getArg("--expect-404", `__cf_deploy_check_${Date.now()}/`);
 const timeout = Number(getArg("--timeout", "15000"));
 const assetsLimit = Math.max(1, Number(getArg("--assets-limit", "20")));
-const MODES = ["static", "spa", "ssg"];
+const MODES = ["static", "spa", "ssg", "ssr"];
 const mode = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
+const apiPaths = argv.reduce((acc, a, i) => (a === "--api" && argv[i + 1] && !argv[i + 1].startsWith("--") ? [...acc, argv[i + 1]] : acc), []);
+const expectJson = getArg("--expect-json");
 
 if (!base) {
-  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg] [--backup ...] [--origin ...] [--json]");
+  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--api /api/health --expect-json '{\"ok\":true}'] [--json]");
   process.exit(2);
 }
 if (!MODES.includes(mode)) {
@@ -159,6 +163,15 @@ if (!missing.res) {
     } else {
       add("spa-fallback", "fail", `GET ${notFoundPath} -> ${status}；SPA 期望 200 + HTML`, { status, mode });
     }
+  } else if (mode === "ssr") {
+    // SSR 框架通常对未知路由返回 404；返回 200 可能是 catch-all 或自定义 404，先提示不判死。
+    if (status === 404) {
+      add("404", "pass", `GET ${notFoundPath} -> 404（ssr 模式）`, { status, mode });
+    } else if (status >= 200 && status < 300) {
+      add("404", "warn", `GET ${notFoundPath} -> ${status}；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页`, { status, mode });
+    } else {
+      add("404", "warn", `GET ${notFoundPath} -> ${status}；ssr 模式通常期望 404`, { status, mode });
+    }
   } else if (status === 404) {
     add("404", "pass", `GET ${notFoundPath} -> 404（${mode} 模式）`, { status, mode });
   } else if (status === 200) {
@@ -211,6 +224,26 @@ if (html) {
   const robots = html.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] || null;
   add("meta-robots", robots ? "pass" : "skip", robots ? robots.slice(0, 160) : "没有 meta robots");
 
+  // SSR 的关键差异：HTML 里应当已经有服务端渲染的内容，而不是空壳 + 客户端补。
+  if (mode === "ssr") {
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    add(
+      "ssr-html",
+      text.length >= 200 ? "pass" : "warn",
+      `服务端输出的可见文本 ${text.length} 字符${text.length < 200 ? "；可能只是空壳，真实内容主要靠客户端渲染" : ""}`,
+      { textLength: text.length }
+    );
+    const ms = root.hops[0]?.ms;
+    if (typeof ms === "number") {
+      add("ttfb", ms < 2000 ? "pass" : "warn", `首页 TTFB ${ms}ms（单次采样，可能含冷启动；不是性能结论）`, { ms });
+    }
+  }
+
   // ---------------------------------------------------------------- 同源资源
   const refs = [...html.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
     .map((m) => m[1])
@@ -241,6 +274,34 @@ if (html) {
   );
 } else {
   add("html", "warn", "没有拿到首页 HTML；跳过标题、canonical、资源检查");
+}
+
+// ---------------------------------------------------------------- API（可选）
+if (apiPaths.length) {
+  for (const p of apiPaths) {
+    const u = resolve(p);
+    const started = Date.now();
+    const r = await req(u, { method: "GET", headers: { "user-agent": UA } });
+    if (!r.res) {
+      add("api", "fail", `GET ${p} 请求失败：${r.error}`, { path: p });
+      continue;
+    }
+    const status = r.res.status;
+    const ct = r.res.headers.get("content-type") || "";
+    const isJson = /application\/(?:[\w.+-]*\+)?json/i.test(ct);
+    let body = "";
+    try { body = await r.res.text(); } catch { body = ""; }
+    const contains = expectJson ? body.includes(expectJson) : null;
+    const ok = status >= 200 && status < 300 && isJson && contains !== false;
+    add(
+      "api",
+      ok ? "pass" : "fail",
+      `GET ${p} -> ${status}${isJson ? " JSON" : ` ${ct || "(无 content-type)"}`}${contains === false ? "，响应里没有期望的内容" : ""}（${Date.now() - started}ms）`,
+      { path: p, status, isJson, expectedFound: contains }
+    );
+  }
+} else if (expectJson) {
+  add("api", "warn", "--expect-json 需要配合 --api 使用");
 }
 
 // ---------------------------------------------------------------- 响应头
@@ -337,7 +398,7 @@ const summary = {
   fail: checks.filter((c) => c.status === "fail").length,
   skip: checks.filter((c) => c.status === "skip").length,
 };
-const result = { schemaVersion: 2, url: base, mode, backup, origin, corsUrl: origin ? resolve(getArg("--cors-url", base)) : null, checkedAt: new Date().toISOString(), summary, checks };
+const result = { schemaVersion: 2, url: base, mode, backup, origin, corsUrl: origin ? resolve(getArg("--cors-url", base)) : null, api: apiPaths.length ? apiPaths : null, expectJson, checkedAt: new Date().toISOString(), summary, checks };
 
 if (json) console.log(JSON.stringify(result, null, 2));
 else {

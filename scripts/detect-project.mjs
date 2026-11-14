@@ -251,10 +251,24 @@ const srcFiles = walkFiles(path.join(root, "src"), 3, [], 1)
   .concat(walkFiles(root, 2, [], 1).filter((f) => /\.(m?[jt]sx?)$/.test(f) && !isNoisePath(f)))
   .slice(0, 400);
 const sourceText = srcFiles.map((f) => read(f) || "").join("\n").slice(0, 400000);
-const nativeRisk = ["sharp", "canvas", "puppeteer", "playwright", "bcrypt", "argon2", "sqlite3", "better-sqlite3"]
+const nativeRisk = ["sharp", "canvas", "puppeteer", "playwright", "bcrypt", "argon2"]
   .filter((n) => hasDep(n));
 const fsUsage = /\bfrom\s+["'](?:node:)?fs["']|require\(\s*["'](?:node:)?fs["']\s*\)/.test(sourceText);
 const longRunning = /setInterval\s*\(|while\s*\(\s*true\s*\)|createServer\s*\(/.test(sourceText);
+
+// 运行时兼容性：只标注「需要核对」的依赖，不在这里下「能/不能跑」的结论。
+const runtimeDeps = [
+  { dep: "prisma", note: "需要 driver adapter；Prisma 7 的查询编译器是 WASM，打包链路可能把预编译模块变成运行时编译" },
+  { dep: "@prisma/client", note: "同 prisma，见 references/runtime-compat.md" },
+  { dep: "drizzle-orm", note: "确认驱动类型：neon-http 不支持交互式事务，需要事务时用 neon-serverless/WebSocket" },
+  { dep: "@neondatabase/serverless", note: "HTTP 驱动不支持交互式事务" },
+  { dep: "pg", note: "需要 nodejs_compat 或 Hyperdrive；连接数受限，不适合高频短查询" },
+  { dep: "mysql2", note: "需要 nodejs_compat/Hyperdrive，并确认驱动不依赖原生扩展" },
+  { dep: "typeorm", note: "依赖反射和驱动兼容性，部署前先验证" },
+  { dep: "sequelize", note: "依赖 Node 驱动和部分内置模块，部署前先验证" },
+].filter((d) => hasDep(d.dep));
+const sqliteNative = ["better-sqlite3", "sqlite3"].filter((n) => hasDep(n));
+const neonHttp = hasDep("@neondatabase/serverless") && /drizzle-orm\/neon-http|neon-http/.test(sourceText);
 
 const envFiles = listDir(root)
   .filter((e) => e.isFile() && /^\.env(\.|$)/.test(e.name))
@@ -296,6 +310,9 @@ const risks = [];
 if (!buildCommand && !resolvedOutputDir && kind !== "api" && kind !== "fullstack") risks.push("没有检测到构建脚本；请手动生成输出目录，或补一个 build 脚本。");
 if (framework === "nextjs" && kind !== "static") risks.push("Next.js SSR 不能当纯静态资源上传；改用 Workers 上的 vinext/OpenNext，或改成 output: 'export'。");
 if (nativeRisk.length) risks.push(`以下原生/重依赖可能无法在 Workers 上运行：${nativeRisk.join(", ")}。`);
+if (sqliteNative.length) risks.push(`检测到原生 SQLite 驱动（${sqliteNative.join(", ")}）；Workers 无法加载原生模块，改用 D1 或远程数据库。`);
+if (runtimeDeps.length) risks.push(`运行时依赖需要核对：${runtimeDeps.map((d) => d.dep).join("、")}；见 references/runtime-compat.md。`);
+if (neonHttp) risks.push("检测到 Neon HTTP 驱动：不支持交互式事务，需要事务时改用 WebSocket 驱动（drizzle-orm/neon-serverless）。");
 if (fsUsage) risks.push("源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。");
 if (longRunning) risks.push("检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。");
 if (kind === "api" || kind === "fullstack") risks.push("服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。");
@@ -364,6 +381,14 @@ const target = (() => {
   return { candidates: [], suggested: null, confidence: "low", basis: ["未能确认项目类型"], decideBy: ["先确认框架、构建命令和产物目录"] };
 })();
 
+const SSG_FRAMEWORKS = new Set(["jekyll", "hugo", "mkdocs", "gatsby", "docusaurus", "vitepress", "astro", "sveltekit"]);
+const suggestedMode = (() => {
+  if (kind === "ssr" || kind === "fullstack") return "ssr";
+  if (kind === "spa") return "spa";
+  if (kind === "static") return SSG_FRAMEWORKS.has(framework) || framework === "nextjs" ? "ssg" : "static";
+  return "unknown";
+})();
+
 const unknowns = [
   "DNS 托管在哪、域名是否使用 Cloudflare 的 NS",
   "Cloudflare 账号、API Token 和 wrangler 登录状态",
@@ -411,6 +436,7 @@ const result = {
     outputDir: resolvedOutputDir,
     scripts: Object.keys(scripts),
     basePath: viteBase || nextBasePath || null,
+    suggestedMode,
     hasIndexHtml,
     htmlEntries,
     serverEntry,
@@ -453,9 +479,10 @@ const result = {
   risks,
   unknowns,
   nextSteps: [
-    "执行任何部署命令前，先跑 scripts/check-env.mjs。",
-    "按 target.candidates 和 decideBy 里的问题确认 Pages 还是 Workers；读 references/platform-selection.md。",
-    "本地构建后，用 scripts/check-build.mjs --mode <static|spa|ssg> 检查输出目录。",
+    "先跑 scripts/probe.mjs：确认账号、权限、网络能通；blocked 就停下来，不要先改项目。",
+    "执行任何部署命令前，再跑 scripts/check-env.mjs（它会用退出码表达可构建/可部署）。",
+    "按 target.candidates 和 decideBy 里的问题确认 Pages 还是 Workers；SSR/全栈先读 references/runtime-compat.md。",
+    `本地构建后，用 scripts/check-build.mjs --mode ${suggestedMode === "unknown" ? "<static|spa|ssg|ssr>" : suggestedMode} 检查输出目录。`,
     "按选定的目标读 references/deployment-workflows.md。",
   ],
 };
@@ -470,6 +497,7 @@ if (human) {
   console.log(`  包管理器   ${p.packageManager || "n/a"}${p.lockfiles.length > 1 ? `（${p.lockfiles.length} 个锁文件，需确认）` : ""}${p.nodeEngine ? `, node ${p.nodeEngine}` : ""}`);
   console.log(`  构建       ${p.buildCommand || "n/a"}`);
   console.log(`  输出目录   ${p.outputDir || "n/a"}（${result.evidence.outputDir.confidence}）`);
+  console.log(`  验收模式   ${p.suggestedMode}`);
   console.log(`  目标       ${tLabel}`);
   t.basis.forEach((b) => console.log(`    依据     ${b}`));
   if (t.decideBy.length) console.log(`    待确认   ${t.decideBy.join("；")}`);

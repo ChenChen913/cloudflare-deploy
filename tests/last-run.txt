@@ -14,10 +14,15 @@
 通过  Hono：D1 绑定 + 资源目录
 通过  Hono：依据写明 wrangler 配置 — 现有 wrangler 配置已经是 Workers 形态（main 入口，assets.directory = ./public）
 通过  重依赖：标记为 assess — assess
-通过  重依赖：原生依赖风险 — 以下原生/重依赖可能无法在 Workers 上运行：sharp, puppeteer, better-sqlite3。 | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
+通过  重依赖：原生依赖风险 — 以下原生/重依赖可能无法在 Workers 上运行：sharp, puppeteer。 | 检测到原生 SQLite 驱动（better-sqlite3）；Workers 无法加载原生模块，改用 D1 或远程数据库。 | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
 通过  重依赖：fs + 长驻进程风险
 通过  Next：SSR -> Workers — ssr/workers
 通过  Next：静态资源风险
+通过  ORM：运行时依赖只标注待核对 — Next.js SSR 不能当纯静态资源上传；改用 Workers 上的 vinext/OpenNext，或改成 output: 'export'。 | 运行时依赖需要核对：@prisma/client、drizzle-orm、@neondatabase/serverless；见 references/runtime-compat.md。 | 检测到 Neon HTTP 驱动：不支持交互式事务，需要事务时改用 WebSocket 驱动（drizzle-orm/neon-serverless）。
+通过  ORM：Neon HTTP 交互式事务风险 — Next.js SSR 不能当纯静态资源上传；改用 Workers 上的 vinext/OpenNext，或改成 output: 'export'。 | 运行时依赖需要核对：@prisma/client、drizzle-orm、@neondatabase/serverless；见 references/runtime-compat.md。 | 检测到 Neon HTTP 驱动：不支持交互式事务，需要事务时改用 WebSocket 驱动（drizzle-orm/neon-serverless）。
+通过  ORM：不把待核对说成不可行
+通过  验收模式：Vite→spa / Jekyll→ssg / Next→ssr / ORM→ssr — spa/ssg/ssr/ssr
+通过  重依赖：原生 SQLite 单独提示 — 以下原生/重依赖可能无法在 Workers 上运行：sharp, puppeteer。 | 检测到原生 SQLite 驱动（better-sqlite3）；Workers 无法加载原生模块，改用 D1 或远程数据库。 | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
 通过  Monorepo：识别出两个子应用 — [{"path":"apps/api","name":"@mono/api","hasBuild":false},{"path":"apps/web","name":"@mono/web","hasBuild":true}]
 通过  Monorepo：风险提示指明子包 — 检测到 monorepo（apps/api、apps/web）；部署前确认要发布哪个子包及其输出路径。
 通过  多锁文件：列出全部 — pnpm-lock.yaml,package-lock.json
@@ -37,22 +42,38 @@
 通过  产物：--spa 与 --mode spa 等价
 通过  嵌套产物：递归统计文件 — files=62
 通过  嵌套产物：资源路径能解析
+通过  产物：ssr 不需要 --dir 且明确跳过 — exit=0
 通过  验收：静态站正常路径通过 — 失败=0
 通过  验收：canonical + 404 + 资源
 通过  验收：HEAD 405 时用 GET 兜底 — app.css 只支持 GET
 通过  验收：子路径站点查对地址 — exit=0
-通过  验收：未知路径留在 /repo/ 下 — /repo/ /repo/__cf_deploy_check_1794634550834/ /repo/assets/app.css /repo/index.html
+通过  验收：未知路径留在 /repo/ 下 — /repo/ /repo/__cf_deploy_check_1794643674297/ /repo/assets/app.css /repo/index.html
 通过  验收：相对资源按站点根解析
 通过  验收：资源上限写进报告 — checked=1/2
 通过  验收：静态站按 SPA 模式判为“深链 404”警告
 通过  验收：SPA 深链回退通过 — 200 + app shell
 通过  验收：把 SPA 当静态站会判 404 失败 — 这正是原逻辑的冲突点
-通过  验收：CORS 可指向独立子域 API — http://127.0.0.1:40136/api/data
+通过  验收：CORS 可指向独立子域 API — http://127.0.0.1:60891/api/data
 通过  验收：预检通过
 通过  验收：重复 ACAO 判失败 — 两个 ACAO 值
 通过  验收：ACAO 与请求来源不匹配判失败 — 浏览器会拒绝
 通过  验收：重复 canonical 判失败
 通过  验收：拒绝 301 备用站 — 备用站跳到主站
+通过  验收：ssr 未知路径 404 通过 — {"status":"pass","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794643676061/ -> 404（ssr 模式）"}
+通过  验收：ssr 服务端渲染内容有文本 — {"textLength":339,"id":"ssr-html","status":"pass","detail":"服务端输出的可见文本 339 字符"}
+通过  验收：ssr 记录单次 TTFB — 单次采样，不是性能结论
+通过  验收：--api 状态 + JSON + 期望内容 — [{"path":"/api/health","status":"pass","isJson":true,"expectedFound":true,"id":"api","detail":"GET /api/health -> 200 JSON（1ms）"}]
+通过  验收：--api 非 JSON 响应判失败 — {"path":"/api/broken","status":"fail","isJson":false,"expectedFound":null,"id":"api","detail":"GET /api/broken -> 200 text/plain（2ms）"}
+通过  验收：--expect-json 不匹配判失败
+通过  验收：--expect-json 缺 --api 报警告
+通过  验收：ssr 下未知路径 200 只警告不判死 — {"status":"warn","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794643676722/ -> 200；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页"}
+通过  探针：whoami --json 不被支持时不误判未登录 — {"email":"probe@example.com","authSource":"OAuth / 本地登录态","accountName":null,"id":"auth","status":"pass","detail":"已登录：probe@example.com，来源 OAuth / 本地登录态"}
+通过  探针：从纯文本提取 Account ID — {"accountId":"abcdef0123456789abcdef0123456789","id":"account-id","status":"pass","detail":"Account ID 已确定（abcdef…）"}
+通过  探针：wrangler 版本探测通过 — {"id":"wrangler","status":"pass","detail":"项目内 wrangler：4.0.0-fake"}
+通过  探针：OAuth 登录态如实跳过 Token 权限检查 — {"id":"api-read","status":"skip","detail":"当前是 OAuth 登录态，没有可直接读取的 API Token；跳过 Token 细粒度权限检查（不代表部署权限一定没问题）"}
+通过  探针：文本明确未登录时判 blocked — status=blocked code=2
+通过  预检：退出码与可构建/可部署结论一致 — code=1 canBuild=true canDeploy=false
+通过  预检：--build-only 只按可构建判定 — code=0
 通过  结构检查：frontmatter / 路径 / 无绝对路径 — 结构检查：通过
 
-56/56 通过
+77/77 通过

@@ -11,8 +11,9 @@
 | `static` | 预渲染多页站 | 必须 404 | 通常有顶层 `404.html` |
 | `ssg` | Hugo / Jekyll / Astro 生成的静态站 | 必须 404 | 通常有 `404.html` |
 | `spa` | 客户端路由 | 200 + app shell | 不要求 `404.html`（Pages 会回退） |
+| `ssr` | 服务端渲染 / 全栈 | 通常 404；200 需人工确认 | **不适用**，脚本直接报 `skip` |
 
-同一个站，`static` 判“未知路径返回 200”是失败，`spa` 判“未知路径返回 404”是警告。模式选错，结论就会反。
+同一个站，`static` 判“未知路径返回 200”是失败，`spa` 判“未知路径返回 404”是警告。模式选错，结论就会反。SSR 没有可上传的静态产物目录，不要为了跑 `check-build.mjs` 去建空目录。
 
 ## 1. 按项目类型选检查项
 
@@ -38,7 +39,7 @@
 ## 2. 自动基线
 
 ```bash
-node "<技能目录>/scripts/verify-deployment.mjs" --url "<地址>" --mode "<static|spa|ssg>" --json
+node "<技能目录>/scripts/verify-deployment.mjs" --url "<地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
 带备用站、CORS 和独立 API 域：
@@ -54,6 +55,21 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 ```
 
 脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。
+
+### 2.1 SSR / 全栈的自动基线
+
+```bash
+node "<技能目录>/scripts/verify-deployment.mjs" \
+  --url "<地址>" --mode "ssr" \
+  --api /api/health --expect-json '{"ok":true}' \
+  --api /api/items --json
+```
+
+`--api` 可重复传；每个接口检查 2xx、`Content-Type` 是否为 JSON，以及（给了 `--expect-json` 时）响应里是否含期望片段。没给 `--api` 却给了 `--expect-json` 会报 `warn`。
+
+`--mode ssr` 下：未知路径 404 判通过，返回 200 只给 `warn`（要确认是自定义 404 还是 catch-all）；另外检查首页服务端渲染的可见文本长度（空壳会 `warn`）和单次 TTFB。**单次 TTFB 不是性能结论**，冷启动会污染它。
+
+**HTTP 验收不是全栈验收。** 这条命令只证明页面和指定接口能返回；数据库写入、登录会话、第三方回调、真实 Secrets、冷启动仍要人工或专项验证，没测就在报告里写「未验证」。
 
 两个限制必须写进报告：
 
@@ -91,6 +107,15 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - CORS 预检（`OPTIONS`）和带凭证请求；
 - 响应体里没有密钥。
 
+### 3.5 SSR / 全栈专项
+
+- 服务端渲染的 HTML 里是否已有真实数据（不是空壳靠客户端补）；
+- 至少一次真实的数据库读 + 写（获批准后），核对行数 / ID / 时间戳；
+- 登录 → 刷新 → 退出 → 再刷新，以及未登录访问受保护路由；
+- 第三方回调、邮件、队列消费是否到达；
+- 冷启动与并发下的表现（多次采样取中位数）；
+- `wrangler dev` 本地跑通不算线上证据：本地没有体积上限、真实 TLS/TCP 限制、冷启动，也能连 `127.0.0.1` 的数据库。
+
 ## 4. 怎么读 HTTP 证据
 
 ### 状态码
@@ -98,6 +123,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - `/` 至少 200。
 - `static`/`ssg`：未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
 - `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受。
+- `ssr`：未知路径通常 404；返回 200 要人工确认是自定义 404 还是 catch-all 把所有路径渲染成首页。
 - Pages 上 `/index.html` 跳 `/`（301/308）是正常的。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
 - 资源检查只覆盖首页引用的前 N 个。写了“资源正常”就必须说明检查了多少个。

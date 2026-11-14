@@ -3,7 +3,10 @@
  * check-env.mjs — 检查本机工具链和 Cloudflare/GitHub 登录状态。
  *
  * 用法：
- *   node scripts/check-env.mjs [--json]
+ *   node scripts/check-env.mjs [--json] [--build-only]
+ *
+ * 退出码：0 可部署；1 可构建但不可部署；2 连构建条件都不满足。
+ * --build-only 只按「可构建」判定，用于本就不打算部署的场景。
  *
  * 只读：只执行版本/登录查询，不安装、不登录、不改配置。
  */
@@ -170,4 +173,15 @@ if (json) {
   }
   console.log(`\n可构建=${result.summary.canBuild} 可部署=${result.summary.canDeploy}`);
   if (blocking.length) console.log(`阻断项：${blocking.join("、")}`);
+  if (!result.summary.canDeploy && result.summary.canBuild) {
+    console.log("下一步：npx wrangler login，或设置 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID；再跑一次本脚本。");
+  }
+}
+
+// 退出码要和结论一致，否则 Agent 会以为「可部署=false」还能继续。
+// 0 = 可部署；1 = 可构建但不可部署；2 = 连构建条件都不满足。
+if (process.argv.includes("--build-only")) {
+  process.exitCode = result.summary.canBuild ? 0 : 2;
+} else {
+  process.exitCode = !result.summary.canBuild ? 2 : result.summary.canDeploy ? 0 : 1;
 }

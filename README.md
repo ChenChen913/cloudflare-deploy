@@ -2,24 +2,28 @@
 
 **简体中文** | [English](README.en.md)
 
-一个可复用的 Agent Skill：把 GitHub 项目部署到 Cloudflare Pages 或 Workers。流程是：识别仓库 → 选产品 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 写报告。
+一个可复用的 Agent Skill：把 GitHub 项目部署到 Cloudflare Pages 或 Workers。流程是：**先验证链路与可行性** → 识别仓库 → 选产品 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 写报告。
+
+> **能力边界**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容）。运行时兼容性、套餐与成本见 `references/runtime-compat.md`。
 
 技能正文使用简体中文。文件名和代码标识符保持 ASCII，是为了跨系统与压缩包兼容；JSON 字段名保持英文，保证脚本可被机器读取。
 
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：56/56 通过（`node tests/run-tests.mjs`）。
+- 本地测试：77/77 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本环境没有执行**。没有 Cloudflare 账号/Token，Wrangler 也未安装。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
 
+**第 0 步是熔断，不是可选项**：`scripts/probe.mjs` 先验证账号、网络、权限，`blocked` 就硬停；再用 10 分钟判定技术可行性，不可行就把「换依赖 / 换方案 / 换平台」的代价摆出来。构建连续失败 2 次、或单次 15 分钟无进展也要止损。
+
 1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险信号；每个关键字段标注 `confirmed` / `inferred` / `unknown`。
 2. **选型**：给出 Pages / Workers 候选和置信度，由 DNS、部署方式、未来后端需求决定，不凭框架名拍板。
 3. **计划**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。
-4. **构建检查**：部署前按站点模式（`static` / `ssg` / `spa`）检查产物是否符合 Cloudflare 限制。
+4. **构建检查**：部署前按站点模式（`static` / `ssg` / `spa`）检查产物是否符合 Cloudflare 限制；`ssr` 明确报告「不适用」，不会假装检查过。
 5. **部署**：先到 `pages.dev` / `workers.dev` 或预览分支。
-6. **验收**：首页、按模式判定的 404/回退、资源、响应头、canonical/noindex、CORS、备用站独立性、DNS、数据、性能，按项目类型选择。
+6. **验收**：首页、按模式判定的 404/回退、资源、响应头、canonical/noindex、CORS、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
 ## 目录
@@ -34,6 +38,7 @@ cloudflare-deploy/
 │   ├── console-paths.md      # 登录后的控制台路径
 │   ├── cross-platform.md     # Windows / macOS / Linux / WSL / 容器 / CI
 │   ├── platform-selection.md # Pages vs Workers、额度、价格
+│   ├── runtime-compat.md     # 可行性判定、ORM × 运行时、成本、止损线
 │   ├── deployment-workflows.md
 │   ├── pages-runtime.md      # 响应头、重定向、404/SPA、缓存、CORS
 │   ├── github-pages-backup.md
@@ -43,6 +48,7 @@ cloudflare-deploy/
 │   ├── seo-indexing.md
 │   └── migration-guide.md    # 迁移阶段 + Jekyll 实战数据
 ├── scripts/
+│   ├── probe.mjs             # 第 0 步：链路探针
 │   ├── detect-project.mjs
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -70,6 +76,8 @@ cloudflare-deploy/
 | Git | 仓库操作 | `git --version` |
 | 域名 / DNS | 只有绑自定义域名 | NS 在哪、CAA 记录 |
 | R2 订阅 | 只有用 R2 | Storage & databases → R2 开通 |
+| Docker | 只有用 Containers | `docker info`（Containers 还必须 Workers Paid） |
+| 账号套餐 / 订阅 | 用付费能力时 | Manage Account → Billing → Subscriptions |
 | GitHub CLI | 可选的仓库自动化 | `gh auth status` |
 
 Wrangler 官方支持 **Windows 11**、**macOS 13.5+**、**Linux glibc 2.35+**。远程 SSH、容器、Codespaces 用 `npx wrangler login --device`；CI 用 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`。详见 `references/prerequisites.md` 和 `references/cross-platform.md`。
@@ -103,20 +111,31 @@ ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy
 - 检查部署后的页面、路由和静态资源
 - 帮我修复部署失败
 
-Agent 会运行 `scripts/detect-project.mjs`，只读当前任务需要的 reference，填 `templates/deployment-plan.md`，部署到预览，运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md`。
+Agent 先运行 `scripts/probe.mjs` 和 `scripts/check-env.mjs`（两者都用退出码表达结论），再运行 `scripts/detect-project.mjs`，只读当前任务需要的 reference，填 `templates/deployment-plan.md`，部署到预览，运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md`。
 
 ## 脚本
 
 零依赖、只读的 Node 18+ ESM（部署本身仍建议 Node 22+）：
 
 ```bash
+node scripts/probe.mjs                         # 第 0 步：0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
-node scripts/check-env.mjs
-node scripts/check-build.mjs --dir dist --mode static   # 或 ssg / spa
+node scripts/check-env.mjs                     # 0 可部署 / 1 不可部署 / 2 不可构建
+node scripts/check-build.mjs --dir dist --mode static   # 或 ssg / spa；ssr 报 skip
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json
 ```
 
-`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell。构建检查和验收必须用同一个值。
+`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。
+
+SSR / 全栈的 HTTP 基线：
+
+```bash
+node scripts/verify-deployment.mjs \
+  --url https://site.example.com --mode ssr \
+  --api /api/health --expect-json '{"ok":true}' --json
+```
+
+这只能验证 HTTP 层；数据库写入、登录会话、第三方回调、冷启动仍需专项验证。
 
 检查备用站与独立 API 的 CORS：
 
@@ -133,16 +152,17 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 56 项：识别、产物检查、真实 HTTP 验收
+node tests/run-tests.mjs        # 77 项：识别、产物检查、真实 HTTP 验收、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 ```
 
-测试会创建 11 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions），断言识别结果和证据等级，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次），并用本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA 与静态站的 404 差异、独立 CORS 域、重复 canonical、301 假备用站。
+测试会创建 12 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、301 假备用站、`--api` 的 JSON 与内容断言。另用本地假 wrangler 验证链路探针在 `whoami --json` 不可用时不会误判未登录。
 
 这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为。
 
 ## 设计约束
 
+- 链路优先：`blocked` 不往下走；可行性判定在改工程之前，构建不是发现前提问题的手段。
 - 渐进披露：`SKILL.md` 只放路由、流程、安全边界；细节按需读 `references/`。
 - 一个 reference 一个主题，不重复解释平台行为。
 - 识别结果分三层：`confirmed` / `inferred` / `unknown`；部署目标是候选，不是定论。
@@ -156,4 +176,5 @@ node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 - 不能替用户注册 Cloudflare 账号或完成 OAuth。
 - CLI 不能代替控制台连接 Git 集成 / Workers Builds。
 - DNS、自定义域名、生产密钥、数据库迁移、删除操作必须用户确认。
+- SSR / 全栈的脚本能力只到 HTTP 层，`check-build.mjs` 对它不适用。
 - 本构建环境没有执行真实部署。

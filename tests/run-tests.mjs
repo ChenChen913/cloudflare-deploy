@@ -123,6 +123,13 @@ json("pages-fn/package.json", { name: "pages-fn", scripts: { build: "vite build"
 w("pages-fn/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
 w("pages-fn/functions/api/hello.ts", `export const onRequest = () => new Response("ok");\n`);
 
+// ORM / 驱动：识别脚本只标注「需要核对」，不下可行性结论
+json("orm/package.json", {
+  name: "orm-fixture", scripts: { build: "next build" },
+  dependencies: { next: "^15.0.0", "@prisma/client": "^6.0.0", "drizzle-orm": "^0.36.0", "@neondatabase/serverless": "^0.10.0" },
+});
+w("orm/src/lib/db.ts", `import { neon } from "@neondatabase/serverless";\nimport { drizzle } from "drizzle-orm/neon-http";\nexport const db = drizzle(neon(process.env.DATABASE_URL!));\n`);
+
 // 多个 HTML 入口
 w("multi/site/index.html", `<!doctype html><html><body>site</body></html>\n`);
 w("multi/docs/index.html", `<!doctype html><html><body>docs</body></html>\n`);
@@ -159,6 +166,15 @@ assert("重依赖：fs + 长驻进程风险", heavy.risks.some((r) => /node:fs/.
 const next = detect(path.join(work, "next"));
 assert("Next：SSR -> Workers", next.project.framework === "nextjs" && next.project.kind === "ssr" && next.target.suggested === "workers", `${next.project.kind}/${next.target.suggested}`);
 assert("Next：静态资源风险", next.risks.some((r) => /vinext|OpenNext/.test(r)));
+
+const orm = detect(path.join(work, "orm"));
+assert("ORM：运行时依赖只标注待核对", orm.risks.some((r) => /运行时依赖需要核对/.test(r) && /prisma|drizzle/i.test(r)), orm.risks.join(" | "));
+assert("ORM：Neon HTTP 交互式事务风险", orm.risks.some((r) => /交互式事务/.test(r)), orm.risks.join(" | "));
+assert("ORM：不把待核对说成不可行", !orm.risks.some((r) => /无法部署|不支持部署/.test(r)));
+assert("验收模式：Vite→spa / Jekyll→ssg / Next→ssr / ORM→ssr",
+  vite.project.suggestedMode === "spa" && jekyll.project.suggestedMode === "ssg" && next.project.suggestedMode === "ssr" && orm.project.suggestedMode === "ssr",
+  `${vite.project.suggestedMode}/${jekyll.project.suggestedMode}/${next.project.suggestedMode}/${orm.project.suggestedMode}`);
+assert("重依赖：原生 SQLite 单独提示", heavy.risks.some((r) => /原生 SQLite/.test(r)), heavy.risks.join(" | "));
 
 const mono = detect(path.join(work, "mono"));
 assert("Monorepo：识别出两个子应用", mono.project.monorepo === true && mono.project.workspaces.length === 2, JSON.stringify(mono.project.workspaces));
@@ -210,6 +226,10 @@ for (let i = 0; i < 60; i++) w(`nested/assets/js/chunk-${i}.js`, `export const n
 const buildNested = checkBuild(nested, "static");
 assert("嵌套产物：递归统计文件", buildNested.json.summary.files >= 61 && buildNested.code === 0, `files=${buildNested.json.summary.files}`);
 assert("嵌套产物：资源路径能解析", buildNested.json.checks.some((c) => c.id === "assets" && c.status === "pass"));
+
+const ssrBuild = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--mode", "ssr", "--json"], { encoding: "utf8" });
+const ssrBuildJ = JSON.parse(ssrBuild.stdout);
+assert("产物：ssr 不需要 --dir 且明确跳过", ssrBuild.status === 0 && ssrBuildJ.mode === "ssr" && ssrBuildJ.checks.some((c) => c.id === "mode-ssr" && c.status === "skip"), `exit=${ssrBuild.status}`);
 
 // ---------------------------------------------------------------- 验收（真实 HTTP）
 let staticBase = "";
@@ -286,6 +306,20 @@ const backupServer = http.createServer((req, res) => {
   res.end();
 });
 
+// SSR：首页有服务端渲染的真实文本，另有一个 JSON 接口和一个非 JSON 接口
+const ssrServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  if (p === "/api/health") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"ok":true}`); return; }
+  if (p === "/api/broken") { res.writeHead(200, { "content-type": "text/plain" }); res.end("not json"); return; }
+  if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
+  if (p === "/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", server: "local-ssr" });
+    res.end(`<!doctype html><html><head><title>Local SSR</title></head><body><main>${"服务端渲染的真实内容 ".repeat(30)}</main><script>console.log('client')</script></body></html>`);
+    return;
+  }
+  res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
+});
+
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
 const subSeen = [];
 const subServer = http.createServer((req, res) => {
@@ -303,7 +337,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -313,6 +347,7 @@ const corsUrl = `http://127.0.0.1:${corsServer.address().port}`;
 const badCorsUrl = `http://127.0.0.1:${badCorsServer.address().port}`;
 const dupUrl = `http://127.0.0.1:${dupCanonicalServer.address().port}`;
 const backupUrl = `http://127.0.0.1:${backupServer.address().port}/`;
+const ssrUrl = `http://127.0.0.1:${ssrServer.address().port}`;
 
 const v1 = await runVerify(["--url", staticBase, "--mode", "static", "--json"]);
 const v1j = JSON.parse(v1.out);
@@ -368,7 +403,81 @@ const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup",
 const v8j = JSON.parse(v8.out);
 assert("验收：拒绝 301 备用站", v8.code === 1 && v8j.checks.some((c) => c.id === "backup" && c.status === "fail"), "备用站跳到主站");
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer]) srv.close();
+// ---------------------------------------------------------------- SSR / API 验收
+const vSsr = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":true}', "--json"]);
+const vSsrJ = JSON.parse(vSsr.out);
+assert("验收：ssr 未知路径 404 通过", vSsrJ.checks.some((c) => c.id === "404" && c.status === "pass"), JSON.stringify(vSsrJ.checks.find((c) => c.id === "404")));
+assert("验收：ssr 服务端渲染内容有文本", vSsrJ.checks.some((c) => c.id === "ssr-html" && c.status === "pass"), JSON.stringify(vSsrJ.checks.find((c) => c.id === "ssr-html")));
+assert("验收：ssr 记录单次 TTFB", vSsrJ.checks.some((c) => c.id === "ttfb" && typeof c.ms === "number"), "单次采样，不是性能结论");
+assert("验收：--api 状态 + JSON + 期望内容", vSsrJ.checks.some((c) => c.id === "api" && c.status === "pass" && c.path === "/api/health"), JSON.stringify(vSsrJ.checks.filter((c) => c.id === "api")));
+
+const vApiBad = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/broken", "--json"]);
+const vApiBadJ = JSON.parse(vApiBad.out);
+assert("验收：--api 非 JSON 响应判失败", vApiBad.code === 1 && vApiBadJ.checks.some((c) => c.id === "api" && c.status === "fail"), JSON.stringify(vApiBadJ.checks.find((c) => c.id === "api")));
+
+const vApiMiss = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":false}', "--json"]);
+const vApiMissJ = JSON.parse(vApiMiss.out);
+assert("验收：--expect-json 不匹配判失败", vApiMiss.code === 1 && vApiMissJ.checks.some((c) => c.id === "api" && c.status === "fail"));
+
+const vApiOrphan = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--expect-json", '{"ok":true}', "--json"]);
+const vApiOrphanJ = JSON.parse(vApiOrphan.out);
+assert("验收：--expect-json 缺 --api 报警告", vApiOrphanJ.checks.some((c) => c.id === "api" && c.status === "warn"));
+
+const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
+const vSsr200J = JSON.parse(vSsr200.out);
+assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
+
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer]) srv.close();
+
+// ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
+const probeDir = path.join(work, "probe-cwd");
+const probeBin = path.join(probeDir, "node_modules", ".bin");
+fs.mkdirSync(probeBin, { recursive: true });
+const fakeWrangler = [
+  "const a = process.argv.slice(2);",
+  'if (a.includes("--version")) { console.log("4.0.0-fake"); process.exit(0); }',
+  'if (a[0] === "whoami" && a.includes("--json")) { console.error("Unknown argument: json"); process.exit(1); }',
+  'if (a[0] === "whoami") {',
+  '  if (process.env.CF_FAKE_NOT_LOGGED) { console.log("You are not logged in. Please run npx wrangler login."); process.exit(0); }',
+  '  console.log("You are logged in with an OAuth Token, associated with the email probe@example.com!");',
+  '  console.log("| Account Name | Account ID |");',
+  '  console.log("| probe | abcdef0123456789abcdef0123456789 |");',
+  '  process.exit(0);',
+  "}",
+  "process.exit(1);",
+].join("\n");
+fs.writeFileSync(path.join(probeBin, "fake-wrangler.mjs"), fakeWrangler);
+if (process.platform === "win32") {
+  fs.writeFileSync(path.join(probeBin, "wrangler.cmd"), `@echo off\r\nnode "%~dp0fake-wrangler.mjs" %*\r\n`);
+} else {
+  fs.writeFileSync(path.join(probeBin, "wrangler"), `#!/usr/bin/env node\n${fakeWrangler}`);
+  fs.chmodSync(path.join(probeBin, "wrangler"), 0o755);
+}
+const runProbe = (extraEnv = {}) => {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/probe.mjs"), "--json", "--timeout", "3000"], {
+    encoding: "utf8", cwd: probeDir, timeout: 40000,
+    env: { ...process.env, CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "", ...extraEnv },
+  });
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch { /* 交给断言报告原始输出 */ }
+  return { code: r.status, json: parsed, out: r.stdout, err: r.stderr };
+};
+const pOk = runProbe();
+const pAuth = pOk.json?.checks?.find((c) => c.id === "auth");
+assert("探针：whoami --json 不被支持时不误判未登录", pAuth?.status === "pass", pAuth ? JSON.stringify(pAuth) : `out=${pOk.out.slice(0, 200)} err=${pOk.err.slice(0, 200)}`);
+assert("探针：从纯文本提取 Account ID", pOk.json?.checks?.some((c) => c.id === "account-id" && c.status === "pass" && c.accountId === "abcdef0123456789abcdef0123456789"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "account-id")));
+assert("探针：wrangler 版本探测通过", pOk.json?.checks?.some((c) => c.id === "wrangler" && c.status === "pass"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "wrangler")));
+assert("探针：OAuth 登录态如实跳过 Token 权限检查", pOk.json?.checks?.some((c) => c.id === "api-read" && c.status === "skip"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "api-read")));
+const pNo = runProbe({ CF_FAKE_NOT_LOGGED: "1" });
+assert("探针：文本明确未登录时判 blocked", pNo.json?.checks?.some((c) => c.id === "auth" && c.status === "fail") && pNo.json?.status === "blocked" && pNo.code === 2, `status=${pNo.json?.status} code=${pNo.code}`);
+
+// ---------------------------------------------------------------- 预检退出码
+const envRun = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--json"], { encoding: "utf8", timeout: 40000 });
+const envJ = JSON.parse(envRun.stdout);
+const expectedCode = !envJ.summary.canBuild ? 2 : envJ.summary.canDeploy ? 0 : 1;
+assert("预检：退出码与可构建/可部署结论一致", envRun.status === expectedCode, `code=${envRun.status} canBuild=${envJ.summary.canBuild} canDeploy=${envJ.summary.canDeploy}`);
+const envBuildOnly = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--build-only", "--json"], { encoding: "utf8", timeout: 40000 });
+assert("预检：--build-only 只按可构建判定", envBuildOnly.status === (envJ.summary.canBuild ? 0 : 2), `code=${envBuildOnly.status}`);
 
 // ---------------------------------------------------------------- 技能结构
 const skillCheck = spawnSync(process.execPath, [path.join(here, "check-skill.mjs")], { encoding: "utf8" });

@@ -11,6 +11,9 @@
   - 升级 Workers Paid（$5/月/账号）
   - 使用 R2（首次要在控制台走一次 checkout，免费额度也需开通）
   - 超出免费额度后继续使用计量产品
+  - 使用 Containers（必须 Workers Paid，且本地要有 Docker 构建镜像）
+
+查当前套餐：控制台 `Manage Account → Billing → Subscriptions`。查 R2 是否开通：`npx wrangler r2 bucket list`，返回权限或订阅错误即未开通。
 
 检查是否已登录：
 
@@ -88,6 +91,7 @@ export CLOUDFLARE_API_TOKEN="..."
 | Wrangler | 项目内安装或用 `npx wrangler` | `npx wrangler --version` |
 | Git | 任意较新版本 | `git --version` |
 | GitHub CLI | 可选，仓库自动化才需要 | `gh --version` / `gh auth status` |
+| Docker | 只有用 Containers | `docker info`；没有就直接排除该方案 |
 
 Wrangler 的系统要求（官方）：
 
@@ -130,6 +134,8 @@ npx wrangler --version
 | 没 Token / Account ID | 给创建路径和权限表，停止 CI 部署 |
 | 没域名 | 先部署到 `pages.dev` / `workers.dev`，不要阻塞 |
 | 没 R2 订阅 | 如果项目不需要 R2，跳过；需要就先开通 |
+| 免费计划却要用 Containers | 明确说明必须 Workers Paid，给「升级」和「换方案」两个选项 |
+| 没 Docker 却要 Containers | 不要尝试本地构建镜像，直接换方案 |
 | 没 Git 集成权限 | 用 Direct Upload / `wrangler deploy` 先完成预览，再让管理员接 Git |
 
 ## 来源

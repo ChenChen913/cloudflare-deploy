@@ -87,6 +87,18 @@ Pages 付费档要启用 100,000 文件，需在项目设置里加 `PAGES_WRANGL
 
 静态资源请求在两个产品上都不计费。
 
+### 套餐与成本档（选型时就要给）
+
+| 方案 | 套餐要求 | 成本档 | 备注 |
+|---|---|---|---|
+| Pages 静态 / Workers 静态资源 | 免费 | $0 | 多数静态站到这一步就够 |
+| Workers + D1 / KV / R2 | 免费额度起 | $0 起，超额按量 | R2 首次使用要走一次 checkout |
+| Workers Paid | 付费订阅 | $5/月 起 | 更高 CPU / 子请求额度 |
+| Containers | **必须 Workers Paid** | $5/月 起 + 用量 | 免费计划不可用；本地还需 Docker 构建镜像 |
+| Hyperdrive | 查现行定价页 | 按量 | 加速外部 Postgres，不等于托管 Postgres |
+
+**Cloudflare 没有托管 Postgres**：D1 是 SQLite（Workers binding），外部 PG 要么保留外部服务，要么换数据库。运行时兼容性、ORM × 驱动组合、构建环境与止损线见 `references/runtime-compat.md`。
+
 ### 存储免费额度
 
 | 产品 | 免费额度 | 备注 |
@@ -116,6 +128,7 @@ Pages 的 Direct Upload 和 Workers 的 CLI 可以和现有 Git 流程共存，�
 出现以下任一情况，要明确说“不适合”，并给替代方案：
 
 - 依赖 Workers 没有对应实现的 Node 原生模块，且无法替换。
+- 运行时硬冲突（WASM 运行时动态编译、ORM 打包链路、适配器版本不匹配）——先查 `references/runtime-compat.md`，不要靠反复构建去试。
 - 需要持久化本地文件系统或长驻后台进程。
 - 数据库不能迁 D1/Hyperdrive，且外部数据库延迟不可接受。
 - 域名不能迁 NS，而目标是 Workers。

@@ -3,12 +3,13 @@
  * check-build.mjs — 部署前检查静态构建产物。
  *
  * 用法：
- *   node scripts/check-build.mjs --dir dist [--mode static|spa|ssg] [--json]
+ *   node scripts/check-build.mjs --dir dist [--mode static|spa|ssg|ssr] [--json]
  *
  * 模式决定 404 的判定，必须和 verify-deployment.mjs 用同一个值：
  *   static  预渲染的多页站，未知路径应当 404
  *   ssg     生成式静态站（Hugo/Jekyll/Astro 等），判定同 static
  *   spa     客户端路由，未知路径应回退到 app shell，不要求 404.html
+ *   ssr     服务端渲染，没有可上传的静态产物目录，本脚本只报告「不适用」
  *
  * 只读。检查 Pages/Workers 静态资源限制、404 行为、_headers/_redirects 位置，
  * 以及首页引用的同源资源是否存在。
@@ -26,22 +27,37 @@ const getArg = (name) => {
 
 // --spa 是 --mode spa 的旧写法，保留兼容。
 const modeArg = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
-const MODES = ["static", "spa", "ssg"];
+const MODES = ["static", "spa", "ssg", "ssr"];
 const dirArg = getArg("--dir");
 
-if (!dirArg) {
-  console.error("用法：node scripts/check-build.mjs --dir <输出目录> [--mode static|spa|ssg] [--json]");
-  process.exit(2);
-}
 if (!MODES.includes(modeArg)) {
   console.error(`未知模式：${modeArg}；只支持 ${MODES.join(" / ")}`);
   process.exit(2);
 }
 
 const mode = modeArg;
-const dir = path.resolve(dirArg);
+const dir = dirArg ? path.resolve(dirArg) : null;
 const checks = [];
 const push = (id, status, detail, extra = {}) => checks.push({ id, status, detail, ...extra });
+
+// SSR 没有「可上传的静态产物目录」，文件数/404 检查在这里没有意义。
+if (mode === "ssr") {
+  const result = {
+    schemaVersion: 2,
+    dir,
+    mode,
+    summary: { files: 0, totalBytes: 0, totalMiB: 0, assetsChecked: 0, blocking: 0, warnings: 0 },
+    checks: [{ id: "mode-ssr", status: "skip", detail: "SSR 模式没有静态产物目录；跳过文件数/404 检查，改用 verify-deployment.mjs --mode ssr 验收首页、API 和服务端渲染内容" }],
+  };
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else console.log("[跳过] SSR 模式：没有静态产物目录；用 verify-deployment.mjs --mode ssr 验收页面和 API");
+  process.exit(0);
+}
+
+if (!dirArg) {
+  console.error("用法：node scripts/check-build.mjs --dir <输出目录> [--mode static|spa|ssg|ssr] [--json]");
+  process.exit(2);
+}
 
 if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
   console.log(JSON.stringify({ schemaVersion: 2, dir, mode, checks: [{ id: "exists", status: "fail", detail: "输出目录不存在" }] }, null, 2));
