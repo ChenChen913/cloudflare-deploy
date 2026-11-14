@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：167/167 通过（`node tests/run-tests.mjs`）。
+- 本地测试：198/198 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -23,7 +23,7 @@
 3. **计划**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。
 4. **构建检查**：部署前按站点模式、套餐和部署目标检查产物。默认 Free 20,000 文件；`--plan paid --target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，`--plan paid --target workers` 要 Wrangler >= 4.34.0，才按 100,000。目标未知、版本非法或证据不足一律退回 20,000 并给 `warn`；`ssr` 明确报告「不适用」。
 5. **部署**：先到 `pages.dev` / `workers.dev` 或预览分支。
-6. **验收**：首页、按模式判定的 404/回退、资源（3xx 会跟随到最终 2xx，跨主机记录并告警）、响应头、canonical/noindex、CORS（预检按 Fetch 规范处理 `*` / 凭据 / 安全列表方法）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
+6. **验收**：首页（只自动跟随同源重定向；跨源、协议变化、非 HTTP(S) 目标不请求，只记录并分类）、按模式判定的 404/回退、资源（3xx 跟随同源到最终 2xx，跨主机记录并告警）、响应头、canonical/noindex、CORS（预检按 Fetch 规范处理 `*` / 凭据 / 安全列表方法；简单请求的凭据模式只由 `--cors-credentials` 声明）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
 ## 目录
@@ -50,6 +50,7 @@ cloudflare-deploy/
 ├── scripts/
 │   ├── probe.mjs             # 第 0 步：链路探针
 │   ├── deploy-verdict.mjs    # 探针 --deploy 的可测判定逻辑
+│   ├── redirect-policy.mjs  # 重定向同源判定（纯函数，主站与资源共用）
 │   ├── detect-project.mjs
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -130,7 +131,9 @@ node scripts/verify-deployment.mjs --url https://site.example.com --mode static 
 
 `check-build.mjs` 默认按 Free **20,000** 文件检查。Paid **100,000** 的启用条件按部署目标分流：`--target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`（Pages 专属变量）；`--target workers` 要完整版本 **Wrangler >= 4.34.0**（官方 Workers Limits），不需要 Pages 变量。版本按点分数字比较（`4.9.0 < 4.34.0`），`4.x` 等非法版本视为未确认；不传 `--target`、证据不足都退回 20,000 并给 `warn`，结果里写明目标、生效上限与原因。
 
-CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；按 Fetch 规范，`*` 只在无凭据请求里作通配，`GET/HEAD/POST` 是 CORS-safelisted method，`Authorization` 不被 `*` 覆盖，方法名大小写敏感。资源 3xx 会跟随同主机最多 5 跳并验最终 2xx，跨主机只记录并告警。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
+CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；按 Fetch 规范，`*` 只在无凭据请求里作通配，`GET/HEAD/POST` 是 CORS-safelisted method，`Authorization` 不被 `*` 覆盖，方法名大小写敏感。**`--cors-credentials` 是用户声明的预期请求模式**：脚本只发 GET / HEAD / OPTIONS，不会真的带浏览器 Cookie 或身份凭据；响应里出现 `Access-Control-Allow-Credentials: true` 也不会把无凭据请求变成带凭据请求。只有显式声明带凭据时，才要求 `ACAO` 精确匹配 Origin 且必须有 `ACAC: true`。
+
+主站与资源都只自动跟随**同源**（协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）重定向，最多 5 跳并要求最终 2xx；跨源、协议变化（含 HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失或无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网或云元数据地址。主站结果用 `redirectOutcome` 区分同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持。资源只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度判断），`probed` / `warnings` / `redirects` 三处一致。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
 
 SSR / 全栈的 HTTP 基线：
 
@@ -159,13 +162,13 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 167 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、资源重定向、JSON 结构、链路探针
+node tests/run-tests.mjs        # 198 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检与简单请求、主站/资源重定向、JSON 结构、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 ```
 
-测试会创建 12 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用 11 台本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、301 假备用站、`--api` 的 JSON 结构与期望值比较。
+测试会创建 12 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用 13 台本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、301 假备用站、`--api` 的 JSON 结构与期望值比较。
 
-五组专项回归：套餐按目标分流与完整版本比较（Pages 条件齐全 / 缺环境变量、Workers 4.34.0 / 4.33.0 / Free、目标未知、非法版本号、纯函数文件数边界，不真造两万个文件）、CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、204 但无 ACAO、未提供的检查不推断、通配符 × 凭据、Authorization 非通配、安全列表方法、方法大小写）、资源重定向矩阵（直接 200、301→200、302→404、跨主机、循环、404、HEAD 405→GET、缺 Location）、`--expect-json` 结构用例（键顺序、字段缺失、类型不符、嵌套数组、无效 JSON）。本地假 wrangler 验证链路探针在 `whoami --json` 调用失败时不会误判未登录，并覆盖 `--deploy` 的无 URL / 清理失败 / 部署失败；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
+专项回归包括：套餐按目标分流与完整版本比较（Pages 条件齐全 / 缺环境变量、Workers 4.34.0 / 4.33.0 / Free、目标未知、非法版本号、纯函数文件数边界，不真造两万个文件）、CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、204 但无 ACAO、未提供的检查不推断、通配符 × 凭据、Authorization 非通配、安全列表方法、方法大小写）、CORS 简单请求凭据矩阵（`ACAO=*` × ACAC 有无 × 是否声明 `--cors-credentials`）、主站重定向矩阵（同源 301→200 / 302→404、跨主机、127.0.0.1、HTTP→HTTPS、循环、无效 Location、非 HTTP(S) 协议、备用站跳主站）、重定向策略纯函数（含 HTTPS→HTTP）、资源重定向与汇总一致性（直接 200 / 同主机 301 / 跨主机 302 / 循环 / 缺 Location / 协议拒绝，`probed` / `warnings` / `redirects` 对齐）、`--expect-json` 结构用例（键顺序、字段缺失、类型不符、嵌套数组、无效 JSON）。跨源目标用另一台本地 HTTP 服务器记录收到的请求路径，用来证明脚本**没有跟随**，不访问真实内网地址或云厂商元数据地址。本地假 wrangler 验证链路探针在 `whoami --json` 调用失败时不会误判未登录，并覆盖 `--deploy` 的无 URL / 清理失败 / 部署失败；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
 
 这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为。
 

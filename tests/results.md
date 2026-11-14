@@ -15,7 +15,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 167 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、资源重定向、JSON 结构、链路探针
+node tests/run-tests.mjs     # 198 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检与简单请求、主站/资源重定向、JSON 结构、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -32,8 +32,8 @@ python <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     167/167 通过
-node tests/check-skill.mjs   通过（SKILL.md 320 行，引用路径 25 个，无绝对路径）
+node tests/run-tests.mjs     198/198 通过
+node tests/check-skill.mjs   通过（SKILL.md 321 行，引用路径 26 个，无绝对路径）
 quick_validate.py            Skill is valid!
 ```
 
@@ -93,7 +93,12 @@ quick_validate.py            Skill is valid!
 | SPA 服务器 + `--mode ssr` | 未知路径 200 → 只 `warn`，不判失败 |
 | CORS 预检矩阵（10 例） | 允许 Origin + 方法/头/凭据齐全 → `pass`；拒绝 Origin、缺 Allow-Methods、缺实际方法、缺 Allow-Headers、缺实际请求头、缺 ACAC、`*` 配凭据、204 但无 ACAO → `fail`；未提供参数时 3 项列入 `notChecked` |
 | CORS 通配符 / 凭据 / 安全列表方法（12 例） | 无凭据 + `Allow-Methods: *` → `pass`；带凭据 + `*` → `fail`（`*` 是字面方法名）；无凭据 + `Allow-Headers: *` 覆盖 `content-type` 但不覆盖 `Authorization` → 后者 `fail`；带凭据显式方法与头 → `pass`；`GET/HEAD/POST` 缺 Allow-Methods 仍 `pass`；`put` 规范化为 `PUT` 后匹配；服务器回小写 `delete` 与 `DELETE` 不匹配 → `fail`；带凭据 + `ACAO: *` 的简单请求 → `fail`，无凭据 → `pass` |
-| 资源重定向矩阵（8 例） | 直接 200 → `pass`（chain 1 跳、`finalStatus=200`）；301 同主机跟随到 200 → `pass` 并记录 `redirects`；302 后 404 / 直接 404 / 缺 `Location` / 循环超过 5 跳 → `fail`；跨主机 → `warn` 且记录 `finalUrl` 与 `crossHost`；HEAD 405 → GET 复核仍 `pass` |
+| 资源重定向矩阵（9 例） | 直接 200 → `pass`（chain 1 跳、`finalStatus=200`）；301 同主机跟随到 200 → `pass` 并记录 `redirects`；302 后 404 / 直接 404 / 缺 `Location` / 循环超过 5 跳 / 非 HTTP(S) 目标 → `fail`；跨主机 → `warn` 且记录 `finalUrl` 与 `crossHost`；HEAD 405 → GET 复核仍 `pass` |
+| CORS 简单请求凭据矩阵（6 例） | 无凭据 + `ACAO=*` + 有/无 `ACAC` → `pass`；带凭据 + `ACAO=*` → `fail`；带凭据 + 精确 ACAO + `ACAC=true` → `pass`；带凭据 + 精确 ACAO + 缺 ACAC → `fail`；结果带 `credentialsMode`，声明只来自用户 |
+| 资源汇总一致性（5 例） | 直接 200 不进 `redirects`；同主机 301 进 `redirects`；跨主机 302 同时进 `redirects` 与 `warnings`，`probed` / `warnings` / `redirects` 三处字段一致；循环进失败记录且仍记为发生过重定向；缺 Location 进失败记录且不进 `redirects` |
+| 重定向策略纯函数（8 例） | 相对 Location 同源可跟随；HTTP→HTTPS、HTTPS→HTTP 判跨源并标 `protocolChanged`；端口 / 主机 / `127.0.0.1` 变化判跨源；非 HTTP(S) 协议直接拒绝；空 / 无法解析 Location；始终约束到起始源 |
+| 主站重定向矩阵（9 例） | 同源 301→200 → `pass` + `same-origin-verified`；同源 302→404 → `fail` + `same-origin-final-failed`；跨主机 / `127.0.0.1` / HTTP→HTTPS 都 `warn` + `cross-origin-unverified` 且目标服务器零请求；循环 / 无效 Location / 非 HTTP(S) 各自单独分类；跨源目标返回 200 不会给原站点判 `pass` |
+| 备用站跳主站（2 例） | 只解析 `hops[].location` 识别跳主站并判 `fail`；跨源目标服务器全程未收到 landing 请求 |
 | `--expect-json` 结构化比较（7 例） | 键顺序与空白不影响；字段缺失、类型不符、数组长度不符、嵌套数组子集、无效预期 JSON、非法响应 JSON 都给出明确原因 |
 
 ### 部署探针（纯逻辑 + 本地假 wrangler，不接触真实账号）
@@ -120,12 +125,13 @@ quick_validate.py            Skill is valid!
 - 每个关键字段带 `confirmed` / `inferred` / `unknown`，推测不会被写成事实。
 - 部署目标只给候选；只有现有 Wrangler 配置或硬阻断才会给出高置信度结论。
 - 构建检查和验收用同一个 `--mode`，404 结论不会互相矛盾。
-- 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical、假备用站，以及资源 3xx 的最终状态。
+- 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical、假备用站，以及主站 / 资源 3xx 的同源与跨源结果。跨源目标用另一台本地服务器记录请求路径，实测全程零请求。
 - `ssr` 模式不会把静态产物检查套到 SSR 项目上；未知路径返回 200 只警告，不误判为失败。
 - `--api` 能区分 JSON / 非 JSON / 期望内容不匹配；`--expect-json` 缺 `--api` 会警告。期望值按 JSON 子集比较，字段顺序与空白不影响结论。
 - 文件数上限按「套餐 + 部署目标」判定：Pages 需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 需完整版本 Wrangler >= 4.34.0；目标未知、非法版本或证据不足一律退回 Free 20,000 并给 `warn`。
-- 资源 3xx 不再算通过：同主机最多跟随 5 跳并验最终 2xx，跨主机记录最终地址并 `warn`，循环 / 缺 `Location` / 最终 4xx/5xx 判 `fail`；报告保留 `probed[].chain` / `finalUrl` / `finalStatus`。
-- CORS 预检不把 `OPTIONS` 2xx 当通过；只断言用户显式提供的实际方法 / 请求头 / 凭据，其余写进 `notChecked`。按 Fetch 规范处理 `*` × 凭据、`Authorization` 非通配、`GET/HEAD/POST` 安全列表方法与方法名大小写。
+- 资源 3xx 不再算通过：同源最多跟随 5 跳并验最终 2xx，跨主机记录最终地址并 `warn`，循环 / 缺 `Location` / 非 HTTP(S) 目标 / 最终 4xx/5xx 判 `fail`；只要收到带有效 Location 的 3xx 就进 `redirects`，`probed` / `warnings` / `redirects` 三处一致，报告保留 `chain` / `finalUrl` / `finalStatus` / `crossHost`。
+- 主站只自动跟随同源（协议 + 主机 + 端口）重定向；跨源、协议变化（含 HTTP↔HTTPS、HTTPS→HTTP）、非 HTTP(S)、无效 Location、循环都用 `redirectOutcome` 单独分类，跨源标 `warn` + `verified=false`，不请求目标，别的站点返回 200 不会给原站点判 `pass`。
+- CORS 预检不把 `OPTIONS` 2xx 当通过；只断言用户显式提供的实际方法 / 请求头 / 凭据，其余写进 `notChecked`。按 Fetch 规范处理 `*` × 凭据、`Authorization` 非通配、`GET/HEAD/POST` 安全列表方法与方法名大小写。简单请求的凭据模式只由 `--cors-credentials` 声明，响应里的 `ACAC: true` 不会把无凭据请求判成带凭据。
 - 部署探针把「命令成功」和「线上验证成功」分开，清理失败单独告警。
 - 链路探针在 `whoami --json` 调用失败时仍判定为已登录（该 flag 是官方能力，纯文本判定只是跨版本更稳），能从纯文本提取 Account ID；明确未登录时返回 `blocked` + 退出码 2。
 - `check-env.mjs` 的退出码与 `canBuild` / `canDeploy` 一致，`--build-only` 只按可构建判定。
@@ -157,6 +163,9 @@ quick_validate.py            Skill is valid!
 9. **Paid 文件数放宽把 Pages 专属条件套到了 Workers。** 旧 `resolvePlan()` 一律要求 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，且只取主版本号（`4`），无法比较 `4.34.0`。官方 Workers Limits 要求的是 **Wrangler >= 4.34.0**、不需要 Pages 变量。改为按 `--target` 分流 + 点分数字完整比较，目标未知、非法版本、只给主版本都退回 Free。
 10. **CORS `hasToken()` 见 `*` 就判通过。** 带凭据时 `Allow-Methods: *` / `Allow-Headers: *` 是字面值，`Authorization` / `Range` 是 non-wildcard header（`*` 永不覆盖），`GET/HEAD/POST` 是 CORS-safelisted method。改为按凭据与方法规范分别判定，简单请求的 `ACAO` 也改用 `--cors-credentials` 判定。原有两个用 `POST` 断言「缺 Allow-Methods 判失败」的测试本身不符合规范，改用 `DELETE` 保留场景，并新增 safelisted 通过用例。
 11. **资源 3xx 被默默当成正常。** 旧的「请求失败或 `status >= 400` 才判坏」在 `redirect: "manual"` 下把 301/302/307/308 全算通过。改为独立跟随（同主机最多 5 跳）、验证最终 2xx，报告保留重定向链与最终状态；跨主机 `warn`、循环与最终 4xx/5xx `fail`。
+12. **主站重定向链会被 3xx 带到任意地址（SSRF 面）。** 旧 `chain()` 无条件解析 Location 并继续请求：`127.0.0.1`、内网 IP、云元数据端点、协议变化、非 HTTP(S) 协议都可能被访问；跨站最终 200 还会让 `root` 判 `pass`；非法 `Location` 会让 `new URL` 抛异常。抽出零依赖纯函数 `scripts/redirect-policy.mjs`，按 `URL.origin`（协议 + 主机 + 端口）判定同源，主站与资源共用；非同源只记录 Location / 状态码 / 链，不请求目标。`root` 用 `redirectOutcome` 分五类，跨源 `warn` + `verified=false`；`backup` 只解析 `hops[].location` 识别跳主站，不为识别而请求主站。
+13. **CORS 简单请求把 ACAC 响应头当成请求凭据模式。** 旧判断 `acao === "*" && (acac === "true" || corsCredentials)` 让「无凭据 + ACAO=* + ACAC=true」误判 `fail`，而「带凭据 + 精确 ACAO + 缺 ACAC」反而通过。改为只按 `--cors-credentials` 声明判定：声明带凭据才要求精确 ACAO + `ACAC: true`；预检断言逻辑未改。
+14. **跨主机资源重定向没进 `redirects`。** `redirected: chainHops.length > 1` 在跨主机提前返回时链只有 1 跳，导致 `redirected=false`，汇总漏报。改为「3xx + 可解析 Location 即记为重定向」，`redirects` 收录同源与跨源，`probed` / `warnings` / `redirects` 统一同一组字段（原始 / 最终 URL、最终状态、跨主机标记、完整链）。
 
 ## CLI / JSON 兼容性
 
@@ -175,3 +184,7 @@ quick_validate.py            Skill is valid!
 | `verify-deployment.mjs` 的 `assets` 检查新增 `warnings` / `redirects`，`probed[]` 新增 `chain` / `finalUrl` / `finalStatus` / `crossHost` / `level` / `reason` | 只增字段，但状态语义变化 | 3xx 不再直接算通过：同主机最终 2xx 仍 `pass`、跨主机变 `warn`、最终 4xx/5xx 与循环变 `fail`。`checked` / `total` / `limited` / `broken` / `probed` 保留 |
 | `cors-preflight` 的允许判定按 Fetch 规范收紧 | **行为变化（必须）** | `GET/HEAD/POST` 缺 `Allow-Methods` 现在通过（CORS-safelisted）；带凭据的 `*` 现在失败；`Authorization` 不再被 `*` 覆盖；方法名大小写敏感。`issues` 里写明具体哪个响应头不符 |
 | `cors` 检查新增 `credentials` 字段 | 只增字段 | 带 `--cors-credentials` 时 `ACAO: *` 判 `fail`，不再只看服务器有没有回 ACAC |
+| `root` 检查新增 `redirectOutcome` / `verified` / `redirectTarget` / `httpStatus`，`hops[]` 新增 `redirect` / `next` / `protocolChanged` | 只增字段，但状态语义变化 | 跨源重定向不再跟随、不再判 `pass`；检查状态仍放 `status`，HTTP 状态码改放 `httpStatus`（`status` 会被 `add()` 的核心字段覆盖，不能复用） |
+| `assets` 的 `broken` / `warnings` / `redirects` 新增 `redirected` / `crossHost` / `level` | 只增字段，但汇总语义变化 | 跨主机 3xx 现在一定进 `redirects`；`probed[].redirected` 不再由链长度推断 |
+| `cors` 检查新增 `credentialsMode` / `credentialsDeclaredByUser` | 只增字段 | **行为变化（必须）**：无凭据 + `ACAO=*` + `ACAC=true` 从 `fail` 变 `pass`；带凭据 + 精确 ACAO + 缺 ACAC 从 `pass` 变 `fail` |
+| `scripts/redirect-policy.mjs` | 新增内部纯函数模块（零第三方依赖） | 主站与资源共用同源判定；不新增 CLI 参数、不新增对外功能 |

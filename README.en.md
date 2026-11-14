@@ -11,7 +11,7 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 ## Status
 
 - Skill format validated (`quick_validate.py`): valid. Repository check `node tests/check-skill.mjs` also passes.
-- Local tests: 167/167 passing (`node tests/run-tests.mjs`).
+- Local tests: 198/198 passing (`node tests/run-tests.mjs`).
 - Real Cloudflare deployment: **not run in this automated test environment** (no account/token, Wrangler not installed). Migration and live observations from a separate real project are recorded in `references/migration-guide.md` (tagged "measured"), but that is historical evidence, not verification performed by these local tests. Local automation is not the same as account-level deployment verification. See `tests/results.md` for exactly what was and was not verified.
 
 ## What it does
@@ -23,7 +23,7 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 3. **Plans** the change, with explicit confirmation gates for DNS, custom domains, production secrets, databases, deletions, and irreversible config.
 4. **Builds and checks** the artifact against the site mode, plan, and deployment target. Free is 20,000 files by default; 100,000 requires `--plan paid --target pages` (Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`) or `--plan paid --target workers` (full Wrangler version >= 4.34.0). Unknown target, invalid versions, or missing evidence fall back to 20,000 with a `warn`; `ssr` reports "not applicable".
 5. **Deploys** to `pages.dev` / `workers.dev` or a preview branch.
-6. **Verifies** root status, mode-appropriate 404/fallback behavior, assets (3xx is followed to a final 2xx; cross-host redirects are recorded and warned), headers, canonical/noindex, CORS (preflight follows the Fetch spec for `*` / credentials / safelisted methods), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON structure.
+6. **Verifies** root status (only same-origin redirects are followed; cross-origin, protocol changes, and non-HTTP(S) targets are recorded and classified, never requested), mode-appropriate 404/fallback behavior, assets (3xx is followed to a final 2xx on the same origin; cross-host redirects are recorded and warned), headers, canonical/noindex, CORS (preflight follows the Fetch spec for `*` / credentials / safelisted methods; the simple-request credentials mode is declared only via `--cors-credentials`), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON structure.
 7. **Reports** every check as pass/fail/warn/unverified. It does not claim a test that was not run.
 
 ## Structure
@@ -50,6 +50,7 @@ cloudflare-deploy/
 ├── scripts/
 │   ├── probe.mjs             # Step 0: link probe
 │   ├── deploy-verdict.mjs    # testable verdict logic for probe --deploy
+│   ├── redirect-policy.mjs  # same-origin redirect policy (pure function, shared)
 │   ├── detect-project.mjs
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -130,7 +131,9 @@ node scripts/verify-deployment.mjs --url https://site.example.com --mode static 
 
 `check-build.mjs` defaults to the Free **20,000** file limit. The Paid **100,000** limit has different prerequisites per target: `--target pages` needs Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` (a Pages-only setting), while `--target workers` needs full Wrangler **>= 4.34.0** (official Workers Limits) and no Pages variable. Versions are compared numerically per segment (`4.9.0 < 4.34.0`); `4.x` and prerelease tags are treated as unverified. Omitting `--target` or any missing evidence falls back to 20,000 with a `warn`, and the result records the target, effective limit, and reason.
 
-CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; everything else is listed in `notChecked`. Per the Fetch spec, `*` is a wildcard only for requests without credentials, `GET`/`HEAD`/`POST` are CORS-safelisted methods, `Authorization` is never covered by `*`, and method names are case-sensitive. Asset 3xx responses follow up to 5 same-host hops and require a final 2xx; cross-host redirects are recorded and warned. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
+CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; everything else is listed in `notChecked`. Per the Fetch spec, `*` is a wildcard only for requests without credentials, `GET`/`HEAD`/`POST` are CORS-safelisted methods, `Authorization` is never covered by `*`, and method names are case-sensitive. **`--cors-credentials` declares the expected request mode**: the script only sends GET / HEAD / OPTIONS and never attaches browser cookies or identity credentials. An `Access-Control-Allow-Credentials: true` response header does not turn a credential-free request into a credentialed one. Only when credentials are explicitly declared does the check require an exact `ACAO` match plus `ACAC: true`.
+
+Both the root chain and asset probes follow only **same-origin** (scheme + host + port, see `scripts/redirect-policy.mjs`) redirects, up to 5 hops, and require a final 2xx. Cross-origin targets, protocol changes (including HTTP ↔ HTTPS), non-HTTP(S) schemes, and missing/unparseable `Location` are never requested — only the Location, status code, and redirect chain are recorded, so verification cannot be sent to `127.0.0.1`, an internal IP, or a cloud metadata endpoint. The root result uses `redirectOutcome` to distinguish same-origin verified, cross-origin target unverified, loop/hop limit, unparseable Location, and unsupported protocol. Any asset 3xx with a parseable `Location` is recorded in `redirects` (no longer inferred from chain length), keeping `probed` / `warnings` / `redirects` consistent. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
 
 HTTP baseline for SSR / full-stack:
 
@@ -159,13 +162,13 @@ node scripts/verify-deployment.mjs \
 ## Tests
 
 ```bash
-node tests/run-tests.mjs        # 167 checks: detection, plan/artifact limits, real HTTP, CORS preflight, asset redirects, JSON structure, link probe
+node tests/run-tests.mjs        # 198 checks: detection, plan/artifact limits, real HTTP, CORS preflight + simple requests, root/asset redirects, JSON structure, link probe
 node tests/check-skill.mjs      # structure check, no external tooling
 ```
 
-The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against eleven local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons.
+The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against thirteen local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons.
 
-Five regression groups cover: target-aware plan escalation with full version comparison (Pages complete / missing env var, Workers 4.34.0 / 4.33.0 / Free, unknown target, invalid versions, pure-function file-count boundaries without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method/header, bad credentials, 204 without ACAO, no inference for absent inputs, wildcard × credentials, Authorization non-wildcard, safelisted methods, method casing), an asset redirect matrix (direct 200, 301→200, 302→404, cross-host, loop, 404, HEAD 405→GET, missing Location), and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
+Regression groups cover: target-aware plan escalation with full version comparison (Pages complete / missing env var, Workers 4.34.0 / 4.33.0 / Free, unknown target, invalid versions, pure-function file-count boundaries without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method/header, bad credentials, 204 without ACAO, no inference for absent inputs, wildcard × credentials, Authorization non-wildcard, safelisted methods, method casing), a CORS simple-request credentials matrix (`ACAO=*` × ACAC present/absent × `--cors-credentials` declared or not), a root redirect matrix (same-origin 301→200 / 302→404, cross-host, 127.0.0.1, HTTP→HTTPS, loop, invalid Location, non-HTTP(S) scheme, backup redirecting to the main site), pure redirect-policy cases (including HTTPS→HTTP), asset redirect and aggregate consistency (direct 200, same-host 301, cross-host 302, loop, missing Location, protocol rejection, aligned `probed` / `warnings` / `redirects`), and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A second local HTTP server records every request path it receives, proving the verifier never follows cross-origin targets; no real internal IP or cloud metadata endpoint is contacted. A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
 
 These tests prove the scripts work. They do not prove account permissions, DNS, TLS, or platform behavior.
 

@@ -15,6 +15,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolvePlan, evaluateFileCount, parseVersion, compareVersions } from "../scripts/check-build.mjs";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
+import { classifyRedirect } from "../scripts/redirect-policy.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -385,8 +386,13 @@ const dupCanonicalServer = http.createServer((req, res) => {
 });
 
 let backupTarget = "";
+let crossTargetBase = "";
 const backupServer = http.createServer((req, res) => {
-  res.writeHead(301, { location: `${backupTarget}/` });
+  const p = new URL(req.url, "http://x").pathname;
+  // /to-main/ 用于验证「备用站跳到主站」：Location 指向另一台本地服务器上的
+  // /backup-landing，脚本若跟随就会在那台服务器的 hits 里留下记录。
+  const loc = p === "/to-main/" ? `${crossTargetBase}/backup-landing` : `${backupTarget}/`;
+  res.writeHead(301, { location: loc });
   res.end();
 });
 
@@ -427,6 +433,9 @@ const corsMatrixServer = http.createServer((req, res) => {
   if (p === "/no-cred") delete h["access-control-allow-credentials"];
   if (p === "/wildcard-cred") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
   if (p === "/no-acao") delete h["access-control-allow-origin"];
+  // 简单请求（非预检）的凭据矩阵：ACAO=* + ACAC=true / 精确 ACAO 但缺 ACAC。
+  if (p === "/simple-star-acac") { h["access-control-allow-origin"] = "*"; h["access-control-allow-credentials"] = "true"; }
+  if (p === "/simple-exact-no-acac") { h["access-control-allow-origin"] = req.headers.origin || ""; delete h["access-control-allow-credentials"]; }
   // 通配符 / 凭据 / 方法大小写 / 安全列表方法矩阵
   if (p === "/wildcard-method") h["access-control-allow-methods"] = "*";
   if (p === "/wildcard-header") h["access-control-allow-headers"] = "*";
@@ -453,6 +462,7 @@ const assetPages = {
   "/case/404/": "/a/404.css",
   "/case/head405/": "/a/head405.css",
   "/case/noloc/": "/a/noloc.css",
+  "/case/badproto/": "/a/badproto.css",
 };
 const assetRedirectServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
@@ -472,10 +482,45 @@ const assetRedirectServer = http.createServer((req, res) => {
   if (p === "/a/cross.css") { res.writeHead(302, { location: `${assetTargetBase}/final.css` }); res.end(); return; }
   if (p === "/a/loop.css") { res.writeHead(301, { location: "/a/loop.css" }); res.end(); return; }
   if (p === "/a/noloc.css") { res.writeHead(308, {}); res.end(); return; }
+  if (p === "/a/badproto.css") { res.writeHead(302, { location: "file:///etc/passwd" }); res.end(); return; }
   res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
 });
 const assetTargetServer = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "text/css" }); res.end("body{}");
+});
+
+// 主站重定向矩阵：全部是本地 HTTP 服务器。跨源目标（另一台本地服务器）会记录
+// 收到的路径；按策略脚本不应请求它，测试据此证明「不跟随」而不是靠文案猜。
+let rootRedirectBase = "";
+const rootRedirectHits = [];
+const crossTargetHits = [];
+const rootRedirectServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  rootRedirectHits.push(p);
+  if (p === "/final/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>final</title></head><body>final</body></html>`);
+    return;
+  }
+  if (p === "/case/same301/") { res.writeHead(301, { location: "/final/" }); res.end(); return; }
+  if (p === "/case/same302/") { res.writeHead(302, { location: "/gone/" }); res.end(); return; }
+  if (p === "/case/crosshost/") { res.writeHead(302, { location: `http://localhost:${new URL(crossTargetBase).port}/cross-landing` }); res.end(); return; }
+  if (p === "/case/loopback/") { res.writeHead(302, { location: `${crossTargetBase}/loop-landing` }); res.end(); return; }
+  if (p === "/case/proto-up/") { res.writeHead(302, { location: `https://127.0.0.1:${new URL(rootRedirectBase).port}/tls-landing` }); res.end(); return; }
+  if (p === "/case/loop/") { res.writeHead(302, { location: "/case/loop/" }); res.end(); return; }
+  if (p === "/case/badloc/") { res.writeHead(302, { location: "http://" }); res.end(); return; }
+  if (p === "/case/badproto/") { res.writeHead(302, { location: "file:///etc/passwd" }); res.end(); return; }
+  res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
+});
+const crossTargetServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  crossTargetHits.push(p);
+  if (p === "/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>cross target</title></head><body>cross target</body></html>`);
+    return;
+  }
+  res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
 });
 
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
@@ -495,7 +540,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -509,6 +554,8 @@ const ssrUrl = `http://127.0.0.1:${ssrServer.address().port}`;
 const corsMatrixUrl = `http://127.0.0.1:${corsMatrixServer.address().port}`;
 const assetRedirectBase = `http://127.0.0.1:${assetRedirectServer.address().port}`;
 assetTargetBase = `http://127.0.0.1:${assetTargetServer.address().port}`;
+rootRedirectBase = `http://127.0.0.1:${rootRedirectServer.address().port}`;
+crossTargetBase = `http://127.0.0.1:${crossTargetServer.address().port}`;
 
 const v1 = await runVerify(["--url", staticBase, "--mode", "static", "--json"]);
 const v1j = JSON.parse(v1.out);
@@ -617,6 +664,26 @@ assert("简单请求：带凭据 + ACAO=* 判失败", cAcaoWild.result.checks.so
 const cAcaoWildNoCred = await corsCase("/acao-wildcard");
 assert("简单请求：无凭据 + ACAO=* 仍允许", cAcaoWildNoCred.result.checks.some((c) => c.id === "cors" && c.status === "pass"), JSON.stringify(cAcaoWildNoCred.result.checks.find((c) => c.id === "cors")));
 
+// 简单请求的凭据模式由 --cors-credentials 声明，与响应里有没有 ACAC 无关。
+const simpleCase = async (p, extra = []) => {
+  const r = await runVerify([
+    "--url", staticBase, "--mode", "static", "--origin", "https://app.example.com",
+    "--cors-url", `${corsMatrixUrl}${p}`, ...extra, "--json",
+  ]);
+  return JSON.parse(r.out).checks.find((c) => c.id === "cors");
+};
+const sStarAcac = await simpleCase("/simple-star-acac");
+assert("简单请求：无凭据 + ACAO=* + ACAC=true 仍允许", sStarAcac?.status === "pass" && sStarAcac.acac === "true" && sStarAcac.credentials === false, JSON.stringify(sStarAcac));
+const sStarNoAcac = await simpleCase("/acao-wildcard");
+assert("简单请求：无凭据 + ACAO=* + 无 ACAC 仍允许", sStarNoAcac?.status === "pass" && !sStarNoAcac.acac, JSON.stringify(sStarNoAcac));
+const sCredStar = await simpleCase("/acao-wildcard", ["--cors-credentials"]);
+assert("简单请求：有凭据 + ACAO=* 判失败且要求精确 Origin", sCredStar?.status === "fail" && /必须精确匹配 Origin/.test(sCredStar.detail), JSON.stringify(sCredStar));
+const sCredOk = await simpleCase("/ok", ["--cors-credentials"]);
+assert("简单请求：有凭据 + 精确 ACAO + ACAC=true 通过", sCredOk?.status === "pass" && sCredOk.acao === "https://app.example.com" && sCredOk.acac === "true", JSON.stringify(sCredOk));
+const sCredNoAcac = await simpleCase("/simple-exact-no-acac", ["--cors-credentials"]);
+assert("简单请求：有凭据 + 精确 ACAO + 缺 ACAC 判失败", sCredNoAcac?.status === "fail" && /Allow-Credentials/.test(sCredNoAcac.detail), JSON.stringify(sCredNoAcac));
+assert("简单请求：--cors-credentials 是声明的预期模式，不是脚本真的发了 Cookie", sStarAcac?.credentialsDeclaredByUser === true && sStarAcac.credentialsMode === "declared-no-credentials" && sCredOk?.credentialsMode === "declared-with-credentials");
+
 const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
 assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((c) => c.id === "canonical" && c.status === "fail"));
@@ -630,7 +697,7 @@ const assetCase = async (casePath) => {
   const r = await runVerify(["--url", `${assetRedirectBase}${casePath}`, "--mode", "static", "--assets-limit", "1", "--json"]);
   const j = JSON.parse(r.out);
   const assets = j.checks.find((c) => c.id === "assets");
-  return { code: r.code, assets, probed: assets?.probed?.[0] };
+  return { code: r.code, assets, probed: assets?.probed?.[0], result: j };
 };
 const aDirect = await assetCase("/case/direct/");
 assert("资源：直接 200 判通过且无重定向", aDirect.assets?.status === "pass" && aDirect.probed?.chain?.length === 1 && aDirect.probed.finalStatus === 200, JSON.stringify(aDirect.probed));
@@ -648,6 +715,107 @@ const aHead405 = await assetCase("/case/head405/");
 assert("资源：HEAD 405 改 GET 复核后仍判通过", aHead405.assets?.status === "pass" && aHead405.probed?.method === "GET" && aHead405.probed.fallback === true, JSON.stringify(aHead405.probed));
 const aNoLoc = await assetCase("/case/noloc/");
 assert("资源：3xx 缺 Location 判失败", aNoLoc.assets?.status === "fail" && /缺少 Location/.test(aNoLoc.assets.broken[0].reason), JSON.stringify(aNoLoc.assets?.broken));
+const aBadProto = await assetCase("/case/badproto/");
+assert("资源：非 HTTP/HTTPS 重定向目标判失败且不跟随", aBadProto.assets?.status === "fail" && /协议不受支持/.test(aBadProto.assets.broken[0].reason) && aBadProto.probed?.chain.length === 1, JSON.stringify(aBadProto.assets?.broken));
+
+// ---------------------------------------------------------------- 资源重定向汇总一致性
+assert("资源汇总：直接 200 不进 redirects", aDirect.assets.redirects.length === 0 && aDirect.probed.redirected === false, JSON.stringify(aDirect.assets.redirects));
+assert("资源汇总：同主机 301 进 redirects，保留链与最终状态",
+  a301.assets.redirects.length === 1 && a301.assets.redirects[0].crossHost === false
+    && a301.assets.redirects[0].chain.length === 2 && a301.assets.redirects[0].finalStatus === 200
+    && a301.probed.redirected === true, JSON.stringify(a301.assets.redirects));
+assert("资源汇总：跨主机 302 同时进 redirects 与 warnings，probed 三处一致",
+  aCross.assets.redirects.length === 1 && aCross.assets.redirects[0].crossHost === true
+    && aCross.assets.redirects[0].url === aCross.probed.url
+    && aCross.assets.redirects[0].finalUrl === aCross.probed.finalUrl
+    && aCross.assets.redirects[0].finalStatus === aCross.probed.finalStatus
+    && aCross.assets.warnings.length === 1 && aCross.assets.warnings[0].crossHost === true
+    && aCross.assets.warnings[0].redirected === true && aCross.probed.redirected === true,
+  JSON.stringify({ redirects: aCross.assets.redirects, warnings: aCross.assets.warnings, probed: aCross.probed }));
+assert("资源汇总：重定向循环进失败记录，且仍记为发生过重定向",
+  aLoop.assets.broken[0].redirected === true && aLoop.probed.redirected === true
+    && aLoop.assets.redirects.length === 1 && aLoop.assets.redirects[0].level === "fail",
+  JSON.stringify(aLoop.assets.redirects));
+assert("资源汇总：缺 Location 进失败记录且不进 redirects",
+  aNoLoc.assets.broken[0].redirected === false && aNoLoc.assets.redirects.length === 0,
+  JSON.stringify(aNoLoc.assets.redirects));
+
+// ---------------------------------------------------------------- 重定向策略（纯函数，不发请求）
+assert("重定向策略：相对 Location 同源可跟随", classifyRedirect("http://127.0.0.1:8000/a", "/b", "http://127.0.0.1:8000").kind === "same-origin");
+assert("重定向策略：HTTP → HTTPS 判跨源并标记协议变化", (() => {
+  const c = classifyRedirect("http://127.0.0.1:8000/a", "https://127.0.0.1:8000/b", "http://127.0.0.1:8000");
+  return c.kind === "cross-origin" && c.protocolChanged === true && c.next.startsWith("https://");
+})());
+assert("重定向策略：HTTPS → HTTP 判跨源并标记协议变化", (() => {
+  const c = classifyRedirect("https://a.example/", "http://a.example/final", "https://a.example");
+  return c.kind === "cross-origin" && c.protocolChanged === true && c.next.startsWith("http://");
+})());
+assert("重定向策略：端口变化也算跨源", classifyRedirect("http://a.example/", "http://a.example:8443/x", "http://a.example").kind === "cross-origin");
+assert("重定向策略：跨主机／127.0.0.1 目标不跟随", classifyRedirect("http://a.example/", "http://127.0.0.1:9/x", "http://a.example").kind === "cross-origin");
+assert("重定向策略：非 HTTP/HTTPS 协议直接拒绝", classifyRedirect("http://a.example/", "file:///etc/passwd", "http://a.example").kind === "unsupported-protocol");
+assert("重定向策略：空 / 无法解析的 Location 分类正确",
+  classifyRedirect("http://a.example/", null, "http://a.example").kind === "invalid-location"
+    && classifyRedirect("http://a.example/", "http://", "http://a.example").kind === "invalid-location");
+assert("重定向策略：始终约束到起始源，不能中途换源", classifyRedirect("http://a.example/x", "http://b.example/y", "http://a.example").kind === "cross-origin");
+
+// ---------------------------------------------------------------- 主站重定向矩阵（本地 HTTP 服务器）
+const rootCase = async (p) => {
+  const r = await runVerify(["--url", `${rootRedirectBase}${p}`, "--mode", "static", "--json"]);
+  return JSON.parse(r.out).checks.find((c) => c.id === "root");
+};
+const rSame301 = await rootCase("/case/same301/");
+assert("主站：同源 301 → 200 判通过并写明最终验证成功",
+  rSame301?.status === "pass" && rSame301.redirectOutcome === "same-origin-verified"
+    && rSame301.verified === true && rSame301.hops.length === 2 && /同源重定向 1 跳后最终验证成功/.test(rSame301.detail),
+  JSON.stringify(rSame301));
+const rSame302 = await rootCase("/case/same302/");
+assert("主站：同源 302 → 404 判失败且区分于跨源",
+  rSame302?.status === "fail" && rSame302.redirectOutcome === "same-origin-final-failed"
+    && rSame302.hops.length === 2 && rSame302.httpStatus === 404, JSON.stringify(rSame302));
+const rCross = await rootCase("/case/crosshost/");
+assert("主站：跨主机重定向只记录不跟随，目标未验证",
+  rCross?.status === "warn" && rCross.redirectOutcome === "cross-origin-unverified"
+    && rCross.verified === false && rCross.hops.length === 1 && rCross.redirectTarget.includes("localhost")
+    && rCross.hops[0].location === rCross.redirectTarget && !crossTargetHits.includes("/cross-landing"),
+  JSON.stringify(rCross));
+assert("主站：跨主机目标返回 200 也不会让原站点判 pass",
+  rCross?.status === "warn" && rCross.httpStatus === 302 && rCross.verified === false,
+  JSON.stringify({ checkStatus: rCross?.status, httpStatus: rCross?.httpStatus }));
+const rLoopback = await rootCase("/case/loopback/");
+assert("主站：重定向到 127.0.0.1 不请求该目标",
+  rLoopback?.status === "warn" && rLoopback.redirectOutcome === "cross-origin-unverified"
+    && rLoopback.redirectTarget.includes("127.0.0.1") && !crossTargetHits.includes("/loop-landing"),
+  JSON.stringify(rLoopback));
+const rProtoUp = await rootCase("/case/proto-up/");
+assert("主站：HTTP → HTTPS 判跨源并标记协议变化",
+  rProtoUp?.status === "warn" && rProtoUp.redirectOutcome === "cross-origin-unverified"
+    && rProtoUp.hops[0].protocolChanged === true && rProtoUp.redirectTarget.startsWith("https://")
+    && !rootRedirectHits.includes("/tls-landing"), JSON.stringify(rProtoUp));
+const rLoop = await rootCase("/case/loop/");
+assert("主站：重定向循环单独分类且不取得最终 200",
+  rLoop?.status === "fail" && rLoop.redirectOutcome === "loop-or-limit" && rLoop.hops.length === 5
+    && /循环或超过跳数/.test(rLoop.detail), JSON.stringify(rLoop));
+const rBadLoc = await rootCase("/case/badloc/");
+assert("主站：无法解析的 Location 单独分类并判失败",
+  rBadLoc?.status === "fail" && rBadLoc.redirectOutcome === "invalid-location"
+    && /Location/.test(rBadLoc.detail) && rBadLoc.redirectTarget === null, JSON.stringify(rBadLoc));
+const rBadProto = await rootCase("/case/badproto/");
+assert("主站：非 HTTP/HTTPS 目标直接拒绝且不请求",
+  rBadProto?.status === "fail" && rBadProto.redirectOutcome === "unsupported-protocol"
+    && /非 HTTP\/HTTPS/.test(rBadProto.detail), JSON.stringify(rBadProto));
+
+// 备用站跳主站：只解析 Location 识别，不为识别而请求主站。
+const vBackupMain = await runVerify([
+  "--url", `${crossTargetBase}/`, "--mode", "static",
+  "--backup", `http://127.0.0.1:${backupServer.address().port}/to-main/`, "--json",
+]);
+const bMain = JSON.parse(vBackupMain.out).checks.find((c) => c.id === "backup");
+assert("备用站：识别跳主站但不请求主站",
+  bMain?.status === "fail" && /跳转到主站/.test(bMain.detail) && bMain.hops.length === 1
+    && bMain.redirectOutcome === "cross-origin" && !crossTargetHits.includes("/backup-landing"),
+  JSON.stringify(bMain));
+assert("重定向：跨源目标服务器全程未收到 landing 请求",
+  !crossTargetHits.some((p) => /landing/.test(p)), crossTargetHits.join(","));
 
 // ---------------------------------------------------------------- SSR / API 验收
 const vSsr = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":true}', "--json"]);
@@ -695,7 +863,7 @@ const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");

@@ -74,7 +74,18 @@ Workers 部署通常 `contents: read` 就够。
 - Python 用 hash 固定的 requirements。PyPI 重新打包 sdist 会让旧 hash 失效；过渡期保留两个 hash。
 - 不要把依赖升级和平台迁移放在同一个 PR。
 
-## 7. 凭证泄漏后的顺序
+## 7. 验收请求的重定向边界
+
+`verify-deployment.mjs` 只发 GET / HEAD / OPTIONS，且用 `redirect: "manual"`。它**只自动跟随同源重定向**（同源 = 协议 + 主机 + 端口，判定在 `scripts/redirect-policy.mjs`）：
+
+- 跨源（`127.0.0.1`、内网 IP、别的主机或端口、HTTP ↔ HTTPS 协议变化）不请求目标，只记录 Location、状态码和重定向链；主站标 `warn` + `verified: false`，资源标 `warn`。
+- `file:` / `data:` / `ftp:` 等非 HTTP(S) 目标直接拒绝。
+- Location 缺失或无法解析、重定向循环 / 超过跳数，各自单独分类并判失败，详见 `references/verification.md` 的 `redirectOutcome`。
+- 备用站是否跳到主站只靠解析 `hops[].location` 判断，不需要为了识别去请求主站。
+
+这条边界防止被验收的站点用 3xx 把脚本导向本机回环地址、内网服务或云厂商元数据端点。**跨源目标返回 200 也不是原始站点的通过证据**；要确认跨源跳转是否符合预期，人工用浏览器另行访问。
+
+## 8. 凭证泄漏后的顺序
 
 1. **先撤销/轮换**。
 2. 查 Cloudflare Audit Log 和 GitHub Security Log，确认有没有被使用。
@@ -92,6 +103,7 @@ Workers 部署通常 `contents: read` 就够。
 - [ ] 生产部署有环境保护规则
 - [ ] 预览有保护，或明确接受公开
 - [ ] 产物和报告里没有密钥
+- [ ] 验收结果里跨源重定向写成「目标未验证」，没有被当成通过
 - [ ] 锁文件已提交并在 CI 使用
 - [ ] 轮换路径有记录
 

@@ -22,14 +22,22 @@
  * `*` 只在无凭据请求里是通配符（Fetch 规范）；带凭据时它是字面值，
  * 且 Authorization / Range 永远不被 `*` 覆盖。GET/HEAD/POST 是 CORS-safelisted method，
  * 不要求出现在 Allow-Methods 里；方法名按规范大小写敏感比较（已知方法先规范化为大写）。
+ * 简单请求的凭据模式只由 --cors-credentials 声明：响应里带 ACAC: true 不代表
+ * 请求带了凭据，不能据此判 ACAO=* 无效。脚本本身不发 Cookie / Authorization。
  *
- * 资源重定向会单独跟随（同主机，最多 5 跳），3xx 不再直接算资源正常；
- * 跨主机重定向只记录不跟随，明确标 warn。
+ * 主站与资源的重定向都只自动跟随「同源」（协议 + 主机 + 端口，见 redirect-policy.mjs）；
+ * 跨源、协议变化、非 http/https 协议、Location 缺失或无法解析一律不请求目标，
+ * 只记录 Location、状态码和重定向链，避免 3xx 把验收脚本带去 127.0.0.1、
+ * 内网地址或云厂商元数据端点。主站结果用 redirectOutcome 区分
+ * 同源验证成功 / 跨源目标未验证 / 循环或超跳数 / Location 无法解析 / 协议不受支持。
+ * 资源 3xx 只要带可解析的 Location 就记为发生过重定向，不看链长度。
  *
- * 只读：只发 GET/HEAD/OPTIONS。不会跟随跨主机重定向而不报告。
+ * 只读：只发 GET/HEAD/OPTIONS。跨源目标不会被请求。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
  * 不能证明搜索引擎实际选择的 canonical，也不能替代浏览器里的 CORS 判定。
  */
+
+import { classifyRedirect } from "./redirect-policy.mjs";
 
 const argv = process.argv.slice(2);
 const getArg = (name, fallback = null) => {
@@ -167,21 +175,44 @@ async function req(url, opts = {}) {
   }
 }
 
+/**
+ * 主站重定向链。只自动跟随同源（协议 + 主机 + 端口）重定向；其他情况立即停止，
+ * 把 Location、状态码和已发生的 hops 记进结果，绝不请求目标地址。
+ * stopped 用于报告分类：cross-origin / unsupported-protocol / invalid-location / loop-or-limit。
+ */
 async function chain(url, max = 5) {
   const hops = [];
   let current = url;
+  let startOrigin = null;
+  try { startOrigin = new URL(url).origin; } catch { /* --url / --backup 已在入口校验 */ }
+  const done = (extra = {}) => ({
+    error: null, hops, final: current, status: null, res: null,
+    stopped: null, stopReason: null, redirectTarget: null, ...extra,
+  });
   for (let i = 0; i < max; i++) {
     const r = await req(current, { method: "GET", headers: { "user-agent": UA } });
-    if (!r.res) return { error: r.error, hops, final: current, status: null, res: null };
+    if (!r.res) return done({ error: r.error });
     const loc = r.res.headers.get("location");
-    hops.push({ url: current, status: r.res.status, location: loc, ms: r.ms });
-    if (r.res.status >= 300 && r.res.status < 400 && loc) {
-      current = new URL(loc, current).toString();
+    const hop = { url: current, status: r.res.status, location: loc, ms: r.ms };
+    hops.push(hop);
+    if (r.res.status >= 300 && r.res.status < 400) {
+      const c = classifyRedirect(current, loc, startOrigin);
+      hop.redirect = c.kind;
+      hop.next = c.next;
+      hop.protocolChanged = c.protocolChanged;
+      if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
+      if (c.kind !== "same-origin") {
+        return done({
+          status: r.res.status, res: r.res,
+          stopped: c.kind, stopReason: c.reason, redirectTarget: c.next,
+        });
+      }
+      current = c.next;
       continue;
     }
-    return { error: null, hops, final: current, status: r.res.status, res: r.res };
+    return done({ status: r.res.status, res: r.res });
   }
-  return { error: "重定向次数过多", hops, final: current, status: null, res: null };
+  return done({ stopped: "loop-or-limit", stopReason: `重定向超过 ${max} 跳，可能循环`, status: hops.at(-1)?.status ?? null });
 }
 
 // HEAD 优先；405/501 或网络错误时用 GET 复核，避免把「支持 GET 不支持 HEAD」误判为失败。
@@ -207,17 +238,22 @@ const MAX_ASSET_REDIRECTS = 5;
 /**
  * 资源专用探针。req() 用 redirect: "manual"，3xx 不会自动跟随；旧逻辑把
  * `status >= 400` 当作唯一失败条件，于是 301/302/307/308 被默默算成资源正常。
- * 这里单独跟随同主机重定向并验证最终 2xx；跨主机只记录最终地址、不跟随，
- * 标 warn 交人工确认；跳数有上限，防止循环。
+ * 这里与主站链共用 redirect-policy：只跟随同源重定向并验证最终 2xx；
+ * 跨源 / 非 http(s) 协议只记录目标、不跟随；跳数有上限，防止循环。
+ * redirected 由「是否收到带有效 Location 的 3xx」决定，不看链长度——
+ * 跨源会提前返回，链只有 1 跳，但它确实发生过重定向。
  */
 async function probeAsset(url) {
   const chainHops = [];
   let current = url;
   let method = null;
   let fallback = false;
+  let sawRedirect = false;
+  let startOrigin = null;
+  try { startOrigin = new URL(url).origin; } catch { /* resolve() 保证是绝对 URL */ }
   const out = (extra) => ({
     url, current, method, fallback, chainHops,
-    redirected: chainHops.length > 1,
+    redirected: sawRedirect,
     finalUrl: current, finalStatus: null, crossHost: false,
     ...extra,
   });
@@ -228,17 +264,39 @@ async function probeAsset(url) {
     if (!r.res) return out({ ok: false, level: "fail", reason: `请求失败：${r.error}` });
     const status = r.res.status;
     const loc = r.res.headers.get("location");
-    chainHops.push({ url: current, status, location: loc });
+    const entry = { url: current, status, location: loc };
+    chainHops.push(entry);
     if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
     if (status >= 300 && status < 400) {
-      if (!loc) return out({ ok: false, level: "fail", reason: `${status} 重定向缺少 Location，无法确认最终资源`, finalStatus: status });
-      let next;
-      try { next = new URL(loc, current).toString(); }
-      catch { return out({ ok: false, level: "fail", reason: `${status} 重定向的 Location 无法解析：${loc}`, finalStatus: status }); }
-      if (!sameHost(next, current)) {
-        return out({ ok: true, level: "warn", reason: `跨主机重定向到 ${next}（按策略不跟随，最终资源未验证）`, finalUrl: next, finalStatus: status, crossHost: true });
+      const c = classifyRedirect(current, loc, startOrigin);
+      entry.redirect = c.kind;
+      entry.next = c.next;
+      entry.protocolChanged = c.protocolChanged;
+      if (c.kind === "invalid-location") {
+        return out({
+          ok: false, level: "fail",
+          reason: loc
+            ? `${status} 重定向的 Location 无法解析：${loc}，无法确认最终资源`
+            : `${status} 重定向缺少 Location，无法确认最终资源`,
+          finalStatus: status,
+        });
       }
-      current = next;
+      // 3xx + 可解析的 Location = 发生过重定向，无论后面是否跟随成功。
+      sawRedirect = true;
+      if (c.kind === "unsupported-protocol") {
+        return out({
+          ok: false, level: "fail", reason: `${status} ${c.reason}；已拒绝且不请求目标`,
+          finalUrl: c.next, finalStatus: status, crossHost: true,
+        });
+      }
+      if (c.kind === "cross-origin") {
+        return out({
+          ok: true, level: "warn",
+          reason: `${status} ${c.reason}（按策略不跟随，最终资源未验证）`,
+          finalUrl: c.next, finalStatus: status, crossHost: true,
+        });
+      }
+      current = c.next;
       continue;
     }
     if (status >= 200 && status < 300) return out({ ok: true, level: "pass", reason: null, finalStatus: status });
@@ -249,16 +307,44 @@ async function probeAsset(url) {
 
 const root = await chain(base);
 let html = "";
-if (root.error || !root.res) {
-  add("root", "fail", `请求失败：${root.error}`, { hops: root.hops });
+// 跨源时 final 仍是最后一跳的原地址，真正的目标在 redirectTarget 里。
+const rootCrossTarget = root.redirectTarget || root.final;
+const crossedHost = Boolean(root.redirectTarget) && !sameHost(rootCrossTarget, base);
+const rootExtra = {
+  hops: root.hops, finalUrl: root.final, redirectTarget: root.redirectTarget,
+  crossedHost, httpStatus: root.status,
+};
+if (root.error) {
+  add("root", "fail", `请求失败：${root.error}`, { ...rootExtra, redirectOutcome: "network-error", verified: false });
+} else if (root.stopped === "cross-origin") {
+  // 关键：不请求跨源目标，也就不会拿到「别的网站返回 200」来给原站点判 pass。
+  add("root", "warn",
+    `主站跨源重定向，目标未验证：${root.stopReason}；按策略不请求目标地址，只记录 Location、状态码和重定向链`,
+    { ...rootExtra, redirectOutcome: "cross-origin-unverified", verified: false });
+} else if (root.stopped === "unsupported-protocol") {
+  add("root", "fail", `主站重定向到非 HTTP/HTTPS 协议，已拒绝且不请求目标：${root.stopReason}`,
+    { ...rootExtra, redirectOutcome: "unsupported-protocol", verified: false });
+} else if (root.stopped === "invalid-location") {
+  add("root", "fail", `主站重定向的 Location 缺失或无法解析：${root.stopReason}`,
+    { ...rootExtra, redirectOutcome: "invalid-location", verified: false });
+} else if (root.stopped === "loop-or-limit") {
+  add("root", "fail", `主站重定向循环或超过跳数：${root.stopReason}；未取得最终响应`,
+    { ...rootExtra, redirectOutcome: "loop-or-limit", verified: false });
 } else {
   const first = root.hops[0];
-  const crossedHost = root.final !== base && !sameHost(root.final, base);
+  const sameOriginHops = root.hops.length - 1;
+  const ok = root.status === 200;
   add(
     "root",
-    root.status === 200 ? "pass" : "fail",
-    `GET / -> ${root.status}，${first?.ms ?? "?"}ms${crossedHost ? `；跨主机重定向到 ${root.final}` : ""}`,
-    { hops: root.hops, finalUrl: root.final, crossedHost }
+    ok ? "pass" : "fail",
+    `GET / -> ${root.status}，${first?.ms ?? "?"}ms`
+      + (sameOriginHops > 0 ? `；同源重定向 ${sameOriginHops} 跳后${ok ? "最终验证成功" : "最终状态未通过"}` : ""),
+    {
+      ...rootExtra, redirectTarget: null, crossedHost: false, verified: ok,
+      redirectOutcome: sameOriginHops > 0
+        ? (ok ? "same-origin-verified" : "same-origin-final-failed")
+        : "no-redirect",
+    }
   );
   const ct = root.res.headers.get("content-type") || "";
   add("content-type", /text\/html/i.test(ct) ? "pass" : "warn", ct || "缺少 content-type");
@@ -398,15 +484,25 @@ if (html) {
       redirected: a.redirected, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
       crossHost: a.crossHost, chain: a.chainHops, level: a.level, reason: a.reason,
     });
-    const entry = { url: u, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus, chain: a.chainHops };
+    // probed / broken / warnings / redirects 用同一组字段，跨源重定向不会在汇总里丢掉。
+    const entry = {
+      url: u, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
+      redirected: a.redirected, crossHost: a.crossHost, level: a.level, chain: a.chainHops,
+    };
     if (a.level === "fail") broken.push({ ...entry, status: a.finalStatus ?? a.reason, method: a.method });
     else if (a.level === "warn") warnings.push(entry);
   }
   const fallbackCount = probed.filter((p) => p.fallback).length;
-  const redirects = probed.filter((p) => p.redirected).map((p) => ({ url: p.url, finalUrl: p.finalUrl, finalStatus: p.finalStatus, chain: p.chain }));
+  const redirects = probed.filter((p) => p.redirected).map((p) => ({
+    url: p.url, finalUrl: p.finalUrl, finalStatus: p.finalStatus,
+    crossHost: p.crossHost, level: p.level, reason: p.reason, chain: p.chain,
+  }));
   const suffix = allUnique.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allUnique.length} 个；不是全站爬取）` : `（共 ${allUnique.length} 个，覆盖首页引用）`;
   const headNote = fallbackCount ? `；其中 ${fallbackCount} 个 HEAD 不可用，改用 GET` : "";
-  const redirectNote = redirects.length ? `；${redirects.length} 个发生重定向（见 chain / finalStatus）` : "";
+  const crossRedirects = redirects.filter((r) => r.crossHost).length;
+  const redirectNote = redirects.length
+    ? `；${redirects.length} 个发生重定向${crossRedirects ? `（其中 ${crossRedirects} 个跨主机／跨源，目标未验证）` : ""}；见 chain / finalUrl / finalStatus`
+    : "";
   add(
     "assets",
     broken.length ? "fail" : warnings.length ? "warn" : "pass",
@@ -512,22 +608,29 @@ if (origin) {
     const acac = r.res.headers.get("access-control-allow-credentials");
     const vary = r.res.headers.get("vary") || "";
     const multiple = Boolean(acao && acao.includes(","));
-    // 用户用 --cors-credentials 声明实际请求带凭据时，ACAO=* 同样无效；
-    // 不能只看服务器有没有回 Allow-Credentials: true。
-    const wildcardWithCredentials = acao === "*" && (acac === "true" || corsCredentials);
-    const matches = (acao === "*" && !wildcardWithCredentials) || acao === origin;
-    const status = multiple || wildcardWithCredentials || (acao && !matches) ? "fail" : acao ? "pass" : "warn";
+    // 凭据模式只由 --cors-credentials 声明（脚本本身不发 Cookie / Authorization）。
+    // 响应里的 ACAC: true 是服务器声明，不能反推「请求带凭据」，因此
+    // 无凭据 + ACAO=* + ACAC=true 仍然允许；反过来，声明带凭据时
+    // 既要求 ACAO 精确匹配 Origin，也要求 ACAC: true。
+    const wildcardRejected = acao === "*" && corsCredentials;
+    const matches = acao === origin || (acao === "*" && !corsCredentials);
+    const credentialsHeaderOk = !corsCredentials || String(acac || "").trim().toLowerCase() === "true";
+    const issues = [];
+    if (multiple) issues.push(`多个 Access-Control-Allow-Origin 值：${acao}`);
+    if (wildcardRejected) issues.push("ACAO=* 不能用于带凭据请求（--cors-credentials 声明的预期模式），必须精确匹配 Origin");
+    else if (acao && !matches) issues.push(`ACAO=${acao} 与请求的 Origin（${origin}）不匹配，浏览器会拒绝`);
+    if (acao && !credentialsHeaderOk) issues.push(`带凭据请求需要 Access-Control-Allow-Credentials: true，实际 ${acac || "无"}`);
+    const okDetail = `GET ${new URL(corsUrl).pathname} → ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`
+      + (corsCredentials ? "；按 --cors-credentials 声明的带凭据模式判定" : "；按无凭据模式判定（ACAC 响应头不改变请求模式）");
     add(
       "cors",
-      status,
-      multiple
-        ? `多个 Access-Control-Allow-Origin 值：${acao}`
-        : wildcardWithCredentials
-          ? `ACAO=* 与带凭据请求${acac === "true" ? "（或 Allow-Credentials: true）" : "（--cors-credentials）"}组合无效，浏览器会拒绝`
-          : acao && !matches
-            ? `ACAO=${acao}，与请求的 Origin（${origin}）不匹配，浏览器会拒绝`
-            : `GET ${new URL(corsUrl).pathname} → ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`,
-      { url: corsUrl, acao, acac, vary, origin, credentials: corsCredentials }
+      issues.length ? "fail" : acao ? "pass" : "warn",
+      issues.length ? issues.join("；") : acao ? okDetail : "缺少 Access-Control-Allow-Origin；CORS 未验证",
+      {
+        url: corsUrl, acao, acac, vary, origin, credentials: corsCredentials,
+        credentialsMode: corsCredentials ? "declared-with-credentials" : "declared-no-credentials",
+        credentialsDeclaredByUser: true,
+      }
     );
     if (acao && !vary.toLowerCase().includes("origin")) {
       add("cors-vary", "warn", "缺少 Vary: Origin；CDN 可能把给 A 站的响应缓存给 B 站");
@@ -611,14 +714,21 @@ if (origin) {
 // ---------------------------------------------------------------- 备用站独立性（GitHub Pages）
 if (backup) {
   const b = await chain(backup);
-  if (b.error || !b.res) add("backup", "fail", `备用站请求失败：${b.error}`, { hops: b.hops });
+  // 只解析 hops 里的 Location 判断是否指向主站，不需要请求主站；
+  // 跨源目标按策略一律不跟随，避免为「识别」而访问不受信任的地址。
+  const mainHost = new URL(base).host;
+  const redirectedToMain = b.hops.some((h) => h.location && (() => {
+    try { return new URL(h.location, h.url).host === mainHost; } catch { return false; }
+  })());
+  const bExtra = { hops: b.hops, redirectOutcome: b.stopped, redirectTarget: b.redirectTarget };
+  if (b.error) add("backup", "fail", `备用站请求失败：${b.error}`, bExtra);
+  else if (redirectedToMain) add("backup", "fail", "备用站跳转到主站，不是独立备用入口（只解析 Location 判断，未请求主站）", bExtra);
+  else if (b.stopped) add("backup", "fail", `备用站重定向未完成验证：${b.stopReason}（目标未请求）`, bExtra);
   else {
     const server = b.res.headers.get("server") || "";
-    const redirectedToMain = b.hops.some((h) => h.location && (() => { try { return new URL(h.location, h.url).host === new URL(base).host; } catch { return false; } })());
-    if (b.status !== 200) add("backup", "fail", `备用站 -> ${b.status}${b.hops.at(-1)?.location ? `（${b.hops.at(-1).location}）` : ""}`, { hops: b.hops });
-    else if (redirectedToMain) add("backup", "fail", "备用站跳转到主站，不是独立备用入口", { hops: b.hops });
-    else if (/cloudflare/i.test(server)) add("backup", "warn", `备用站由 Cloudflare 提供（${server}），可能扛不住 Cloudflare 故障`, { hops: b.hops });
-    else add("backup", "pass", `备用站 200，Server: ${server || "未知"}`, { hops: b.hops });
+    if (b.status !== 200) add("backup", "fail", `备用站 -> ${b.status}${b.hops.at(-1)?.location ? `（${b.hops.at(-1).location}）` : ""}`, bExtra);
+    else if (/cloudflare/i.test(server)) add("backup", "warn", `备用站由 Cloudflare 提供（${server}），可能扛不住 Cloudflare 故障`, bExtra);
+    else add("backup", "pass", `备用站 200，Server: ${server || "未知"}`, bExtra);
   }
 }
 
