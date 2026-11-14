@@ -226,13 +226,20 @@ const repoName = gitRemote ? gitRemote.replace(/\.git$/, "").split(/[/:]/).pop()
 
 const wranglerFile = firstExisting(["wrangler.jsonc", "wrangler.json", "wrangler.toml"]);
 const wranglerText = wranglerFile ? read(path.join(root, wranglerFile)) || "" : "";
+// wrangler.toml 写 `name = "x"`，wrangler.json/jsonc 写 `"name": "x"`；
+// 同一个字段两种语法都要能读出来，JSONC 里的注释不影响按字段取值。
+const wranglerField = (key) => {
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = wranglerText.match(new RegExp(`(?:^|[\\s,{"'])["']?${esc}["']?\\s*[:=]\\s*["']([^"']+)["']`, "m"));
+  return m ? m[1] : null;
+};
 const wrangler = wranglerFile ? {
   file: wranglerFile,
-  name: wranglerText.match(/\bname\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
-  pagesBuildOutputDir: wranglerText.match(/pages_build_output_dir\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
-  assetsDirectory: wranglerText.match(/directory\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
-  compatibilityDate: wranglerText.match(/compatibility_date\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
-  hasMain: /^\s*main\s*[:=]/m.test(wranglerText),
+  name: wranglerField("name"),
+  pagesBuildOutputDir: wranglerField("pages_build_output_dir"),
+  assetsDirectory: wranglerField("directory"),
+  compatibilityDate: wranglerField("compatibility_date"),
+  hasMain: Boolean(wranglerField("main")),
   bindings: {
     d1: /d1_databases/.test(wranglerText),
     kv: /kv_namespaces/.test(wranglerText),
@@ -243,7 +250,10 @@ const wrangler = wranglerFile ? {
   },
 } : null;
 
-const resolvedOutputDir = outputDir || wrangler?.assetsDirectory || wrangler?.pagesBuildOutputDir || null;
+// 显式 wrangler 配置是部署产物的最强证据：优先于框架默认值，避免值来自配置、
+// 证据来源却写成框架默认（或反过来）的自相矛盾。
+const wranglerOutputDir = wrangler?.pagesBuildOutputDir || wrangler?.assetsDirectory || null;
+const resolvedOutputDir = wranglerOutputDir || outputDir || null;
 
 const isNoisePath = (f) => relToRoot(f).split("/").some((part) => ["node_modules", "tests", "test", "scripts", "docs", ".github", ".wrangler"].includes(part));
 const srcFiles = walkFiles(path.join(root, "src"), 3, [], 1)
@@ -407,8 +417,8 @@ const evidence = {
   buildCommand: ev(buildCommand, scripts.build ? "confirmed" : buildCommand ? "inferred" : "unknown", scripts.build ? "package.json scripts.build" : "框架默认构建命令"),
   outputDir: ev(
     resolvedOutputDir,
-    wrangler?.assetsDirectory || wrangler?.pagesBuildOutputDir || viteOut ? "confirmed" : resolvedOutputDir ? "inferred" : "unknown",
-    wrangler?.assetsDirectory ? `${wrangler.file} 的 assets.directory` : wrangler?.pagesBuildOutputDir ? `${wrangler.file} 的 pages_build_output_dir` : viteOut ? "vite.config 的 build.outDir" : htmlRoot ? "唯一的 index.html 所在目录" : "框架默认输出目录"
+    wranglerOutputDir || viteOut ? "confirmed" : resolvedOutputDir ? "inferred" : "unknown",
+    wrangler?.pagesBuildOutputDir ? `${wrangler.file} 的 pages_build_output_dir` : wrangler?.assetsDirectory ? `${wrangler.file} 的 assets.directory` : viteOut ? "vite.config 的 build.outDir" : htmlRoot ? "唯一的 index.html 所在目录" : "框架默认输出目录"
   ),
   packageManager: ev(
     manager,

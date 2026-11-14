@@ -54,7 +54,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
   --json
 ```
 
-脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。
+脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。参数写错时脚本以退出码 2 报用法错误，不会输出半截 JSON：`--api` / `--expect-404` 的 URL 无法解析、`--timeout` 非正数、`--assets-limit` 非正整数、`--backup` 不是合法 URL。
 
 ### 2.1 SSR / 全栈的自动基线
 
@@ -99,8 +99,9 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 三个限制必须写进报告：
 
 - 同源资源只查首页引用的前 20 个（`--assets-limit`），不是全站爬取；报告要写 `checked / total`。
-- 主站、资源和 `--backup` 请求都用 `redirect: "manual"`，且**只自动跟随同源重定向**（同源 = 协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）。三者共用 `MAX_REDIRECTS=5`：**最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址**（共最多 6 次请求）；如果最终地址仍返回 3xx，也就是第 6 次重定向，判「超出跳数 / 循环」，不请求它的目标，`limitHop` 保留未跟随那一跳的状态码与 Location。跨源、协议变化（HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失或无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网地址或云厂商元数据端点；跨源恰好发生在跳数边界时仍优先按跨源分类。主站结果的 `redirectOutcome` 区分：同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持；跨源时是 `warn` 且 `verified: false`，别的网站返回 200 不会给原始站点判 pass。**5 次重定向后最终 404 是 `same-origin-final-failed`，不是跳数超限。**
-- 资源 3xx **不算通过**：同源按上述同一跳数语义跟随并验证最终 2xx；跨主机只记录最终地址、不跟随，判 `warn` 交人工确认；循环、缺 `Location`、非 HTTP(S) 目标、最终 4xx/5xx 判 `fail`。只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度推断），`probed` / `warnings` / `redirects` 都保留原始地址、最终地址、最终状态、跨主机标记与完整链。
+- 主站、资源和 `--backup` 请求都用 `redirect: "manual"`，且**只自动跟随同源重定向**（同源 = 协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）。三者共用 `MAX_REDIRECTS=5`：**最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址**（共最多 6 次请求）；如果最终地址仍返回 3xx，也就是第 6 次重定向，判「超出跳数 / 循环」，不请求它的目标，主站结果的 `limitHop` 保留未跟随那一跳的状态码与 Location（资源探针的未跟随跳保留在 `chain` 里）。跨源、协议变化（HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失或无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网地址或云厂商元数据端点；跨源恰好发生在跳数边界时仍优先按跨源分类。主站结果的 `redirectOutcome` 区分：同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`（少见 3xx）；跨源时是 `warn` 且 `verified: false`，别的网站返回 200 不会给原始站点判 pass。**5 次重定向后最终 404 是 `same-origin-final-failed`，不是跳数超限。**
+- **3xx 不等于重定向。** 只有 `301 / 302 / 303 / 307 / 308` 需要读取 Location 并继续请求；`304 Not Modified` 是缓存协商结果（`statusClass: "not-modified"`），不进入重定向链，也不会因为缺少 Location 被报成「无效重定向」。其他 3xx（`300`、`305` 等，`statusClass: "unexpected-3xx"`）既不跟随也不能当成功。主站链、资源探针和 `/index.html` 检查共用同一分类规则（`scripts/redirect-policy.mjs` 的 `classifyStatus()`），结果里的跳记录都带 `statusClass`。
+- 资源 3xx **不算通过**：同源按上述同一跳数语义跟随并验证最终 2xx；跨主机只记录最终地址、不跟随，判 `warn` 交人工确认；循环、缺 `Location`、非 HTTP(S) 目标、最终 4xx/5xx 判 `fail`。只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度推断），`probed` / `warnings` / `redirects` 都保留原始地址、最终地址、最终状态、跨主机标记与完整链。**304 不是重定向，也不代表资源可用**：不进入 `redirects`，判 `fail`；少见 3xx 判 `warn` 且不进 `redirects`，需要人工确认。首页里的跨源 / 非 HTTP(S) 资源引用（包括用反斜杠伪装成相对地址的跨源 URL）在解析后按 origin 过滤：不请求目标，只记进 `ignored`。
 - CORS 检查默认查 `--url` 首页；API 在别的子域时必须用 `--cors-url`，否则“首页没有 CORS 头”会被误读成接口有问题。
 
 ## 3. 脚本做不到的人工检查
@@ -151,10 +152,12 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - `static`/`ssg`：未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
 - `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受。
 - `ssr`：未知路径通常 404；返回 200 要人工确认是自定义 404 还是 catch-all 把所有路径渲染成首页。
-- Pages 上 `/index.html` 跳 `/`（301/308）是正常的。
+- Pages 上 `/index.html` 跳 `/`（301/308）是正常的。脚本只把**同源且目标就是站点根**的重定向判 `pass`（结果带 `convergesToRoot`）；跨源、非 HTTP(S)、其他路径只给 `warn`，不请求目标，也不证明收敛到 `/`。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
 - 资源检查只覆盖首页引用的前 N 个。写了“资源正常”就必须说明检查了多少个。
 - 资源 301/302/307/308 只是**一跳**，不是结论；要看最终状态。跨主机重定向（CDN、签名 URL）要单独确认，不能默默算正常；脚本不会为了确认而自动请求跨源目标。
+- `304 Not Modified` 不是重定向：脚本没有发送条件请求，`/` 返回 304 不能当作首页可用；`/index.html` 返回 304 也不能证明收敛到 `/`；资源返回 304 判 `fail` 且不进入 `redirects`。
+- 少见 3xx（如 `300 Multiple Choices`）既不跟随也不判通过：主站/资源/`/index.html` 都单独分类（`unexpected-3xx`），按警告处理并交人工确认。
 - 首页 `redirectOutcome` 为 `cross-origin-unverified` 时写「主站跨源重定向，目标未验证」，`warn` 不等于通过，也不能写成「首页 200」。
 
 ### 响应头
@@ -177,6 +180,7 @@ curl -s https://site.example.com/ | grep -io '<link[^>]*canonical[^>]*>'
 多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。
 
 - 主站：只有一个 canonical，指向自己。**指向自己要求协议、主机、规范化路径三者全部一致**；只比 host + pathname 会把 `https` 页面上的 `http` canonical 误判成 self-canonical。脚本在 `canonical` 检查结果里给出 `sameProtocol` / `sameHost` / `samePath`。
+- `href` 缺失、`href=""`、`href` 无法解析分别判 `fail`，结果带 `hrefState`（`missing` / `empty` / `invalid`）；**不会**把空值交给 `new URL("", base)` 解析成当前站点再误判成指向自身。合法的属性值支持双引号、单引号和不带引号三种写法。
 - 一个页面出现多个 canonical 标签 → 模板重复输出，必须修（脚本会判 `fail`）。
 - canonical 指向其他主机 → 如果这是备用站、策略是“指主站”，属预期；否则权重被指向外部。
 - canonical 指向另一个路径 → 可能是有意的（分页/聚合），确认后再接受。

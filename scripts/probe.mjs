@@ -32,8 +32,12 @@ const apiBase = "https://api.cloudflare.com/client/v4";
 const checks = [];
 const add = (id, status, detail, extra = {}) => checks.push({ ...extra, id, status, detail });
 
+// Windows 下 .cmd/.bat 必须经过 shell 执行；命令路径可能含空格或 & 等 meta 字符
+// （例如 ...\My Project\node_modules\.bin\wrangler.cmd），不加引号会被 cmd 截断成两个命令。
+const shellCommand = (cmd) => (process.platform === "win32" && /[\s&|<>^()]/.test(cmd) ? `"${cmd}"` : cmd);
+
 function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, {
+  const r = spawnSync(shellCommand(cmd), args, {
     encoding: "utf8",
     timeout: opts.timeout ?? 30000,
     cwd: opts.cwd,
@@ -159,10 +163,11 @@ if (doDeploy) {
     const url = parseDeployUrl(dep.out);
     // 只有拿到 URL 才发真实请求；部署命令成功本身不算线上验证。
     const http = url && dep.ok ? await verifyDeployedUrl(url, fetch) : null;
-    const del = call(["delete", name], { cwd: dir, timeout: 60000, input: "y\n" });
+    // 部署失败时没有创建临时 Worker，不应该去 delete，更不能把「删除失败」报成清理问题。
+    const del = dep.ok ? call(["delete", name], { cwd: dir, timeout: 60000, input: "y\n" }) : null;
     const verdict = evaluateDeployProbe({
       deployOk: dep.ok, deployOut: dep.out, deployErr: dep.err,
-      url, http, cleanupOk: del.ok, worker: name,
+      url, http, cleanupOk: dep.ok ? Boolean(del?.ok) : true, cleanupSkipped: !dep.ok, worker: name,
     });
     checks.push(verdict.deploy, verdict.cleanup);
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 目录留给系统清理 */ }

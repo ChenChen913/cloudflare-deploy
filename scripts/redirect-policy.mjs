@@ -21,6 +21,30 @@
 export const HTTP_PROTOCOLS = ["http:", "https:"];
 
 /**
+ * 真正需要读取 Location 并另行请求的状态码（RFC 9110 §15.4）。
+ * 3xx 里的 304 Not Modified 是缓存协商结果，不属于这一类。
+ */
+export const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+
+/**
+ * 3xx 状态分类，供主站链、资源探针和 /index.html 检查共用。
+ *   success        2xx，可验证的响应
+ *   redirect       301/302/303/307/308，需要按 Location 继续请求
+ *   not-modified   304，缓存协商结果，不是重定向
+ *   unexpected-3xx 其他 3xx（300、305 等），既不跟随，也不能当成功
+ *   error          4xx/5xx（以及 fetch 不会返回的 1xx）
+ * @param {number} status
+ * @returns {"success"|"redirect"|"not-modified"|"unexpected-3xx"|"error"}
+ */
+export function classifyStatus(status) {
+  if (status >= 200 && status < 300) return "success";
+  if (REDIRECT_STATUSES.includes(status)) return "redirect";
+  if (status === 304) return "not-modified";
+  if (status >= 300 && status < 400) return "unexpected-3xx";
+  return "error";
+}
+
+/**
  * @param {string} fromUrl     当前这一跳的绝对 URL
  * @param {string|null} location 响应头 Location 原值
  * @param {string|null} startOrigin 被验收站点的起始 origin；不传则用当前这一跳的 origin

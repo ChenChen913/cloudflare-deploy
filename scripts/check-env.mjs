@@ -18,8 +18,12 @@ import fs from "node:fs";
 const json = process.argv.includes("--json");
 const root = process.cwd();
 
+// Windows 下 .cmd/.bat 必须经过 shell 执行；命令路径可能含空格或 & 等 meta 字符
+// （例如 ...\My Project\node_modules\.bin\wrangler.cmd），不加引号会被 cmd 截断成两个命令。
+const shellCommand = (cmd) => (process.platform === "win32" && /[\s&|<>^()]/.test(cmd) ? `"${cmd}"` : cmd);
+
 function run(cmd, args = [], timeout = 8000) {
-  const r = spawnSync(cmd, args, {
+  const r = spawnSync(shellCommand(cmd), args, {
     cwd: root,
     encoding: "utf8",
     timeout,
@@ -80,20 +84,26 @@ checks.push(checkCommand("git", "git", "git", ["--version"], { required: true })
 
 const wranglerLocal = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "wrangler.cmd" : "wrangler");
 let wrangler = null;
-let wranglerIsLocal = false;
+// whoami 必须用实际解析到的那个 wrangler：PATH 上的 wrangler 不等于能用 npx --no-install 调起。
+let wranglerCmd = null;
+let wranglerPrefix = [];
+const useWrangler = (cmd, prefix, result) => {
+  wranglerCmd = cmd;
+  wranglerPrefix = prefix;
+  wrangler = result;
+};
 
 if (fs.existsSync(wranglerLocal)) {
-  wranglerIsLocal = true;
-  wrangler = checkCommand("wrangler", "wrangler（项目内）", wranglerLocal, ["--version"], { required: true });
+  useWrangler(wranglerLocal, [], checkCommand("wrangler", "wrangler（项目内）", wranglerLocal, ["--version"], { required: true }));
 } else {
   const onPath = checkCommand("wrangler", "wrangler", "wrangler", ["--version"], { required: false });
   if (onPath.status === "pass") {
-    wrangler = onPath;
+    useWrangler("wrangler", [], onPath);
   } else {
     const viaNpx = checkCommand("wrangler", "wrangler（npx --no-install）", "npx", ["--no-install", "wrangler", "--version"], { required: false });
-    wrangler = viaNpx.status === "pass"
+    useWrangler("npx", ["--no-install", "wrangler"], viaNpx.status === "pass"
       ? viaNpx
-      : { ...viaNpx, status: "warn", detail: "未找到 wrangler；执行 npx wrangler@latest，或在项目内安装。" };
+      : { ...viaNpx, status: "warn", detail: "未找到 wrangler；执行 npx wrangler@latest，或在项目内安装。" });
   }
 }
 checks.push(wrangler);
@@ -123,18 +133,22 @@ if (gh.status === "pass") {
 }
 
 if (wrangler.status === "pass") {
-  const who = run(
-    wranglerIsLocal ? wranglerLocal : "npx",
-    wranglerIsLocal ? ["whoami"] : ["--no-install", "wrangler", "whoami"],
-    15000
-  );
-  const loggedIn = who.ok && !/not authenticated|not logged in|no account/i.test(who.stdout + who.stderr);
+  const who = run(wranglerCmd, [...wranglerPrefix, "whoami"], 15000);
+  const text = `${who.stdout}\n${who.stderr}`;
+  const notLoggedIn = /not authenticated|not logged in|no account/i.test(text);
+  const loggedIn = who.ok && !notLoggedIn;
+  const detail = loggedIn
+    ? firstLine(who.stdout || who.stderr)
+    : !who.ok && !notLoggedIn
+      // 命令执行失败（例如 npx 不可用）不能写成「未登录」。
+      ? `wrangler whoami 执行失败（${who.error || firstLine(who.stderr) || `退出码 ${who.status}`}），无法确认登录态`
+      : "未登录。执行：npx wrangler login（或设置 CLOUDFLARE_API_TOKEN）。";
   checks.push({
     id: "wrangler-auth",
     label: "Cloudflare 登录",
     status: loggedIn ? "pass" : "warn",
     version: null,
-    detail: loggedIn ? firstLine(who.stdout || who.stderr) : "未登录。执行：npx wrangler login（或设置 CLOUDFLARE_API_TOKEN）。",
+    detail,
     required: false,
   });
 } else {

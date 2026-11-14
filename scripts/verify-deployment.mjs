@@ -34,14 +34,21 @@
  * 该地址再返回 3xx（第 6 次重定向）即判超限，且不请求它的目标。
  * 资源 3xx 只要带可解析的 Location 就记为发生过重定向，不看链长度。
  *
+ * 3xx 只有 301/302/303/307/308 是需要读取 Location 的重定向。304 Not Modified
+ * 是缓存协商结果，不进入重定向链，也不会因为缺少 Location 被报成无效重定向；
+ * 其他 3xx（300、305 等）既不跟随，也不能当作成功。主站链、资源探针和
+ * `/index.html` 检查共用 classifyStatus()，避免三处规则分叉。
+ *
  * canonical 只在协议、主机、规范化路径三者都一致时才算指向自身；协议不同单独标 warn。
+ * href 缺失、空值、无法解析会分别报告，绝不把空 href 解析成当前站点后判成 self-canonical；
+ * 属性值支持双引号、单引号和不带引号三种合法写法。
  *
  * 只读：只发 GET/HEAD/OPTIONS。跨源目标不会被请求。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
  * 不能证明搜索引擎实际选择的 canonical，也不能替代浏览器里的 CORS 判定。
  */
 
-import { classifyRedirect } from "./redirect-policy.mjs";
+import { classifyRedirect, classifyStatus } from "./redirect-policy.mjs";
 
 const argv = process.argv.slice(2);
 const getArg = (name, fallback = null) => {
@@ -53,8 +60,10 @@ const base = getArg("--url");
 const backup = getArg("--backup");
 const origin = getArg("--origin");
 const notFoundPath = getArg("--expect-404", `__cf_deploy_check_${Date.now()}/`);
-const timeout = Number(getArg("--timeout", "15000"));
-const assetsLimit = Math.max(1, Number(getArg("--assets-limit", "20")));
+const timeoutRaw = getArg("--timeout", "15000");
+const assetsLimitRaw = getArg("--assets-limit", "20");
+const timeout = Number(timeoutRaw);
+const assetsLimit = Number(assetsLimitRaw);
 const MODES = ["static", "spa", "ssg", "ssr"];
 const mode = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
 const apiPaths = argv.reduce((acc, a, i) => (a === "--api" && argv[i + 1] && !argv[i + 1].startsWith("--") ? [...acc, argv[i + 1]] : acc), []);
@@ -155,6 +164,22 @@ const corsArg = getArg("--cors-url");
 if (corsArg) {
   try { new URL(corsArg, base); } catch { console.error(`--cors-url 不是合法 URL：${corsArg}`); process.exit(2); }
 }
+// 数值参数和 URL 参数在这里先校验：否则运行到一半才抛 TypeError 时，
+// 用户拿不到 JSON 结果，也无法区分是参数写错还是站点有问题。
+if (!Number.isFinite(timeout) || timeout <= 0) {
+  console.error(`--timeout 必须是正数（毫秒）：${timeoutRaw}`);
+  process.exit(2);
+}
+if (!Number.isInteger(assetsLimit) || assetsLimit < 1) {
+  console.error(`--assets-limit 必须是正整数：${assetsLimitRaw}`);
+  process.exit(2);
+}
+if (backup) {
+  try { new URL(backup); } catch { console.error(`--backup 不是合法 URL：${backup}`); process.exit(2); }
+}
+for (const [flag, value] of [["--expect-404", notFoundPath], ...apiPaths.map((p) => ["--api", p])]) {
+  try { new URL(value, base); } catch { console.error(`${flag} 的 URL 无法解析：${value}`); process.exit(2); }
+}
 
 const UA = "cloudflare-deploy-verify/2";
 // 主站链与资源探针共用的跳数上限：最多跟随 5 次同源重定向，并额外请求一次
@@ -167,6 +192,42 @@ const add = (id, status, detail, extra = {}) => checks.push({ ...extra, id, stat
 // 相对路径按站点根解析；以 / 开头的仍按域名根解析。
 const dirBase = base.endsWith("/") ? base : `${base}/`;
 const resolve = (u) => new URL(u, dirBase).toString();
+
+/**
+ * 从首页 HTML 收集「可探测的同源 http(s) 资源」。
+ *
+ * 不能只按字符串前缀过滤：`\\\\127.0.0.1:port/x` 这类写法会经 URL 解析变成
+ * 协议相对地址，脚本若直接 fetch 就违反了「只请求同源」的承诺。这里先解析，
+ * 再按协议与 origin 判定；跨源、非 HTTP(S)、畸形地址只记录，不发请求。
+ * 带 scheme 或 `//` 的绝对/协议相对引用沿用旧行为：不探测（外链、CDN、canonical）。
+ *
+ * @returns {{unique:{url:string,abs:string}[], ignored:{url:string,reason:string}[]}}
+ */
+function collectAssetRefs(htmlText, siteBase, pageBase) {
+  const site = new URL(siteBase);
+  const entries = [];
+  const ignored = [];
+  for (const m of htmlText.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
+    const raw = m[1].trim();
+    if (!raw || raw.startsWith("#")) continue;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//")) continue;
+    const bare = raw.split(/[?#]/)[0];
+    if (!bare) continue;
+    let abs = null;
+    try { abs = new URL(bare, pageBase); } catch { ignored.push({ url: raw, reason: "URL 无法解析" }); continue; }
+    if (abs.protocol !== "http:" && abs.protocol !== "https:") {
+      ignored.push({ url: raw, reason: `非 HTTP(S) 协议 ${abs.protocol}` });
+      continue;
+    }
+    if (abs.origin !== site.origin) {
+      ignored.push({ url: raw, reason: `跨源地址 ${abs.origin}，按策略不请求` });
+      continue;
+    }
+    entries.push({ url: bare, abs: abs.href });
+  }
+  // 同一目标用不同写法时按解析后的 URL 去重。
+  return { unique: [...new Map(entries.map((e) => [e.abs, e])).values()], ignored };
+}
 
 async function req(url, opts = {}) {
   const ctrl = new AbortController();
@@ -206,13 +267,28 @@ async function chain(url, max = MAX_REDIRECTS) {
     if (!r.res) return done({ error: r.error });
     const loc = r.res.headers.get("location");
     const status = r.res.status;
-    if (!(status >= 300 && status < 400)) {
-      hops.push({ url: current, status, location: loc, ms: r.ms });
+    const statusClass = classifyStatus(status);
+    // 3xx 里只有 304 之外的常见重定向才需要看 Location；304 直接结束，
+    // 不能因为缺少 Location 被报成 invalid-location。
+    if (statusClass !== "redirect") {
+      hops.push({ url: current, status, location: loc, ms: r.ms, statusClass });
+      if (statusClass === "not-modified") {
+        return done({
+          status, res: r.res, stopped: "not-modified",
+          stopReason: "304 Not Modified 是缓存协商结果，不是重定向；本次请求没有发送条件请求头，也没有可验证的响应体",
+        });
+      }
+      if (statusClass === "unexpected-3xx") {
+        return done({
+          status, res: r.res, stopped: "unexpected-3xx",
+          stopReason: `${status} 属于 3xx，但不在需要跟随的重定向状态（301/302/303/307/308）里，也没有可验证的 2xx 响应`,
+        });
+      }
       return done({ status, res: r.res });
     }
     const c = classifyRedirect(current, loc, startOrigin);
     const hop = {
-      url: current, status, location: loc, ms: r.ms,
+      url: current, status, location: loc, ms: r.ms, statusClass,
       redirect: c.kind, next: c.next, protocolChanged: c.protocolChanged,
     };
     if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
@@ -282,10 +358,11 @@ async function probeAsset(url) {
     if (!r.res) return out({ ok: false, level: "fail", reason: `请求失败：${r.error}` });
     const status = r.res.status;
     const loc = r.res.headers.get("location");
-    const entry = { url: current, status, location: loc };
+    const statusClass = classifyStatus(status);
+    const entry = { url: current, status, location: loc, statusClass };
     chainHops.push(entry);
     if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
-    if (status >= 300 && status < 400) {
+    if (statusClass === "redirect") {
       const c = classifyRedirect(current, loc, startOrigin);
       entry.redirect = c.kind;
       entry.next = c.next;
@@ -317,7 +394,22 @@ async function probeAsset(url) {
       current = c.next;
       continue;
     }
-    if (status >= 200 && status < 300) return out({ ok: true, level: "pass", reason: null, finalStatus: status });
+    if (statusClass === "success") return out({ ok: true, level: "pass", reason: null, finalStatus: status });
+    if (statusClass === "not-modified") {
+      // 304 不是重定向，也不代表资源可用：脚本没发送条件请求，拿不到内容也拿不到 2xx。
+      return out({
+        ok: false, level: "fail",
+        reason: "304 Not Modified 不是重定向，也没有返回资源内容（脚本未发送条件请求）；不能判定资源正常",
+        finalStatus: status,
+      });
+    }
+    if (statusClass === "unexpected-3xx") {
+      return out({
+        ok: false, level: "warn",
+        reason: `${status} 属于 3xx，但不在需要跟随的重定向状态（301/302/303/307/308）里；资源未通过验证，需人工确认`,
+        finalStatus: status,
+      });
+    }
     return out({ ok: false, level: "fail", reason: `最终状态 ${status} 不是 2xx`, finalStatus: status });
   }
   return out({ ok: false, level: "fail", reason: `重定向超过 ${MAX_REDIRECTS} 跳，可能循环`, finalStatus: chainHops.at(-1)?.status ?? null });
@@ -330,7 +422,8 @@ const rootCrossTarget = root.redirectTarget || root.final;
 const crossedHost = Boolean(root.redirectTarget) && !sameHost(rootCrossTarget, base);
 const rootExtra = {
   hops: root.hops, finalUrl: root.final, redirectTarget: root.redirectTarget,
-  crossedHost, httpStatus: root.status, limitHop: root.limitHop || null,
+  crossedHost, httpStatus: root.status, statusClass: root.status == null ? null : classifyStatus(root.status),
+  limitHop: root.limitHop || null,
 };
 if (root.error) {
   add("root", "fail", `请求失败：${root.error}`, { ...rootExtra, redirectOutcome: "network-error", verified: false });
@@ -345,6 +438,14 @@ if (root.error) {
 } else if (root.stopped === "invalid-location") {
   add("root", "fail", `主站重定向的 Location 缺失或无法解析：${root.stopReason}`,
     { ...rootExtra, redirectOutcome: "invalid-location", verified: false });
+} else if (root.stopped === "not-modified") {
+  // 304 不是重定向：既不能说「重定向成功」，也不能说「缺少 Location」。
+  add("root", "fail", `主站返回 304 Not Modified，不是重定向，也没有可验证的首页内容：${root.stopReason}`,
+    { ...rootExtra, redirectOutcome: "not-modified", verified: false });
+} else if (root.stopped === "unexpected-3xx") {
+  // 300 / 305 等少见 3xx：不跟随、不判通过，交给人工确认。
+  add("root", "warn", `主站返回 ${root.status}（3xx 但不是需要跟随的重定向）：${root.stopReason}；按策略不跟随，也不能当作通过`,
+    { ...rootExtra, redirectOutcome: "unexpected-3xx", verified: false });
 } else if (root.stopped === "loop-or-limit") {
   add("root", "fail", `主站重定向循环或超过跳数：${root.stopReason}；未取得最终响应`,
     { ...rootExtra, redirectOutcome: "loop-or-limit", verified: false });
@@ -393,26 +494,26 @@ if (!missing.res) {
         shellOk
           ? `GET ${notFoundPath} -> 200，返回的 HTML 含有 app shell 标记`
           : `GET ${notFoundPath} -> 200，但返回内容不像 app shell（没有 root 容器或入口脚本）；确认没有把 404 页当 200 返回`,
-        { status, mode, markers: tokens.length }
+        { httpStatus: status, mode, markers: tokens.length }
       );
     } else if (status === 404) {
-      add("spa-fallback", "warn", `GET ${notFoundPath} -> 404：纯客户端路由刷新会断；若使用 hash 路由可接受`, { status, mode });
-    } else if (status >= 300 && status < 400) {
-      add("spa-fallback", "warn", `GET ${notFoundPath} -> ${status}${missing.res.headers.get("location") ? ` -> ${missing.res.headers.get("location")}` : ""}；重定向式回退会让深链丢失原路径`, { status, mode });
+      add("spa-fallback", "warn", `GET ${notFoundPath} -> 404：纯客户端路由刷新会断；若使用 hash 路由可接受`, { httpStatus: status, mode });
+    } else if (classifyStatus(status) === "redirect") {
+      add("spa-fallback", "warn", `GET ${notFoundPath} -> ${status}${missing.res.headers.get("location") ? ` -> ${missing.res.headers.get("location")}` : ""}；重定向式回退会让深链丢失原路径`, { httpStatus: status, mode });
     } else {
-      add("spa-fallback", "fail", `GET ${notFoundPath} -> ${status}；SPA 期望 200 + HTML`, { status, mode });
+      add("spa-fallback", "fail", `GET ${notFoundPath} -> ${status}；SPA 期望 200 + HTML`, { httpStatus: status, mode });
     }
   } else if (mode === "ssr") {
     // SSR 框架通常对未知路由返回 404；返回 200 可能是 catch-all 或自定义 404，先提示不判死。
     if (status === 404) {
-      add("404", "pass", `GET ${notFoundPath} -> 404（ssr 模式）`, { status, mode });
+      add("404", "pass", `GET ${notFoundPath} -> 404（ssr 模式）`, { httpStatus: status, mode });
     } else if (status >= 200 && status < 300) {
-      add("404", "warn", `GET ${notFoundPath} -> ${status}；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页`, { status, mode });
+      add("404", "warn", `GET ${notFoundPath} -> ${status}；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页`, { httpStatus: status, mode });
     } else {
-      add("404", "warn", `GET ${notFoundPath} -> ${status}；ssr 模式通常期望 404`, { status, mode });
+      add("404", "warn", `GET ${notFoundPath} -> ${status}；ssr 模式通常期望 404`, { httpStatus: status, mode });
     }
   } else if (status === 404) {
-    add("404", "pass", `GET ${notFoundPath} -> 404（${mode} 模式）`, { status, mode });
+    add("404", "pass", `GET ${notFoundPath} -> 404（${mode} 模式）`, { httpStatus: status, mode });
   } else if (status === 200) {
     const body = await missing.res.text().catch(() => "");
     const looksLikeRoot = html.length > 0 && body.length > 0 && (body === html || (body.includes("<title") && body.length > html.length * 0.5));
@@ -420,11 +521,55 @@ if (!missing.res) {
       "404",
       "fail",
       `GET ${notFoundPath} -> 200；${mode} 模式期望 404${looksLikeRoot ? "。返回内容与首页接近：SPA 回退把未知路径吞掉了" : "。可能是 rewrite 或自定义 404 用了 200"}`,
-      { status, mode, looksLikeRoot }
+      { httpStatus: status, mode, looksLikeRoot }
     );
   } else {
-    add("404", "fail", `GET ${notFoundPath} -> ${status}；${mode} 模式期望 404`, { status, mode });
+    add("404", "fail", `GET ${notFoundPath} -> ${status}；${mode} 模式期望 404`, { httpStatus: status, mode });
   }
+}
+
+/**
+ * 读取标签上的属性值，按 HTML 属性语法处理三种合法写法：
+ *   href="..." / href='...' / href=不带引号的值
+ * 返回 { present, value }：
+ *   present=false 标签没有该属性
+ *   value=""      有属性但值为空（href=""、href=''、不带值的 href）
+ *   value="..."   原始属性值，是否 trim / 能否解析交给调用方
+ * 不能只用 /href=(["'])(...)/：那会把不带引号的合法值漏成空字符串，
+ * 而后者被 new URL("", base) 解析成当前站点，正是 canonical 误判的来源。
+ */
+function readHtmlAttr(tag, name) {
+  // 去掉标签名和结尾的 ">"，逐段扫描属性；引号内的空格不会被当成属性分隔符。
+  const src = tag.replace(/^<\s*[^\s/>]+/, "").replace(/\/?>\s*$/, "");
+  const wanted = name.toLowerCase();
+  let i = 0;
+  while (i < src.length) {
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (i >= src.length) break;
+    const nameStart = i;
+    while (i < src.length && !/[\s=]/.test(src[i])) i++;
+    const attrName = src.slice(nameStart, i).toLowerCase();
+    while (i < src.length && /\s/.test(src[i])) i++;
+    let value = "";
+    if (src[i] === "=") {
+      i++;
+      while (i < src.length && /\s/.test(src[i])) i++;
+      if (src[i] === '"' || src[i] === "'") {
+        const quote = src[i];
+        i++;
+        const valueStart = i;
+        while (i < src.length && src[i] !== quote) i++;
+        value = src.slice(valueStart, i);
+        if (i < src.length) i++; // 跳过收尾引号
+      } else {
+        const valueStart = i;
+        while (i < src.length && !/[\s"'=<>`]/.test(src[i])) i++;
+        value = src.slice(valueStart, i);
+      }
+    }
+    if (attrName === wanted) return { present: true, value };
+  }
+  return { present: false, value: null };
 }
 
 // ---------------------------------------------------------------- HTML 内容
@@ -438,33 +583,47 @@ if (html) {
   } else if (canonTags.length > 1) {
     add("canonical", "fail", `发现 ${canonTags.length} 个 canonical 标签；浏览器和爬虫只认第一个，通常意味着模板重复输出`, { count: canonTags.length, tags: canonTags.slice(0, 3) });
   } else {
-    const href = canonTags[0].match(/href\s*=\s*["']([^"']+)["']/i)?.[1] || "";
-    let parsed = null;
-    try { parsed = new URL(href, base); } catch { parsed = null; }
-    const norm = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
-    if (!parsed) {
-      add("canonical", "fail", `canonical href 无法解析：${href || "(空)"}`, { href });
+    const tag = canonTags[0];
+    const snippet = tag.length > 160 ? `${tag.slice(0, 157)}…` : tag;
+    const attr = readHtmlAttr(tag, "href");
+    if (!attr.present) {
+      // 缺 href 不是「空 URL」，更不能拿 base 顶替：它是无效的 canonical 声明。
+      add("canonical", "fail", `canonical 标签缺少 href 属性：${snippet}；没有 href 不算指向自身，也没有可解析目标`,
+        { href: null, hrefState: "missing", tag: snippet });
+    } else if (!attr.value.trim()) {
+      add("canonical", "fail", `canonical href 为空字符串：${snippet}；空值不会被解析成当前站点，也不算指向自身`,
+        { href: attr.value, hrefState: "empty", tag: snippet });
     } else {
-      const baseUrl = new URL(base);
-      // 指向自身必须协议、主机、规范化路径三者都一致；只比 host + pathname 会把
-      // https 站点上的 http canonical 误判成 self-canonical。
-      const protocolOk = parsed.protocol === baseUrl.protocol;
-      const hostOk = parsed.host === baseUrl.host;
-      const pathOk = norm(parsed.pathname) === norm(baseUrl.pathname);
-      const self = protocolOk && hostOk && pathOk;
-      const protoNote = protocolOk ? "" : `协议不一致（canonical 为 ${parsed.protocol}，当前站点为 ${baseUrl.protocol}）；`;
-      add(
-        "canonical",
-        self ? "pass" : "warn",
-        self
-          ? `canonical 指向自身（${parsed.pathname}）`
-          : !hostOk
-            ? protoNote + `canonical 指向其他主机：${parsed.origin}${parsed.pathname}；如果这是备用站且策略是「canonical 指主站」属预期，否则权重被指向外部`
-            : !pathOk
-              ? protoNote + `canonical 指向另一个路径：${parsed.pathname}；确认这是有意为之（分页/聚合页）`
-              : `${protoNote}canonical 协议与当前站点不一致：${parsed.href}；主机和路径相同但协议不同，不算指向自身（当前站点 ${baseUrl.href}）`,
-        { href, sameProtocol: protocolOk, sameHost: hostOk, samePath: pathOk }
-      );
+      const href = attr.value;
+      let parsed = null;
+      try { parsed = new URL(href, base); } catch { parsed = null; }
+      const norm = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
+      if (!parsed) {
+        // 明确报告无法解析，绝不回退到 base 再判 self-canonical。
+        add("canonical", "fail", `canonical href 无法解析：${href}；不回退到当前站点，也不判指向自身`,
+          { href, hrefState: "invalid", tag: snippet });
+      } else {
+        const baseUrl = new URL(base);
+        // 指向自身必须协议、主机、规范化路径三者都一致；只比 host + pathname 会把
+        // https 站点上的 http canonical 误判成 self-canonical。
+        const protocolOk = parsed.protocol === baseUrl.protocol;
+        const hostOk = parsed.host === baseUrl.host;
+        const pathOk = norm(parsed.pathname) === norm(baseUrl.pathname);
+        const self = protocolOk && hostOk && pathOk;
+        const protoNote = protocolOk ? "" : `协议不一致（canonical 为 ${parsed.protocol}，当前站点为 ${baseUrl.protocol}）；`;
+        add(
+          "canonical",
+          self ? "pass" : "warn",
+          self
+            ? `canonical 指向自身（${parsed.pathname}）`
+            : !hostOk
+              ? protoNote + `canonical 指向其他主机：${parsed.origin}${parsed.pathname}；如果这是备用站且策略是「canonical 指主站」属预期，否则权重被指向外部`
+              : !pathOk
+                ? protoNote + `canonical 指向另一个路径：${parsed.pathname}；确认这是有意为之（分页/聚合页）`
+                : `${protoNote}canonical 协议与当前站点不一致：${parsed.href}；主机和路径相同但协议不同，不算指向自身（当前站点 ${baseUrl.href}）`,
+          { href, hrefState: "valid", sameProtocol: protocolOk, sameHost: hostOk, samePath: pathOk }
+        );
+      }
     }
   }
 
@@ -485,34 +644,30 @@ if (html) {
       `服务端输出的可见文本 ${text.length} 字符${text.length < 200 ? "；可能只是空壳，真实内容主要靠客户端渲染" : ""}`,
       { textLength: text.length }
     );
-    const ms = root.hops[0]?.ms;
+    // 用最终响应测 TTFB；同源重定向时第一跳只是 3xx，不代表首页耗时。
+    const ms = root.hops.at(-1)?.ms;
     if (typeof ms === "number") {
       add("ttfb", ms < 2000 ? "pass" : "warn", `首页 TTFB ${ms}ms（单次采样，可能含冷启动；不是性能结论）`, { ms });
     }
   }
 
   // ---------------------------------------------------------------- 同源资源
-  const refs = [...html.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
-    .map((m) => m[1])
-    .filter((u) => !/^(?:https?:)?\/\//i.test(u) && !u.startsWith("data:") && !u.startsWith("#") && !u.startsWith("mailto:") && !u.startsWith("tel:"))
-    .map((u) => u.split(/[?#]/)[0])
-    .filter(Boolean);
-  const allUnique = [...new Set(refs)];
+  const { unique: allUnique, ignored } = collectAssetRefs(html, base, dirBase);
   const unique = allUnique.slice(0, assetsLimit);
   const broken = [];
   const warnings = [];
   const probed = [];
-  for (const u of unique) {
-    const a = await probeAsset(resolve(u));
+  for (const ref of unique) {
+    const a = await probeAsset(ref.abs);
     // 报告保留原始地址、完整重定向链和最终状态，便于事后核对。
     probed.push({
-      url: u, method: a.method, status: a.finalStatus, fallback: a.fallback,
+      url: ref.url, method: a.method, status: a.finalStatus, fallback: a.fallback,
       redirected: a.redirected, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
       crossHost: a.crossHost, chain: a.chainHops, level: a.level, reason: a.reason,
     });
     // probed / broken / warnings / redirects 用同一组字段，跨源重定向不会在汇总里丢掉。
     const entry = {
-      url: u, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
+      url: ref.url, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
       redirected: a.redirected, crossHost: a.crossHost, level: a.level, chain: a.chainHops,
     };
     if (a.level === "fail") broken.push({ ...entry, status: a.finalStatus ?? a.reason, method: a.method });
@@ -525,6 +680,7 @@ if (html) {
   }));
   const suffix = allUnique.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allUnique.length} 个；不是全站爬取）` : `（共 ${allUnique.length} 个，覆盖首页引用）`;
   const headNote = fallbackCount ? `；其中 ${fallbackCount} 个 HEAD 不可用，改用 GET` : "";
+  const ignoredNote = ignored.length ? `；另有 ${ignored.length} 个跨源或非 HTTP(S) 引用按策略未请求` : "";
   const crossRedirects = redirects.filter((r) => r.crossHost).length;
   const redirectNote = redirects.length
     ? `；${redirects.length} 个发生重定向${crossRedirects ? `（其中 ${crossRedirects} 个跨主机／跨源，目标未验证）` : ""}；见 chain / finalUrl / finalStatus`
@@ -533,11 +689,11 @@ if (html) {
     "assets",
     broken.length ? "fail" : warnings.length ? "warn" : "pass",
     broken.length
-      ? `${broken.length}/${unique.length} 个资源失败${suffix}：${broken.slice(0, 5).map((b) => `${b.url}（${b.reason}）`).join("、")}${redirectNote}`
+      ? `${broken.length}/${unique.length} 个资源失败${suffix}：${broken.slice(0, 5).map((b) => `${b.url}（${b.reason}）`).join("、")}${redirectNote}${ignoredNote}`
       : warnings.length
-        ? `${warnings.length}/${unique.length} 个资源需人工确认${suffix}：${warnings.slice(0, 5).map((w) => `${w.url}（${w.reason}）`).join("、")}${redirectNote}`
-        : `${unique.length} 个同源资源正常${suffix}${headNote}${redirectNote}`,
-    { broken, warnings, redirects, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
+        ? `${warnings.length}/${unique.length} 个资源需人工确认${suffix}：${warnings.slice(0, 5).map((w) => `${w.url}（${w.reason}）`).join("、")}${redirectNote}${ignoredNote}`
+        : `${unique.length} 个同源资源正常${suffix}${headNote}${redirectNote}${ignoredNote}`,
+    { broken, warnings, redirects, ignored, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
   );
 } else {
   add("html", "warn", "没有拿到首页 HTML；跳过标题、canonical、资源检查");
@@ -591,7 +747,7 @@ if (apiPaths.length) {
         + (comparison?.match ? "，期望 JSON 子集匹配" : "")
         + (reasons.length ? `；${reasons.join("；")}` : "")
         + `（${Date.now() - started}ms）`,
-      { path: p, status, isJson, expectedFound, expectedJsonError, jsonComparison: comparison }
+      { path: p, httpStatus: status, isJson, expectedFound, expectedJsonError, jsonComparison: comparison }
     );
   }
 } else if (expectJson) {
@@ -599,7 +755,8 @@ if (apiPaths.length) {
 }
 
 // ---------------------------------------------------------------- 响应头
-const headers = root.res?.headers;
+// 只有拿到最终 2xx 的首页响应时才检查响应头：3xx/304 的响应头不能代表页面。
+const headers = root.status === 200 ? root.res?.headers : null;
 if (headers) {
   const server = headers.get("server");
   add("server", server ? "pass" : "skip", server || "没有 Server 头");
@@ -612,13 +769,55 @@ if (headers) {
 
 // /index.html 是否收敛到 /
 {
-  const r = await probe(resolve("index.html"));
+  const target = resolve("index.html");
+  const r = await probe(target);
   if (r.res) {
-    add(
-      "index-redirect",
-      r.res.status >= 300 && r.res.status < 400 ? "pass" : "warn",
-      `${r.method} /index.html -> ${r.res.status}${r.res.headers.get("location") ? ` -> ${r.res.headers.get("location")}` : ""}`
-    );
+    const status = r.res.status;
+    const statusClass = classifyStatus(status);
+    const loc = r.res.headers.get("location");
+    const locNote = loc ? ` -> ${loc}` : "";
+    // 只有「常见重定向状态 + 可解析 Location」才算发生了有效重定向；
+    // 304 与少见 3xx 既不跟随，也不能判 pass。
+    if (statusClass === "redirect") {
+      const c = classifyRedirect(target, loc, new URL(base).origin);
+      // HTTP 状态码放 httpStatus：add() 的 status 是检查结论（pass/warn/fail），
+      // 同名的附加字段会被覆盖，root / backup 也用 httpStatus。
+      const baseExtra = { httpStatus: status, statusClass, location: loc, redirect: false, redirectKind: c.kind, next: c.next || null };
+      if (c.kind === "invalid-location") {
+        add("index-redirect", "warn",
+          `${r.method} /index.html -> ${status}${locNote}，但 Location 缺失或无法解析：${c.reason}；不能确认收敛到 /`,
+          { ...baseExtra, convergesToRoot: false });
+      } else if (c.kind !== "same-origin") {
+        // 跨源 / 非 HTTP(S) 目标按策略不请求，也不能把「有重定向」当成收敛到 /。
+        add("index-redirect", "warn",
+          `${r.method} /index.html -> ${status}${locNote}；目标不是同源 HTTP(S)（${c.kind}），按策略不请求，也不能证明收敛到 /：${c.reason}`,
+          { ...baseExtra, convergesToRoot: false });
+      } else {
+        // 只有同源且重定向目标就是站点根时才算收敛；指向别处的 3xx 不能判 pass。
+        const normPath = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
+        const rootPath = normPath(new URL(base).pathname);
+        const targetPath = normPath(new URL(c.next).pathname);
+        const convergesToRoot = targetPath === rootPath;
+        const rootLabel = rootPath === "/" ? "/" : `${rootPath}/`;
+        add("index-redirect", convergesToRoot ? "pass" : "warn",
+          convergesToRoot
+            ? `${r.method} /index.html -> ${status}${locNote}（同源，收敛到站点根 ${rootLabel}）`
+            : `${r.method} /index.html -> ${status}${locNote}；重定向目标不是站点根 ${rootLabel}，确认这是有意为之`,
+          { ...baseExtra, redirect: convergesToRoot, targetPath, convergesToRoot });
+      }
+    } else if (statusClass === "not-modified") {
+      add("index-redirect", "warn",
+        `${r.method} /index.html -> 304 Not Modified，不是重定向；脚本未发送条件请求，不能确认收敛到 /`,
+        { httpStatus: status, statusClass, location: loc, redirect: false });
+    } else if (statusClass === "unexpected-3xx") {
+      add("index-redirect", "warn",
+        `${r.method} /index.html -> ${status}（3xx 但不是可跟随的重定向），不能确认收敛到 /`,
+        { httpStatus: status, statusClass, location: loc, redirect: false });
+    } else {
+      add("index-redirect", "warn",
+        `${r.method} /index.html -> ${status}${locNote}；没有重定向到 /（确认这是有意为之）`,
+        { httpStatus: status, statusClass, location: loc, redirect: false });
+    }
   }
 }
 
@@ -746,10 +945,16 @@ if (backup) {
   const redirectedToMain = b.hops.some((h) => h.location && (() => {
     try { return new URL(h.location, h.url).host === mainHost; } catch { return false; }
   })());
-  const bExtra = { hops: b.hops, redirectOutcome: b.stopped, redirectTarget: b.redirectTarget };
+  const bExtra = {
+    hops: b.hops, redirectOutcome: b.stopped, redirectTarget: b.redirectTarget,
+    httpStatus: b.status, statusClass: b.status == null ? null : classifyStatus(b.status),
+  };
   if (b.error) add("backup", "fail", `备用站请求失败：${b.error}`, bExtra);
   else if (redirectedToMain) add("backup", "fail", "备用站跳转到主站，不是独立备用入口（只解析 Location 判断，未请求主站）", bExtra);
-  else if (b.stopped) add("backup", "fail", `备用站重定向未完成验证：${b.stopReason}（目标未请求）`, bExtra);
+  else if (b.stopped === "not-modified" || b.stopped === "unexpected-3xx") {
+    // 与主站共用状态分类：这两种 3xx 不是重定向，不能写成「重定向未完成验证」。
+    add("backup", "fail", `备用站返回 ${b.status}，不是可验证的响应：${b.stopReason}`, bExtra);
+  } else if (b.stopped) add("backup", "fail", `备用站重定向未完成验证：${b.stopReason}（目标未请求）`, bExtra);
   else {
     const server = b.res.headers.get("server") || "";
     if (b.status !== 200) add("backup", "fail", `备用站 -> ${b.status}${b.hops.at(-1)?.location ? `（${b.hops.at(-1).location}）` : ""}`, bExtra);

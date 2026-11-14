@@ -26,7 +26,7 @@ const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { retu
 
 function walk(dir, acc = []) {
   for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (ent.name === ".git" || ent.name === "node_modules" || ent.name === ".work") continue;
+    if (ent.name === ".git" || ent.name === "node_modules" || ent.name === ".work" || ent.name === ".tmp") continue;
     const full = path.join(dir, ent.name);
     if (ent.isDirectory()) walk(full, acc);
     else acc.push(full);
@@ -40,7 +40,7 @@ if (!isFile(skillFile)) {
   process.exit(2);
 }
 
-const text = fs.readFileSync(skillFile, "utf8");
+const text = fs.readFileSync(skillFile, "utf8").replace(/^\uFEFF/, "");
 const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
 if (!fm) fail("SKILL.md 缺少 YAML frontmatter（--- ... ---）");
 
@@ -48,11 +48,24 @@ let name = null;
 let description = null;
 if (fm) {
   const lines = fm[1].split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(/^([a-z_]+):\s*(.*)$/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([a-z_]+):\s*(.*)$/);
     if (!m) continue;
-    if (m[1] === "name") name = m[2].trim().replace(/^["']|["']$/g, "");
-    if (m[1] === "description") description = m[2].trim().replace(/^["']|["']$/g, "");
+    const key = m[1];
+    let value = m[2].trim();
+    // YAML 块标量：description: >- / | 后跟缩进的多行值（合法写法，不能读成 ">-"）。
+    if (/^[|>][+-]?$/.test(value)) {
+      const block = [];
+      while (i + 1 < lines.length && (lines[i + 1].trim() === "" || /^\s+\S/.test(lines[i + 1]))) {
+        block.push(lines[i + 1].replace(/^\s+/, ""));
+        i++;
+      }
+      value = (value.startsWith("|") ? block.join("\n") : block.join(" ").replace(/\s+/g, " ")).trim();
+    } else {
+      value = value.replace(/^["']|["']$/g, "");
+    }
+    if (key === "name") name = value;
+    if (key === "description") description = value;
   }
 }
 
@@ -74,11 +87,14 @@ const skillLines = text.replace(/\s+$/, "").split(/\r?\n/).length;
 if (skillLines > 400) notes.push(`SKILL.md 有 ${skillLines} 行，偏长；考虑把细节移到 references/`);
 
 // 文档里提到的相对路径必须真实存在。忽略 <某目录>/scripts/... 这类外部路径。
+// fenced code block 里的内容是示例，不参与路径/链接扫描（行内代码仍要检查：
+// 技能文档习惯用反引号引用真实文件）。
+const stripFences = (s) => s.replace(/```[\s\S]*?```/g, "").replace(/~~~[\s\S]*?~~~/g, "");
 const mdFiles = walk(skillRoot).filter((f) => /\.md$/i.test(f));
 const pathRef = /(?<![<\w/])(references|templates|scripts|tests)\/[A-Za-z0-9._/-]+\b/g;
 const seen = new Set();
 for (const f of mdFiles) {
-  const body = fs.readFileSync(f, "utf8");
+  const body = stripFences(fs.readFileSync(f, "utf8"));
   for (const m of body.matchAll(pathRef)) {
     const ref = m[0].replace(/[.,;:)]+$/, "");
     // tests/.work 与 last-run.txt 是运行期产物，不属于仓库内容。
@@ -87,11 +103,14 @@ for (const f of mdFiles) {
     seen.add(ref);
     if (!isFile(path.join(skillRoot, ref))) fail(`${rel(f)} 引用了不存在的路径：${ref}`);
   }
-  // 本地 markdown 链接
-  for (const m of body.matchAll(/\]\((?!https?:|mailto:|#)([^)]+)\)/g)) {
-    const target = m[1].split("#")[0];
-    if (!target) continue;
-    if (!isFile(path.join(path.dirname(f), target))) fail(`${rel(f)} 里有失效的相对链接：${m[1]}`);
+  // 本地 markdown 链接（允许链接标题、忽略外部 scheme 与目录链接）
+  for (const m of body.matchAll(/\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g)) {
+    const target = m[1];
+    if (!target || /^(?:[a-z][a-z0-9+.-]*:|#)/i.test(target)) continue;
+    const targetPath = target.split("#")[0].split("?")[0];
+    if (!targetPath || targetPath.endsWith("/")) continue;
+    const abs = path.resolve(path.dirname(f), targetPath);
+    if (!isFile(abs) && !isDir(abs)) fail(`${rel(f)} 里有失效的相对链接：${m[1]}`);
   }
 }
 
@@ -113,7 +132,7 @@ for (const f of walk(skillRoot)) {
 const dirs = [];
 (function collect(dir) {
   for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (ent.name === ".git" || ent.name === "node_modules") continue;
+    if (ent.name === ".git" || ent.name === "node_modules" || ent.name === ".work" || ent.name === ".tmp") continue;
     if (ent.isDirectory()) {
       dirs.push(path.join(dir, ent.name));
       collect(path.join(dir, ent.name));
@@ -121,6 +140,8 @@ const dirs = [];
   }
 })(skillRoot);
 for (const d of dirs) {
+  const base = path.basename(d);
+  if (!/^[\x20-\x7E]+$/.test(base)) fail(`目录名不是 ASCII：${rel(d)}`);
   if (fs.readdirSync(d).length === 0) fail(`空目录：${rel(d)}`);
 }
 

@@ -239,17 +239,33 @@ function main() {
   }
 
   function walk(d, acc = []) {
-    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return acc; // 不可读目录不能中断整轮检查
+    }
+    for (const ent of entries) {
       const full = path.join(d, ent.name);
       if (ent.isDirectory()) walk(full, acc);
       else if (ent.isFile()) acc.push(full);
     }
     return acc;
   }
+  const isFile = (p) => {
+    try { return fs.statSync(p).isFile(); } catch { return false; }
+  };
 
   const files = walk(dir);
   const rel = (f) => path.relative(dir, f).replace(/\\/g, "/");
-  const sizes = files.map((f) => ({ file: rel(f), bytes: fs.statSync(f).size })).sort((a, b) => b.bytes - a.bytes);
+  // 产物文件是「部署后在 CDN 上真实存在的名字」：用集合做大小写敏感匹配，
+  // 不能像 Windows 的 fs.existsSync 那样把 Assets/App.css 当成 assets/app.css。
+  const fileSet = new Set(files.map(rel));
+  const sizes = files
+    .map((f) => {
+      try { return { file: rel(f), bytes: fs.statSync(f).size }; } catch { return { file: rel(f), bytes: 0 }; }
+    })
+    .sort((a, b) => b.bytes - a.bytes);
   const total = sizes.reduce((n, f) => n + f.bytes, 0);
   const MAX_FILE = 25 * 1024 * 1024;
 
@@ -277,8 +293,8 @@ function main() {
 
   if (total > 1024 * 1024 * 1024) push("total-size", "warn", "产物超过 1 GiB；确认目标套餐和缓存行为");
 
-  const hasIndex = fs.existsSync(path.join(dir, "index.html"));
-  const has404 = fs.existsSync(path.join(dir, "404.html"));
+  const hasIndex = isFile(path.join(dir, "index.html"));
+  const has404 = isFile(path.join(dir, "404.html"));
   if (hasIndex) push("index", "pass", "存在 index.html");
   else if (mode === "spa") push("index", "warn", "SPA 模式但没有 index.html；app shell 通常就是 index.html，部署前确认入口文件", { severity: "high" });
   else push("index", "warn", "产物根目录没有 index.html；站点根路径会 404");
@@ -305,15 +321,15 @@ function main() {
   }
 
   for (const f of ["_headers", "_redirects"]) {
-    if (fs.existsSync(path.join(dir, f))) push(f, "pass", `${f} 在产物根目录`);
+    if (isFile(path.join(dir, f))) push(f, "pass", `${f} 在产物根目录`);
     else push(f, "skip", `没有 ${f}`);
   }
 
-  if (fs.existsSync(path.join(dir, "CNAME"))) {
+  if (isFile(path.join(dir, "CNAME"))) {
     push("cname", "warn", "产物里有 CNAME；它不应该出现在 Cloudflare 构建产物中", { severity: "medium" });
   }
 
-  if (fs.existsSync(path.join(dir, ".nojekyll"))) {
+  if (isFile(path.join(dir, ".nojekyll"))) {
     push("nojekyll", "skip", "存在 .nojekyll（仅 GitHub Pages 用，无害）");
   }
 
@@ -321,7 +337,8 @@ function main() {
   const broken = [];
   let checkedAssets = 0;
   if (hasIndex) {
-    const html = fs.readFileSync(path.join(dir, "index.html"), "utf8");
+    let html = "";
+    try { html = fs.readFileSync(path.join(dir, "index.html"), "utf8"); } catch { html = ""; }
     const refs = [...html.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
       .map((m) => m[1])
       .filter((u) => !/^(?:https?:)?\/\//i.test(u) && !u.startsWith("data:") && !u.startsWith("#") && !u.startsWith("mailto:") && !u.startsWith("tel:"))
@@ -330,11 +347,15 @@ function main() {
     const unique = [...new Set(refs)].slice(0, 40);
     checkedAssets = unique.length;
     for (const u of unique) {
-      const clean = u.replace(/^\//, "");
+      let decoded = u;
+      try { decoded = decodeURIComponent(u); } catch { /* 保留原值 */ }
+      // 统一成 posix 相对路径；拒绝 .. 逃逸与绝对路径，再和产物文件集合严格比对。
+      const clean = decoded.replace(/\\/g, "/").replace(/^\/+/, "");
       if (!clean) continue;
-      let decoded = clean;
-      try { decoded = decodeURIComponent(clean); } catch { /* 保留原值 */ }
-      if (!fs.existsSync(path.join(dir, decoded))) broken.push(u);
+      const normalized = path.posix.normalize(clean);
+      if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized) || !fileSet.has(normalized)) {
+        broken.push(u);
+      }
     }
     if (broken.length) push("assets", "warn", `${broken.length} 个引用资源在产物中找不到：${broken.slice(0, 5).join("、")}`, { broken, checked: checkedAssets });
     else push("assets", "pass", `首页引用的 ${checkedAssets} 个同源资源都能找到（只检查首页，不是全站）`, { checked: checkedAssets });

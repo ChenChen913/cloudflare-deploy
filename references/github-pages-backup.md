@@ -80,11 +80,13 @@ curl -s -o /dev/null -w '%{http_code}\n' "$GH/assets/style.css"
 
 第 1 步返回 301、第 2 步看到自定义域名，就说明备用站不独立。
 
-脚本可以自动检查：
+脚本可以自动检查第 1–3 步（根状态、是否跳主站、Server 头）：
 
 ```bash
 node "<技能目录>/scripts/verify-deployment.mjs" --url "<主站地址>" --backup "$GH" --json
 ```
+
+第 4–5 步（未知路径必须 404、子页面和资源能取）脚本的 `--backup` 不覆盖，仍需上面的 `curl` 或人工验证。
 
 ## 5. 索引策略
 

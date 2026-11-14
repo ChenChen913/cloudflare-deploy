@@ -77,6 +77,7 @@ export function evaluateDeployProbe(input = {}) {
     url = null,
     http = null,
     cleanupOk = true,
+    cleanupSkipped = false,
     worker = "",
   } = input;
 
@@ -110,14 +111,22 @@ export function evaluateDeployProbe(input = {}) {
     };
   }
 
-  const cleanup = {
-    worker,
-    id: "deploy-cleanup",
-    status: cleanupOk ? "pass" : "warn",
-    detail: cleanupOk
-      ? `已删除临时 Worker ${worker}`
-      : `未能删除 ${worker}，请到控制台手动删除（不要留着占资源）`,
-  };
+  // 部署失败时没有创建临时 Worker，清理不适用；不能写成「未能删除」。
+  const cleanup = cleanupSkipped
+    ? {
+      worker,
+      id: "deploy-cleanup",
+      status: "skip",
+      detail: `部署命令失败，没有创建临时 Worker ${worker}，无需清理`,
+    }
+    : {
+      worker,
+      id: "deploy-cleanup",
+      status: cleanupOk ? "pass" : "warn",
+      detail: cleanupOk
+        ? `已删除临时 Worker ${worker}`
+        : `未能删除 ${worker}，请到控制台手动删除（不要留着占资源）`,
+    };
 
   return { deploy, cleanup };
 }

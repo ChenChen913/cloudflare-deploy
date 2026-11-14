@@ -142,6 +142,10 @@ w("orm/src/lib/db.ts", `import { neon } from "@neondatabase/serverless";\nimport
 w("multi/site/index.html", `<!doctype html><html><body>site</body></html>\n`);
 w("multi/docs/index.html", `<!doctype html><html><body>docs</body></html>\n`);
 
+// wrangler.jsonc：JSONC 注释 + JSON 键值语法（与 wrangler.toml 的 `key = "value"` 不同）
+w("wrangler-json/wrangler.jsonc", `{\n  // JSONC 注释不影响字段解析\n  "name": "wrangler-json-fixture",\n  "compatibility_date": "2026-11-01",\n  "assets": {\n    "directory": "./public",\n    "not_found_handling": "404-page"\n  }\n}\n`);
+w("wrangler-json/public/index.html", `<!doctype html><html><body>assets</body></html>\n`);
+
 // ---------------------------------------------------------------- 识别
 const vite = detect(path.join(work, "vite"));
 assert("Vite：框架/类型", vite.project.framework === "vite" && vite.project.kind === "spa", `${vite.project.framework}/${vite.project.kind}`);
@@ -205,6 +209,20 @@ const multi = detect(path.join(work, "multi"));
 assert("多入口：列出 index.html", multi.project.htmlEntries.length === 2, multi.project.htmlEntries.join(","));
 assert("多入口：要求确认站点根", multi.risks.some((r) => /个 index\.html/.test(r)), multi.risks.join(" | "));
 
+const wjson = detect(path.join(work, "wrangler-json"));
+assert("wrangler.jsonc：读出 name / assets.directory / compatibility_date",
+  wjson.cloudflare.wrangler?.name === "wrangler-json-fixture"
+    && wjson.cloudflare.wrangler?.assetsDirectory === "./public"
+    && wjson.cloudflare.wrangler?.compatibilityDate === "2026-11-01",
+  JSON.stringify(wjson.cloudflare.wrangler));
+assert("wrangler.jsonc：显式 assets.directory 作为输出目录（confirmed）并建议 Workers",
+  wjson.project.outputDir === "./public"
+    && wjson.evidence.outputDir.confidence === "confirmed"
+    && /assets\.directory/.test(wjson.evidence.outputDir.source)
+    && wjson.target.suggested === "workers"
+    && !wjson.risks.some((r) => /输出目录未知/.test(r)),
+  JSON.stringify({ outputDir: wjson.project.outputDir, evidence: wjson.evidence.outputDir, target: wjson.target, risks: wjson.risks }));
+
 // ---------------------------------------------------------------- 产物检查
 const art = path.join(work, "artifact");
 w("artifact/index.html", `<!doctype html><html><head><title>OK</title><link rel="canonical" href="https://example.com/"><link rel="stylesheet" href="/assets/app.css"></head><body><h1>Hello</h1><script src="/missing.js"></script></body></html>`);
@@ -215,6 +233,23 @@ const buildOk = checkBuild(art);
 assert("产物：通过但有警告", buildOk.code === 0 && buildOk.json.summary.warnings >= 1, `警告=${buildOk.json.summary.warnings}`);
 assert("产物：发现坏资源", buildOk.json.checks.some((c) => c.id === "assets" && c.status === "warn"));
 assert("产物：报告实际检查的资源数", buildOk.json.summary.assetsChecked >= 2, `checked=${buildOk.json.summary.assetsChecked}`);
+assert("产物：_headers 在产物根目录判通过", buildOk.json.checks.some((c) => c.id === "_headers" && c.status === "pass"));
+assert("产物：没有 _redirects 明确跳过", buildOk.json.checks.some((c) => c.id === "_redirects" && c.status === "skip"));
+
+// 资源存在性必须按部署后的真实文件名匹配：大小写不同（Windows 不敏感）与 .. 逃逸都要报出来。
+const assetCaseDir = path.join(work, "asset-case");
+w("asset-case/index.html", `<html><head><link rel="stylesheet" href="/Assets/App.css"><script src="../outside.html"></script><link rel="stylesheet" href="assets/app.css"></head></html>`);
+w("asset-case/assets/app.css", `body{}`);
+const buildCase = checkBuild(assetCaseDir, "static");
+const caseAssets = buildCase.json.checks.find((c) => c.id === "assets");
+assert("产物：资源引用大小写不一致判警告", caseAssets?.status === "warn" && caseAssets.broken?.includes("/Assets/App.css"), JSON.stringify(caseAssets));
+assert("产物：.. 逃出产物目录的引用判坏", caseAssets?.broken?.includes("../outside.html") && !caseAssets.broken.includes("assets/app.css"), JSON.stringify(caseAssets));
+
+// index.html 是目录时不能崩溃、拿不到 JSON；应输出结构化的 index 警告。
+const weirdIndexDir = path.join(work, "weird-index");
+fs.mkdirSync(path.join(weirdIndexDir, "index.html"), { recursive: true });
+const buildWeird = checkBuild(weirdIndexDir, "static");
+assert("产物：index.html 是目录时输出 JSON 不崩溃", buildWeird.json?.mode === "static" && buildWeird.json.checks.some((c) => c.id === "index" && c.status === "warn"), JSON.stringify(buildWeird.json?.checks?.find((c) => c.id === "index")));
 
 const no404 = path.join(work, "no404");
 w("no404/index.html", `<html><body>hi</body></html>`);
@@ -345,6 +380,9 @@ const staticServer = http.createServer((req, res) => {
 const spaServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
   if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
+  // SPA 回退的状态分类：304 / 少见 3xx 不是「重定向式回退」，也不能判通过。
+  if (p === "/deep304") { res.writeHead(304); res.end(); return; }
+  if (p === "/deep300") { res.writeHead(300); res.end(); return; }
   if (p === "/assets/main.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end(req.method === "HEAD" ? "" : "console.log('spa')"); return; }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8", server: "local-spa" });
   res.end(`<!doctype html><html><head><title>Local SPA</title></head><body><div id="root"></div><script type="module" src="/assets/main.js"></script></body></html>`);
@@ -390,6 +428,33 @@ const dupCanonicalServer = http.createServer((req, res) => {
   res.end(`<!doctype html><html><head><title>dup</title><link rel="canonical" href="https://a.example/"><link rel="canonical" href="https://b.example/"></head><body>dup</body></html>`);
 });
 
+// canonical href 形态矩阵：缺 href / 空 href / 单引号 / 双引号 / 不带引号 / 无法解析。
+// 每个页面都真实返回 HTML，测试执行验收脚本后断言 JSON 里的 canonical 检查。
+let canonicalHrefBase = "";
+const canonicalHrefCases = {
+  "/missing-href/": "missing",
+  "/empty-href/": "empty",
+  "/single-quote/": "single",
+  "/double-quote/": "double",
+  "/unquoted/": "unquoted",
+  "/bad-href/": "bad",
+};
+const canonicalHrefServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  const kind = canonicalHrefCases[p];
+  if (!kind) { res.writeHead(404, { "content-type": "text/html" }); res.end("nf"); return; }
+  const self = `${canonicalHrefBase}${p}`;
+  let tag;
+  if (kind === "missing") tag = `<link rel="canonical">`;
+  else if (kind === "empty") tag = `<link rel="canonical" href="">`;
+  else if (kind === "single") tag = `<link rel='canonical' href='${self}'>`;
+  else if (kind === "double") tag = `<link rel="canonical" href="${self}">`;
+  else if (kind === "unquoted") tag = `<link rel="canonical" href=${self}>`;
+  else tag = `<link rel="canonical" href="http://">`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><title>canonical href</title>${tag}</head><body>ok</body></html>`);
+});
+
 let backupTarget = "";
 let crossTargetBase = "";
 const backupServer = http.createServer((req, res) => {
@@ -406,6 +471,9 @@ const backupServer = http.createServer((req, res) => {
     res.end("<!doctype html><html><head><title>backup chain final</title></head><body>ok</body></html>");
     return;
   }
+  // 304 / 少见 3xx：不是可验证的响应，不能写成「重定向未完成验证」。
+  if (p === "/b304/") { res.writeHead(304); res.end(); return; }
+  if (p === "/b300/") { res.writeHead(300); res.end(); return; }
   const loc = p === "/to-main/" ? `${crossTargetBase}/backup-landing` : `${backupTarget}/`;
   res.writeHead(301, { location: loc });
   res.end();
@@ -431,6 +499,8 @@ const ssrServer = http.createServer((req, res) => {
 });
 
 // CORS 矩阵：按路径返回不同的预检响应，覆盖允许/拒绝 Origin、缺方法、缺头、凭据错误。
+// 同时记录非预检请求实际带上的凭据头，用于证明脚本没有「声明了凭据就真发 Cookie」。
+const corsMatrixSeen = [];
 const corsMatrixServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
   const h = {
@@ -462,6 +532,7 @@ const corsMatrixServer = http.createServer((req, res) => {
   if (p === "/case-normalize") h["access-control-allow-methods"] = "PUT";
   if (p === "/acao-wildcard") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
   if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
+  corsMatrixSeen.push({ path: p, cookie: req.headers.cookie || null, authorization: req.headers.authorization || null });
   res.writeHead(200, { "content-type": "text/html", ...h });
   res.end(`<!doctype html><html><head><title>cors</title></head><body>ok</body></html>`);
 });
@@ -478,9 +549,22 @@ const assetPages = {
   "/case/head405/": "/a/head405.css",
   "/case/noloc/": "/a/noloc.css",
   "/case/badproto/": "/a/badproto.css",
+  "/case/304/": "/a/304.css",
+  "/case/307ok/": "/a/307.css",
+  "/case/308ok/": "/a/308.css",
+  "/case/300/": "/a/300.css",
 };
 const assetRedirectServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
+  if (p === "/case/hostile/") {
+    // 伪装成相对地址的跨源 URL（反斜杠会被 URL 解析成协议相对地址）+ 非 HTTP(S) 链接：
+    // 脚本只能请求 /a/direct.css，绝不能请求跨源目标，也不能因 javascript: 链接判坏。
+    const cross = new URL(crossTargetBase);
+    const twoBackslashes = "\\\\";
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>hostile</title><link rel="stylesheet" href="/a/direct.css"></head><body><a href="javascript:void(0)">j</a><img src="${twoBackslashes}${cross.host}/ssrf-probe"><a href="https:/[">bad</a></body></html>`);
+    return;
+  }
   if (assetPages[p]) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><html><head><title>assets</title><link rel="stylesheet" href="${assetPages[p]}"></head><body>ok</body></html>`);
@@ -494,6 +578,10 @@ const assetRedirectServer = http.createServer((req, res) => {
   }
   if (p === "/a/301.css") { res.writeHead(301, { location: "/a/final.css" }); res.end(); return; }
   if (p === "/a/302.css") { res.writeHead(302, { location: "/a/missing.css" }); res.end(); return; }
+  if (p === "/a/307.css") { res.writeHead(307, { location: "/a/final.css" }); res.end(); return; }
+  if (p === "/a/308.css") { res.writeHead(308, { location: "/a/final.css" }); res.end(); return; }
+  if (p === "/a/304.css") { res.writeHead(304, { "content-type": "text/css" }); res.end(); return; }
+  if (p === "/a/300.css") { res.writeHead(300, { "content-type": "text/css" }); res.end("body{}"); return; }
   if (p === "/a/cross.css") { res.writeHead(302, { location: `${assetTargetBase}/final.css` }); res.end(); return; }
   if (p === "/a/loop.css") { res.writeHead(301, { location: "/a/loop.css" }); res.end(); return; }
   if (p === "/a/noloc.css") { res.writeHead(308, {}); res.end(); return; }
@@ -540,6 +628,11 @@ const rootRedirectServer = http.createServer((req, res) => {
   }
   if (p === "/case/same301/") { res.writeHead(301, { location: "/final/" }); res.end(); return; }
   if (p === "/case/same302/") { res.writeHead(302, { location: "/gone/" }); res.end(); return; }
+  // 3xx 状态分类矩阵：只有 301/302/303/307/308 需要跟随 Location。
+  const statusCase = p.match(/^\/case\/r(301|302|303|307|308)\/$/);
+  if (statusCase) { res.writeHead(Number(statusCase[1]), { location: "/final/" }); res.end(); return; }
+  if (p === "/case/304/") { res.writeHead(304); res.end(); return; }
+  if (p === "/case/300/") { res.writeHead(300); res.end(); return; }
   if (p === "/case/crosshost/") { res.writeHead(302, { location: `http://localhost:${new URL(crossTargetBase).port}/cross-landing` }); res.end(); return; }
   if (p === "/case/loopback/") { res.writeHead(302, { location: `${crossTargetBase}/loop-landing` }); res.end(); return; }
   if (p === "/case/proto-up/") { res.writeHead(302, { location: `https://127.0.0.1:${new URL(rootRedirectBase).port}/tls-landing` }); res.end(); return; }
@@ -584,6 +677,35 @@ const tlsCanonicalServer = https.createServer({ key: TLS_KEY, cert: TLS_CERT }, 
   res.end(`<!doctype html><html><head><title>tls canonical</title>${tags}</head><body>ok</body></html>`);
 });
 
+// /index.html 状态矩阵：301/302/303/307/308 收敛到目录根；304/300 不是有效重定向。
+let indexStatusBase = "";
+const indexStatusServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  // 跨源 / 非 HTTP(S) / 同源其他路径 / 缺 Location：都不能判「收敛到 /」。
+  const special = {
+    "/idxcross/index.html": { code: 302, location: "https://other.example/" },
+    "/idxfile/index.html": { code: 302, location: "file:///etc/passwd" },
+    "/idxelsewhere/index.html": { code: 302, location: "/somewhere/" },
+    "/idxnoloc/index.html": { code: 301 },
+  };
+  if (special[p]) { res.writeHead(special[p].code, special[p].location ? { location: special[p].location } : {}); res.end(); return; }
+  const specialRoot = p.match(/^\/(idxcross|idxfile|idxelsewhere|idxnoloc)\/$/);
+  if (specialRoot) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>idx ${specialRoot[1]}</title><link rel="canonical" href="${indexStatusBase}/${specialRoot[1]}/"></head><body>ok</body></html>`);
+    return;
+  }
+  const m = p.match(/^\/idx(300|301|302|303|304|307|308)\/(index\.html)?$/);
+  if (!m) { res.writeHead(404, { "content-type": "text/html" }); res.end("nf"); return; }
+  const code = Number(m[1]);
+  if (m[2]) {
+    if (code === 304 || code === 300) { res.writeHead(code); res.end(); return; }
+    res.writeHead(code, { location: `/idx${code}/` }); res.end(); return;
+  }
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><title>idx ${code}</title><link rel="canonical" href="${indexStatusBase}/idx${code}/"></head><body>ok</body></html>`);
+});
+
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
 const subSeen = [];
 const subServer = http.createServer((req, res) => {
@@ -601,7 +723,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer, tlsCanonicalServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, tlsCanonicalServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -610,6 +732,8 @@ const spaUrl = `http://127.0.0.1:${spaServer.address().port}`;
 const corsUrl = `http://127.0.0.1:${corsServer.address().port}`;
 const badCorsUrl = `http://127.0.0.1:${badCorsServer.address().port}`;
 const dupUrl = `http://127.0.0.1:${dupCanonicalServer.address().port}`;
+canonicalHrefBase = `http://127.0.0.1:${canonicalHrefServer.address().port}`;
+indexStatusBase = `http://127.0.0.1:${indexStatusServer.address().port}`;
 const backupUrl = `http://127.0.0.1:${backupServer.address().port}/`;
 const ssrUrl = `http://127.0.0.1:${ssrServer.address().port}`;
 const corsMatrixUrl = `http://127.0.0.1:${corsMatrixServer.address().port}`;
@@ -630,6 +754,14 @@ assert("验收：HEAD 405 时用 GET 兜底", (() => {
   const assets = v1j.checks.find((c) => c.id === "assets");
   return assets.status === "pass" && assets.probed.some((p) => p.url === "/assets/app.css" && p.method === "GET" && p.fallback);
 })(), "app.css 只支持 GET");
+assert("验收：标题 / content-type / cache-control 检查落进 JSON", (() => {
+  const byId = (id) => v1j.checks.find((c) => c.id === id);
+  return byId("title")?.status === "pass" && byId("content-type")?.status === "pass" && byId("cache-control")?.status === "pass";
+})(), JSON.stringify(["title", "content-type", "cache-control"].map((id) => v1j.checks.find((c) => c.id === id))));
+assert("验收：安全头按数量给结论", (() => {
+  const sec = v1j.checks.find((c) => c.id === "security-headers");
+  return sec?.status === "warn" && /x-content-type-options/.test(sec.detail || "");
+})(), JSON.stringify(v1j.checks.find((c) => c.id === "security-headers")));
 
 const vSub = await runVerify(["--url", `${subBase}/`, "--mode", "static", "--json"]);
 const vSubJ = JSON.parse(vSub.out);
@@ -650,10 +782,20 @@ assert("验收：静态站按 SPA 模式判为“深链 404”警告", v2j.check
 const v3 = await runVerify(["--url", spaUrl, "--mode", "spa", "--json"]);
 const v3j = JSON.parse(v3.out);
 assert("验收：SPA 深链回退通过", v3.code === 0 && v3j.checks.some((c) => c.id === "spa-fallback" && c.status === "pass"), "200 + app shell");
+assert("验收：SPA 回退检查暴露真实 HTTP 状态码", v3j.checks.find((c) => c.id === "spa-fallback")?.httpStatus === 200, JSON.stringify(v3j.checks.find((c) => c.id === "spa-fallback")));
+
+// SPA 回退的 304 / 少见 3xx：既不是 200+shell，也不是重定向式回退，不能判通过。
+const vSpa304 = await runVerify(["--url", spaUrl, "--mode", "spa", "--expect-404", "/deep304", "--json"]);
+const sf304 = JSON.parse(vSpa304.out).checks.find((c) => c.id === "spa-fallback");
+assert("SPA 回退：304 不判通过也不写成重定向", vSpa304.code === 1 && sf304?.status === "fail" && sf304.httpStatus === 304 && !/重定向式回退/.test(sf304.detail || ""), JSON.stringify(sf304));
+const vSpa300 = await runVerify(["--url", spaUrl, "--mode", "spa", "--expect-404", "/deep300", "--json"]);
+const sf300 = JSON.parse(vSpa300.out).checks.find((c) => c.id === "spa-fallback");
+assert("SPA 回退：少见 3xx（300）不判通过", vSpa300.code === 1 && sf300?.status === "fail" && sf300.httpStatus === 300, JSON.stringify(sf300));
 
 const v4 = await runVerify(["--url", spaUrl, "--mode", "static", "--json"]);
 const v4j = JSON.parse(v4.out);
 assert("验收：把 SPA 当静态站会判 404 失败", v4.code === 1 && v4j.checks.some((c) => c.id === "404" && c.status === "fail"), "这正是原逻辑的冲突点");
+assert("验收：404 检查暴露真实 HTTP 状态码", v4j.checks.find((c) => c.id === "404")?.httpStatus === 200, JSON.stringify(v4j.checks.find((c) => c.id === "404")));
 
 const v5 = await runVerify(["--url", staticBase, "--mode", "static", "--origin", "https://app.example.com", "--cors-url", `${corsUrl}/api/data`, "--json"]);
 const v5j = JSON.parse(v5.out);
@@ -667,6 +809,18 @@ assert("验收：重复 ACAO 判失败", v6.code === 1 && v6j.checks.some((c) =>
 const v6b = await runVerify(["--url", badCorsUrl, "--mode", "static", "--origin", "https://app.example.com", "--cors-url", `${badCorsUrl}/wrong`, "--json"]);
 const v6bJ = JSON.parse(v6b.out);
 assert("验收：ACAO 与请求来源不匹配判失败", v6b.code === 1 && v6bJ.checks.some((c) => c.id === "cors" && c.status === "fail"), "浏览器会拒绝");
+
+// 命令行参数写错时应给出用法错误（退出码 2），而不是崩栈 / 静默跳过检查。
+for (const [name, args] of [
+  ["--api 的 URL 无法解析", ["--api", "http://["]],
+  ["--expect-404 的 URL 无法解析", ["--expect-404", "http://["]],
+  ["--assets-limit 不是正整数", ["--assets-limit", "abc"]],
+  ["--timeout 不是正数", ["--timeout", "0"]],
+  ["--backup 不是合法 URL", ["--backup", "http://["]],
+]) {
+  const r = await runVerify(["--url", staticBase, "--mode", "static", ...args, "--json"]);
+  assert(`CLI：${name} 退出码 2 且不输出半截 JSON`, r.code === 2 && !r.out.trim() && /无法解析|正整数|正数|合法 URL/.test(r.err), `code=${r.code} out=${r.out.slice(0, 40)} err=${r.err.slice(0, 80)}`);
+}
 
 // ---------------------------------------------------------------- CORS 预检矩阵
 const corsCase = async (p, extra = []) => {
@@ -748,6 +902,9 @@ assert("简单请求：有凭据 + 精确 ACAO + ACAC=true 通过", sCredOk?.sta
 const sCredNoAcac = await simpleCase("/simple-exact-no-acac", ["--cors-credentials"]);
 assert("简单请求：有凭据 + 精确 ACAO + 缺 ACAC 判失败", sCredNoAcac?.status === "fail" && /Allow-Credentials/.test(sCredNoAcac.detail), JSON.stringify(sCredNoAcac));
 assert("简单请求：--cors-credentials 是声明的预期模式，不是脚本真的发了 Cookie", sStarAcac?.credentialsDeclaredByUser === true && sStarAcac.credentialsMode === "declared-no-credentials" && sCredOk?.credentialsMode === "declared-with-credentials");
+assert("简单请求：脚本实际没有发送 Cookie / Authorization",
+  corsMatrixSeen.length > 0 && corsMatrixSeen.every((r) => !r.cookie && !r.authorization),
+  JSON.stringify(corsMatrixSeen.slice(0, 3)));
 
 const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
@@ -790,9 +947,65 @@ assert("canonical：多个标签维持原有失败判定",
   cMulti.canonical?.status === "fail" && cMulti.code === 1
     && /2 个 canonical 标签/.test(cMulti.canonical.detail), JSON.stringify(cMulti.canonical));
 
+// ---------------------------------------------------------------- canonical href 形态矩阵（真实 HTTP）
+const canonicalHrefCase = async (p) => {
+  const r = await runVerify(["--url", `${canonicalHrefBase}${p}`, "--mode", "static", "--json"]);
+  let j = null;
+  try { j = JSON.parse(r.out); } catch { /* 断言里带上 stderr */ }
+  return { code: r.code, err: r.err, canonical: j?.checks?.find((c) => c.id === "canonical") };
+};
+const hrefMissing = await canonicalHrefCase("/missing-href/");
+assert("canonical href：缺少 href 判失败，不当成指向自身",
+  hrefMissing.code === 1 && hrefMissing.canonical?.status === "fail"
+    && hrefMissing.canonical.hrefState === "missing" && hrefMissing.canonical.href === null
+    && hrefMissing.canonical.sameHost === undefined && hrefMissing.canonical.samePath === undefined
+    && /缺少 href/.test(hrefMissing.canonical.detail) && !/canonical 指向自身/.test(hrefMissing.canonical.detail),
+  JSON.stringify({ canonical: hrefMissing.canonical, err: hrefMissing.err }));
+const hrefEmpty = await canonicalHrefCase("/empty-href/");
+assert("canonical href：空字符串判失败，不解析成当前站点",
+  hrefEmpty.code === 1 && hrefEmpty.canonical?.status === "fail"
+    && hrefEmpty.canonical.hrefState === "empty" && hrefEmpty.canonical.href === ""
+    && hrefEmpty.canonical.sameHost === undefined && hrefEmpty.canonical.samePath === undefined
+    && /为空字符串/.test(hrefEmpty.canonical.detail) && !/canonical 指向自身/.test(hrefEmpty.canonical.detail),
+  JSON.stringify({ canonical: hrefEmpty.canonical, err: hrefEmpty.err }));
+const hrefSingle = await canonicalHrefCase("/single-quote/");
+assert("canonical href：单引号属性值按指向自身通过",
+  hrefSingle.code === 0 && hrefSingle.canonical?.status === "pass"
+    && hrefSingle.canonical.hrefState === "valid"
+    && hrefSingle.canonical.sameProtocol === true && hrefSingle.canonical.sameHost === true
+    && hrefSingle.canonical.samePath === true, JSON.stringify(hrefSingle.canonical));
+const hrefDouble = await canonicalHrefCase("/double-quote/");
+assert("canonical href：双引号属性值按指向自身通过",
+  hrefDouble.code === 0 && hrefDouble.canonical?.status === "pass"
+    && hrefDouble.canonical.hrefState === "valid"
+    && hrefDouble.canonical.sameProtocol === true && hrefDouble.canonical.sameHost === true
+    && hrefDouble.canonical.samePath === true, JSON.stringify(hrefDouble.canonical));
+const hrefUnquoted = await canonicalHrefCase("/unquoted/");
+assert("canonical href：不带引号的合法属性值按指向自身通过",
+  hrefUnquoted.code === 0 && hrefUnquoted.canonical?.status === "pass"
+    && hrefUnquoted.canonical.hrefState === "valid"
+    && hrefUnquoted.canonical.sameProtocol === true && hrefUnquoted.canonical.sameHost === true
+    && hrefUnquoted.canonical.samePath === true, JSON.stringify(hrefUnquoted.canonical));
+const hrefBad = await canonicalHrefCase("/bad-href/");
+assert("canonical href：无法解析判失败，不回退到当前站点",
+  hrefBad.code === 1 && hrefBad.canonical?.status === "fail"
+    && hrefBad.canonical.hrefState === "invalid" && hrefBad.canonical.href === "http://"
+    && hrefBad.canonical.sameHost === undefined && hrefBad.canonical.samePath === undefined
+    && /无法解析/.test(hrefBad.canonical.detail) && !/canonical 指向自身/.test(hrefBad.canonical.detail),
+  JSON.stringify({ canonical: hrefBad.canonical, err: hrefBad.err }));
+
 const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup", backupUrl, "--json"]);
 const v8j = JSON.parse(v8.out);
 assert("验收：拒绝 301 备用站", v8.code === 1 && v8j.checks.some((c) => c.id === "backup" && c.status === "fail"), "备用站跳到主站");
+const b304r = await runVerify(["--url", staticBase, "--mode", "static", "--backup", `${backupUrl}b304/`, "--json"]);
+const b304 = JSON.parse(b304r.out).checks.find((c) => c.id === "backup");
+assert("备用站：304 不写成重定向未完成验证", b304r.code === 1 && b304?.status === "fail"
+  && b304.statusClass === "not-modified" && /不是可验证的响应/.test(b304.detail) && !/重定向未完成验证/.test(b304.detail),
+JSON.stringify(b304));
+const b300r = await runVerify(["--url", staticBase, "--mode", "static", "--backup", `${backupUrl}b300/`, "--json"]);
+const b300 = JSON.parse(b300r.out).checks.find((c) => c.id === "backup");
+assert("备用站：少见 3xx 同样不判通过", b300r.code === 1 && b300?.status === "fail"
+  && b300.statusClass === "unexpected-3xx" && /不是可验证的响应/.test(b300.detail), JSON.stringify(b300));
 
 // ---------------------------------------------------------------- 资源重定向矩阵
 const assetCase = async (casePath) => {
@@ -819,6 +1032,50 @@ const aNoLoc = await assetCase("/case/noloc/");
 assert("资源：3xx 缺 Location 判失败", aNoLoc.assets?.status === "fail" && /缺少 Location/.test(aNoLoc.assets.broken[0].reason), JSON.stringify(aNoLoc.assets?.broken));
 const aBadProto = await assetCase("/case/badproto/");
 assert("资源：非 HTTP/HTTPS 重定向目标判失败且不跟随", aBadProto.assets?.status === "fail" && /协议不受支持/.test(aBadProto.assets.broken[0].reason) && aBadProto.probed?.chain.length === 1, JSON.stringify(aBadProto.assets?.broken));
+const crossHitsBefore = crossTargetHits.length;
+const aHostile = await assetCase("/case/hostile/");
+assert("资源：伪装成相对地址的跨源 URL 不会被请求（SSRF 防护）",
+  aHostile.code === 0 && aHostile.assets?.status === "pass"
+    && aHostile.probed?.url === "/a/direct.css"
+    && aHostile.assets.ignored?.some((i) => /跨源/.test(i.reason))
+    && !crossTargetHits.slice(crossHitsBefore).includes("/ssrf-probe"),
+  JSON.stringify({ ignored: aHostile.assets?.ignored, hits: crossTargetHits.slice(crossHitsBefore) }));
+assert("资源：javascript: 等非 HTTP(S) 链接不会被当资源探测",
+  aHostile.assets?.checked === 1 && aHostile.probed?.url === "/a/direct.css",
+  JSON.stringify({ checked: aHostile.assets?.checked, probed: aHostile.probed }));
+
+// ---------------------------------------------------------------- 资源 3xx 状态分类
+const a304 = await assetCase("/case/304/");
+assert("资源：304 不进入重定向链，也不判资源正常",
+  a304.code === 1 && a304.assets?.status === "fail"
+    && a304.probed?.redirected === false && a304.probed?.finalStatus === 304
+    && a304.assets.redirects.length === 0 && a304.assets.broken[0]?.redirected === false
+    && /304 Not Modified/.test(a304.assets.broken[0].reason)
+    && !/缺少 Location/.test(a304.assets.broken[0].reason),
+  JSON.stringify({ assets: a304.assets, probed: a304.probed }));
+const a307 = await assetCase("/case/307ok/");
+assert("资源：307 同主机跟随到最终 200 判通过",
+  a307.assets?.status === "pass" && a307.probed?.redirected === true
+    && a307.probed.finalStatus === 200 && /\/a\/final\.css$/.test(a307.probed.finalUrl)
+    && a307.assets.redirects?.length === 1
+    && a307.probed.chain.length === 2 && a307.probed.chain[0].status === 307
+    && a307.probed.chain[0].statusClass === "redirect",
+  JSON.stringify(a307.probed));
+const a308 = await assetCase("/case/308ok/");
+assert("资源：308 同主机跟随到最终 200 判通过",
+  a308.assets?.status === "pass" && a308.probed?.redirected === true
+    && a308.probed.finalStatus === 200 && /\/a\/final\.css$/.test(a308.probed.finalUrl)
+    && a308.assets.redirects?.length === 1
+    && a308.probed.chain.length === 2 && a308.probed.chain[0].status === 308
+    && a308.probed.chain[0].statusClass === "redirect",
+  JSON.stringify(a308.probed));
+const a300 = await assetCase("/case/300/");
+assert("资源：少见 3xx（300）只警告，不进 redirects 也不判正常",
+  a300.assets?.status === "warn" && a300.code === 0
+    && a300.probed?.redirected === false && a300.probed?.finalStatus === 300
+    && a300.assets.redirects.length === 0 && a300.assets.warnings.length === 1
+    && /不在需要跟随的重定向状态/.test(a300.assets.warnings[0].reason),
+  JSON.stringify({ assets: a300.assets, probed: a300.probed }));
 
 // ---------------------------------------------------------------- 资源重定向汇总一致性
 assert("资源汇总：直接 200 不进 redirects", aDirect.assets.redirects.length === 0 && aDirect.probed.redirected === false, JSON.stringify(aDirect.assets.redirects));
@@ -841,6 +1098,55 @@ assert("资源汇总：重定向循环进失败记录，且仍记为发生过重
 assert("资源汇总：缺 Location 进失败记录且不进 redirects",
   aNoLoc.assets.broken[0].redirected === false && aNoLoc.assets.redirects.length === 0,
   JSON.stringify(aNoLoc.assets.redirects));
+
+// ---------------------------------------------------------------- /index.html 状态分类
+const indexCase = async (code) => {
+  const r = await runVerify(["--url", `${indexStatusBase}/idx${code}/`, "--mode", "static", "--json"]);
+  let j = null;
+  try { j = JSON.parse(r.out); } catch { /* 断言里带上 stderr */ }
+  return { code: r.code, idx: j?.checks?.find((c) => c.id === "index-redirect") };
+};
+const i304 = await indexCase(304);
+assert("index.html：304 不算有效重定向，也不报缺少 Location",
+  i304.idx?.status === "warn" && i304.idx.httpStatus === 304
+    && i304.idx.statusClass === "not-modified" && i304.idx.redirect === false
+    && /不是重定向/.test(i304.idx.detail) && !/缺少 Location/.test(i304.idx.detail),
+  JSON.stringify(i304.idx));
+const i300 = await indexCase(300);
+assert("index.html：少见 3xx（300）不判通过",
+  i300.idx?.status === "warn" && i300.idx.httpStatus === 300
+    && i300.idx.statusClass === "unexpected-3xx" && i300.idx.redirect === false
+    && /不能确认收敛/.test(i300.idx.detail), JSON.stringify(i300.idx));
+for (const code of [301, 302, 303, 307, 308]) {
+  const r = await indexCase(code);
+  assert(`index.html：${code} 仍按有效重定向判通过`,
+    r.code === 0 && r.idx?.status === "pass" && r.idx.httpStatus === code
+      && r.idx.statusClass === "redirect" && r.idx.redirect === true
+      && r.idx.redirectKind === "same-origin" && r.idx.convergesToRoot === true,
+    JSON.stringify(r.idx));
+}
+
+// /index.html 的重定向目标不是站点根 / 不是同源 HTTP(S) 时，不能判「收敛到 /」。
+const indexSpecial = async (name) => {
+  const r = await runVerify(["--url", `${indexStatusBase}/${name}/`, "--mode", "static", "--json"]);
+  let j = null;
+  try { j = JSON.parse(r.out); } catch { /* 断言里带上 stderr */ }
+  return { code: r.code, idx: j?.checks?.find((c) => c.id === "index-redirect"), err: r.err };
+};
+const iCross = await indexSpecial("idxcross");
+assert("index.html：跨源重定向不判通过", iCross.idx?.status === "warn" && iCross.idx.redirect === false
+  && iCross.idx.redirectKind === "cross-origin" && iCross.idx.convergesToRoot === false
+  && /不是同源/.test(iCross.idx.detail), JSON.stringify(iCross.idx));
+const iFile = await indexSpecial("idxfile");
+assert("index.html：非 HTTP(S) 重定向不判通过", iFile.idx?.status === "warn"
+  && iFile.idx.redirectKind === "unsupported-protocol" && iFile.idx.convergesToRoot === false, JSON.stringify(iFile.idx));
+const iElsewhere = await indexSpecial("idxelsewhere");
+assert("index.html：同源但目标不是站点根不判通过", iElsewhere.idx?.status === "warn"
+  && iElsewhere.idx.redirectKind === "same-origin" && iElsewhere.idx.convergesToRoot === false
+  && /不是站点根/.test(iElsewhere.idx.detail), JSON.stringify(iElsewhere.idx));
+const iNoLoc = await indexSpecial("idxnoloc");
+assert("index.html：301 缺 Location 只警告，不当成有效重定向", iNoLoc.idx?.status === "warn"
+  && iNoLoc.idx.redirectKind === "invalid-location" && /缺失或无法解析/.test(iNoLoc.idx.detail), JSON.stringify(iNoLoc.idx));
 
 // ---------------------------------------------------------------- 重定向策略（纯函数，不发请求）
 assert("重定向策略：相对 Location 同源可跟随", classifyRedirect("http://127.0.0.1:8000/a", "/b", "http://127.0.0.1:8000").kind === "same-origin");
@@ -905,6 +1211,33 @@ const rBadProto = await rootCase("/case/badproto/");
 assert("主站：非 HTTP/HTTPS 目标直接拒绝且不请求",
   rBadProto?.status === "fail" && rBadProto.redirectOutcome === "unsupported-protocol"
     && /非 HTTP\/HTTPS/.test(rBadProto.detail), JSON.stringify(rBadProto));
+
+// ---------------------------------------------------------------- 3xx 状态分类（304 与少见 3xx）
+const rootCaseFull = async (p) => {
+  const r = await runVerify(["--url", `${rootRedirectBase}${p}`, "--mode", "static", "--json"]);
+  return { code: r.code, root: JSON.parse(r.out).checks.find((c) => c.id === "root") };
+};
+const r304 = await rootCaseFull("/case/304/");
+assert("主站：304 不当作重定向，也不报缺少 Location",
+  r304.root?.status === "fail" && r304.root.redirectOutcome === "not-modified"
+    && r304.root.httpStatus === 304 && r304.root.statusClass === "not-modified"
+    && r304.root.verified === false && r304.root.hops.length === 1
+    && !/缺少 Location/.test(r304.root.detail) && !/同源重定向/.test(r304.root.detail),
+  JSON.stringify(r304.root));
+const r300 = await rootCaseFull("/case/300/");
+assert("主站：少见 3xx（300）单独分类为警告，不判通过",
+  r300.root?.status === "warn" && r300.root.redirectOutcome === "unexpected-3xx"
+    && r300.root.httpStatus === 300 && r300.root.statusClass === "unexpected-3xx"
+    && r300.root.verified === false && !/同源重定向/.test(r300.root.detail),
+  JSON.stringify(r300.root));
+for (const code of [301, 302, 303, 307, 308]) {
+  const r = await rootCaseFull(`/case/r${code}/`);
+  assert(`主站：${code} 仍按同源重定向跟随并验证最终 200`,
+    r.code === 0 && r.root?.status === "pass" && r.root.redirectOutcome === "same-origin-verified"
+      && r.root.verified === true && r.root.httpStatus === 200 && r.root.hops.length === 2
+      && r.root.hops[0].status === code && r.root.hops[0].statusClass === "redirect",
+    JSON.stringify(r.root));
+}
 
 // 备用站跳主站：只解析 Location 识别，不为识别而请求主站。
 const vBackupMain = await runVerify([
@@ -1002,6 +1335,7 @@ assert("JSON 比较：字段顺序与空白不影响结果", jOrder.status === "
 const vjMissing = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/missing", "--expect-json", '{"ok":true}', "--json"]);
 const jMissing = apiCheck(JSON.parse(vjMissing.out));
 assert("JSON 比较：字段缺失给出明确路径", jMissing.status === "fail" && /字段 \$\.ok 缺失/.test(jMissing.detail), jMissing.detail);
+assert("验收：API 检查暴露真实 HTTP 状态码", jMissing.httpStatus === 200, JSON.stringify({ httpStatus: jMissing.httpStatus, status: jMissing.status }));
 const vjType = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/wrongtype", "--expect-json", '{"ok":true}', "--json"]);
 const jType = apiCheck(JSON.parse(vjType.out));
 assert("JSON 比较：值类型不同判失败", jType.status === "fail" && /期望 true/.test(jType.detail), jType.detail);
@@ -1020,7 +1354,7 @@ const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer, tlsCanonicalServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, tlsCanonicalServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");
@@ -1101,6 +1435,8 @@ const dOk = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", 
 assert("部署探针：拿到 URL 且 HTTP 通过才判 pass", dOk.deploy.status === "pass" && dOk.deploy.verified === true);
 const dCleanupFail = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", http: httpServed, worker: "w1", cleanupOk: false });
 assert("部署探针：清理失败单独记 warn，不影响 deploy", dCleanupFail.cleanup.status === "warn" && dCleanupFail.deploy.status === "pass");
+const dCleanupSkipped = evaluateDeployProbe({ deployOk: false, deployErr: "error: auth", worker: "w1", cleanupSkipped: true });
+assert("部署探针：部署失败时清理结论为 skip，不谎称删除失败", dCleanupSkipped.cleanup.status === "skip" && /无需清理/.test(dCleanupSkipped.cleanup.detail), JSON.stringify(dCleanupSkipped.cleanup));
 
 const pDeployNoUrl = runProbe({ CF_FAKE_DELETE_FAIL: "1" }, ["--deploy"]);
 const pDepCheck = pDeployNoUrl.json?.checks?.find((c) => c.id === "deploy");
@@ -1110,16 +1446,66 @@ assert("探针端到端：清理失败单独记录", pCleanup?.status === "warn"
 assert("探针端到端：nextSteps 提示未完成线上验证", pDeployNoUrl.json?.nextSteps?.some((s) => /没有完成线上验证/.test(s)), JSON.stringify(pDeployNoUrl.json?.nextSteps));
 const pDeployFail = runProbe({ CF_FAKE_DEPLOY_FAIL: "1" }, ["--deploy"]);
 assert("探针端到端：部署命令失败判 fail", pDeployFail.json?.checks?.find((c) => c.id === "deploy")?.status === "fail");
+assert("探针端到端：部署失败时不声称清理失败", (() => {
+  const c = pDeployFail.json?.checks?.find((x) => x.id === "deploy-cleanup");
+  return c?.status === "skip" && /无需清理/.test(c.detail || "");
+})(), JSON.stringify(pDeployFail.json?.checks?.find((c) => c.id === "deploy-cleanup")));
 
 // ---------------------------------------------------------------- 预检退出码
 const envRun = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--json"], { encoding: "utf8", timeout: 40000 });
 const envJ = JSON.parse(envRun.stdout);
-const expectedCode = !envJ.summary.canBuild ? 2 : envJ.summary.canDeploy ? 0 : 1;
-assert("预检：退出码与可构建/可部署结论一致", envRun.status === expectedCode, `code=${envRun.status} canBuild=${envJ.summary.canBuild} canDeploy=${envJ.summary.canDeploy}`);
+// 从 checks[] 独立推导退出码，避免用脚本自己的 summary 证明自己（summary 恒真/恒假的回归也能被发现）。
+const envFail = envJ.checks.filter((c) => c.status === "fail").map((c) => c.id);
+const expectCanBuild = !envFail.includes("node") && !envFail.includes("git");
+const expectCanDeploy = expectCanBuild
+  && envJ.checks.find((c) => c.id === "wrangler")?.status === "pass"
+  && envJ.checks.find((c) => c.id === "wrangler-auth")?.status === "pass";
+const expectedCode = !expectCanBuild ? 2 : expectCanDeploy ? 0 : 1;
+assert("预检：退出码与可构建/可部署结论一致",
+  envRun.status === expectedCode && envJ.summary.canBuild === expectCanBuild && envJ.summary.canDeploy === expectCanDeploy,
+  `code=${envRun.status} expected=${expectedCode} canBuild=${envJ.summary.canBuild}/${expectCanBuild} canDeploy=${envJ.summary.canDeploy}/${expectCanDeploy}`);
 const envBuildOnly = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--build-only", "--json"], { encoding: "utf8", timeout: 40000 });
-assert("预检：--build-only 只按可构建判定", envBuildOnly.status === (envJ.summary.canBuild ? 0 : 2), `code=${envBuildOnly.status}`);
+assert("预检：--build-only 只按可构建判定", envBuildOnly.status === (expectCanBuild ? 0 : 2), `code=${envBuildOnly.status}`);
+
+// 项目目录含空格时，Windows 下本地 .cmd 的绝对路径必须正确加引号才能执行。
+const spaceDir = path.join(work, "cf env space");
+const spaceBin = path.join(spaceDir, "node_modules", ".bin");
+fs.mkdirSync(spaceBin, { recursive: true });
+fs.writeFileSync(path.join(spaceBin, "fake-wrangler.mjs"), fakeWrangler);
+if (process.platform === "win32") {
+  fs.writeFileSync(path.join(spaceBin, "wrangler.cmd"), `@echo off\r\nnode "%~dp0fake-wrangler.mjs" %*\r\n`);
+} else {
+  fs.writeFileSync(path.join(spaceBin, "wrangler"), `#!/usr/bin/env node\n${fakeWrangler}`);
+  fs.chmodSync(path.join(spaceBin, "wrangler"), 0o755);
+}
+const envSpace = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--json"], {
+  encoding: "utf8", cwd: spaceDir, timeout: 40000, env: { ...process.env },
+});
+let envSpaceJ = null;
+try { envSpaceJ = JSON.parse(envSpace.stdout); } catch { /* 断言里带上原始输出 */ }
+assert("预检：含空格的项目路径仍能执行本地 wrangler",
+  envSpaceJ?.checks?.find((c) => c.id === "wrangler")?.status === "pass",
+  envSpaceJ ? JSON.stringify(envSpaceJ.checks.find((c) => c.id === "wrangler")) : `out=${(envSpace.stdout || "").slice(0, 160)} err=${(envSpace.stderr || "").slice(0, 160)}`);
+assert("预检：whoami 用实际解析到的本地 wrangler，而不是一律 npx",
+  envSpaceJ?.checks?.find((c) => c.id === "wrangler-auth")?.status === "pass",
+  JSON.stringify(envSpaceJ?.checks?.find((c) => c.id === "wrangler-auth")));
 
 // ---------------------------------------------------------------- 技能结构
+// check-skill 自身的回归：BOM / YAML 块标量 / fenced code 示例不能误报；
+// 代码块之外的失效路径仍然必须报告。
+const csOkDir = path.join(work, "checkskill-ok");
+fs.mkdirSync(csOkDir, { recursive: true });
+fs.writeFileSync(path.join(csOkDir, "SKILL.md"),
+  "\uFEFF---\nname: checkskill-ok\ndescription: >-\n  这是一个用于验证 YAML 块标量 frontmatter 与 fenced code 示例的测试技能，\n  描述长度必须足够触发技能，并且不能把代码块里的示例路径当成真实引用。\n---\n\n# demo\n\n```md\n[example](missing-target.md)\nscripts/not-a-real.mjs\n```\n", "utf8");
+const csOk = spawnSync(process.execPath, [path.join(here, "check-skill.mjs"), csOkDir], { encoding: "utf8" });
+assert("结构自检：BOM / 块标量 / fenced code 示例不误报", csOk.status === 0, (csOk.stdout || csOk.stderr).trim().split("\n").at(-1));
+const csBadDir = path.join(work, "checkskill-bad");
+fs.mkdirSync(csBadDir, { recursive: true });
+fs.writeFileSync(path.join(csBadDir, "SKILL.md"),
+  "---\nname: checkskill-bad\ndescription: 第二个测试技能，用来确认 fenced code 之外的失效路径引用仍然会被结构检查报告出来。\n---\n\n见 references/not-real.md\n", "utf8");
+const csBad = spawnSync(process.execPath, [path.join(here, "check-skill.mjs"), csBadDir], { encoding: "utf8" });
+assert("结构自检：代码块之外的失效路径仍会报告", csBad.status === 1 && /not-real/.test(csBad.stdout || ""), (csBad.stdout || csBad.stderr).trim().split("\n").at(-1));
+
 const skillCheck = spawnSync(process.execPath, [path.join(here, "check-skill.mjs")], { encoding: "utf8" });
 assert("结构检查：frontmatter / 路径 / 无绝对路径", skillCheck.status === 0, (skillCheck.stdout || skillCheck.stderr).trim().split("\n").at(-1));
 

@@ -50,9 +50,9 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|s
 - 产物根目录有 `index.html`（SSR 除外）；
 - 多页站有顶层 `404.html`；
 - `_headers` / `_redirects` 在根目录；
-- index 引用的资源都存在；
+- index 引用的资源都存在，且大小写与产物里的文件名完全一致（Cloudflare 区分大小写，Windows 本地文件系统不区分）；`..` 逃逸或绝对路径引用直接判坏；
 - 文件数和单文件大小；
-- 产物里没有 `CNAME`、`.env`、`.git`。
+- 产物里出现 `CNAME` 会被警告；`.env` / `.git` 脚本不检查，需人工确认它们没有被打进产物。
 
 输出目录错了，部署会成功，站点会 404。这是构建配置问题，不是 Cloudflare 问题。
 
@@ -90,7 +90,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|s
 按顺序查：
 
 1. 是否只有一个 `Access-Control-Allow-Origin`？
-2. 是否是 `*` 同时配了 `Access-Control-Allow-Credentials: true`？无效。
+2. 是否是**带凭据请求**却用了 `ACAO: *`？（无凭据请求里 `ACAO: *` 有效；ACAC 响应头不会让请求变成带凭据请求。只有显式声明 `--cors-credentials` 时才要求精确匹配 Origin + `ACAC: true`。）
 3. 是否有 `Vary: Origin`？
 4. `OPTIONS` 是否返回 200/204，且方法/头列表正确？
 5. 错误响应是否也带 CORS 头？
