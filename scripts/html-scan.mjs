@@ -58,6 +58,19 @@ const VOID_ELEMENTS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
   "param", "source", "track", "wbr",
 ]);
+// HTML 树构建在普通 body 上下文里会丢弃/自弹的开始标签：它们不应污染我们
+// 近似用的 HTML 祖先栈（例如 `<svg><foreignObject><tr></foreignObject>` 中的
+// tr 在浏览器里根本不会创建，不能让它挡住外域结束标签）。
+const UNTRACKED_HTML_START_TAGS = new Set([
+  "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
+  "html", "head", "body", "frame", "basefont", "bgsound",
+]);
+// 外域结束标签回退 HTML 时，浏览器会沿栈找同名 HTML 祖先；但这些 scope 边界
+// 会阻止继续向上（table/object/marquee/applet/select；caption/td/tr 等在 body
+// 上下文本身就被丢弃，不属于边界）。
+const HTML_SCOPE_BOUNDARY_ELEMENTS = new Set(["table", "object", "marquee", "applet", "select"]);
+// select 插入模式下会关闭 select 并重新处理这些开始标签；其余多数标签被忽略。
+const SELECT_CLOSES_ON_START = new Set(["input", "keygen", "textarea"]);
 // HTML 规范中的 special 元素（用于近似“any other end tag”在 special 元素处停止的规则）。
 const HTML_SPECIAL_ELEMENTS = new Set([
   "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote",
@@ -75,6 +88,14 @@ const FOREIGN_BREAKOUT_TAGS = new Set([
   "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li",
   "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span",
   "strike", "strong", "sub", "sup", "table", "tt", "u", "ul", "var",
+]);
+// HTML 中遇到这些开始标签时，浏览器会先隐式关闭已打开的 <p>（HTML 树构建的
+// 「p in button scope」规则）。这里只做最小近似以降低集成点栈的误判。
+const P_CLOSING_START_TAGS = new Set([
+  "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div",
+  "dl", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+  "h6", "header", "hgroup", "hr", "listing", "main", "menu", "nav", "ol", "p", "pre",
+  "section", "summary", "table", "ul",
 ]);
 // xmp 虽然按 RAWTEXT 解析，但浏览器会把内容当可见文本渲染。
 const VISIBLE_RAWTEXT = new Set(["xmp"]);
@@ -155,8 +176,13 @@ const isWs = (ch) => ch !== undefined && ASCII_WS.test(ch);
 const lower = (s) => String(s).toLowerCase();
 
 /**
- * 解析开始标签（从 "<" 开始）。EOF 中断时返回 null：不完整标签不当作元素，
- * 这是安全默认（不会把没闭合的伪 canonical 当成真实标签）。
+ * 解析开始标签（从 "<" 开始）。EOF 中断时返回 null。
+ *
+ * 与浏览器一致的 EOF 策略（不是额外的保守拒绝）：HTML tokenizer 在标签名/
+ * 属性名/属性值/引号中遇到 EOF 时会报错并发出 EOF token，**不会 emit 未完成的
+ * 开始标签**；tree builder 因此不会插入元素，标签字符也不会变成文本。这里返回
+ * null 后主循环丢弃剩余输入，正是同一结果。RCDATA/RAWTEXT/script 内的未闭合
+ * 结束标签按各自 raw 文本保留（见 scanScriptData / findEndTag）。
  */
 function parseStartTag(html, start) {
   const n = html.length;
@@ -543,6 +569,12 @@ export function parseHtml(input) {
     const frame = currentForeign();
     return Boolean(frame) && Boolean(frame.integration);
   };
+  const textVisibleNow = () => {
+    const frame = currentForeign();
+    if (!frame) return true;
+    if (!frame.integration) return false;
+    return Boolean(frame.textVisible);
+  };
 
   const pushText = (raw) => {
     const decoded = decodeCharacterReferences(raw);
@@ -559,28 +591,57 @@ export function parseHtml(input) {
   // 这样 `</foreignObject>` 在 HTML 子元素未闭合时会被忽略（与浏览器一致）。
   const trackHtmlChildStart = (tag) => {
     if (inTemplate()) return;
+    if (UNTRACKED_HTML_START_TAGS.has(tag.name)) return;
     const frame = currentForeign();
+    const closeImpliedP = (stack) => {
+      if (!P_CLOSING_START_TAGS.has(tag.name)) return;
+      const pIndex = stack.lastIndexOf("p");
+      if (pIndex >= 0) stack.length = pIndex;
+    };
+    // select 插入模式的近似：嵌套 select 关闭旧 select 并忽略 token；
+    // input/keygen/textarea 关闭 select 后按 HTML 规则处理；其余标签在 select
+    // 内大多被浏览器忽略，不压栈（完整 select 树构建不在本模块范围）。
+    const handleSelectContext = (stack) => {
+      const selectIndex = stack.lastIndexOf("select");
+      if (selectIndex < 0) return false;
+      if (tag.name === "select") { stack.length = selectIndex; return true; }
+      if (SELECT_CLOSES_ON_START.has(tag.name)) { stack.length = selectIndex; return false; }
+      if (tag.name === "option" || tag.name === "optgroup") return false;
+      return true;
+    };
+    // HTML 命名空间里只有 void 元素才是真正的空元素；`<div/>`/`<span/>` 的
+    // self-closing flag 被浏览器忽略，元素仍然打开，必须压栈。
     if (!frame || !frame.integration) {
       // 普通 HTML 元素：记入全局栈，供外域结束标签找到 HTML 祖先。
-      if (!VOID_ELEMENTS.has(tag.name) && !tag.selfClosing && tag.name !== "template") {
-        htmlOpenStack.push(tag.name);
+      if (VOID_ELEMENTS.has(tag.name) || tag.name === "template") {
+        // input/keygen 等 void 标签也可能触发 select 插入模式的自动关闭。
+        handleSelectContext(htmlOpenStack);
+        return;
       }
+      if (handleSelectContext(htmlOpenStack)) return;
+      closeImpliedP(htmlOpenStack);
+      htmlOpenStack.push(tag.name);
       return;
     }
-    if (VOID_ELEMENTS.has(tag.name) || tag.selfClosing || tag.name === "template") return;
+    // 集成点内同样先处理 select 插入模式（void 的 input 也会关闭 select）。
+    if (handleSelectContext(frame.htmlStack)) return;
+    if (VOID_ELEMENTS.has(tag.name) || tag.name === "template") return;
+    closeImpliedP(frame.htmlStack);
     frame.htmlStack.push(tag.name);
   };
-  // 返回 true 表示该结束标签由集成点内的 HTML 子元素栈消费（含“应忽略”）。
-  // 按 HTML “any other end tag” 近似：从栈顶向下，遇到 special 元素且名字不匹配则
-  // 忽略（不能把 special 元素及其下面的节点一起弹掉）。
-  const applyHtmlEndRule = (stack, name) => {
-    while (stack.length) {
-      const top = stack[stack.length - 1];
-      if (top === name) { stack.length -= 1; return true; }
-      if (HTML_SPECIAL_ELEMENTS.has(top)) return true; // ignore
-      stack.pop();
+  // 非破坏性实现 HTML “any other end tag” 的近似：只查找同名 HTML 元素；
+  // 遇到 special 元素且名字不匹配就整 token 忽略（不 pop、不破坏栈）。
+  const htmlEndMatchIndex = (stack, name) => {
+    for (let idx = stack.length - 1; idx >= 0; idx--) {
+      if (stack[idx] === name) return idx;
+      if (HTML_SPECIAL_ELEMENTS.has(stack[idx])) return -1;
     }
-    return true;
+    return -1;
+  };
+  const applyHtmlEndRule = (stack, name) => {
+    const idx = htmlEndMatchIndex(stack, name);
+    if (idx >= 0) stack.length = idx;
+    return idx >= 0;
   };
   const handleIntegrationHtmlEnd = (name) => {
     const top = currentForeign();
@@ -592,11 +653,8 @@ export function parseHtml(input) {
     for (let k = foreign.length - 1; k >= 0; k--) {
       const frame = foreign[k];
       if (!frame.integration || frame.htmlStack.length === 0) continue;
-      const stackBefore = frame.htmlStack.slice();
-      applyHtmlEndRule(frame.htmlStack, name);
-      // 只有真的匹配/消费了 HTML 元素才弹掉它上面的外域帧；special 忽略时保留。
-      const changed = frame.htmlStack.length !== stackBefore.length;
-      if (changed && k + 1 < foreign.length) foreign.length = k + 1;
+      const matched = applyHtmlEndRule(frame.htmlStack, name);
+      if (matched && k + 1 < foreign.length) foreign.length = k + 1;
       return true;
     }
     return false;
@@ -606,9 +664,15 @@ export function parseHtml(input) {
     // 不能一次清空整个外域栈（否则 `<math><mi><mglyph><img>` 会把 mi 也弹掉）。
     while (foreign.length && !currentForeign().integration) foreign.pop();
   };
-  const popHtmlAncestor = (name) => {
+  const popHtmlAncestor = (name) => applyHtmlEndRule(htmlOpenStack, name);
+  // 外域结束标签回退 HTML 的专用查找：可以越过普通 special 元素（p/span/…），
+  // 但遇到 table/object/marquee/applet/select 等 scope 边界就停止。
+  const popHtmlAncestorAcrossScope = (name) => {
     const idx = htmlOpenStack.lastIndexOf(name);
     if (idx < 0) return false;
+    for (let k = htmlOpenStack.length - 1; k > idx; k--) {
+      if (HTML_SCOPE_BOUNDARY_ELEMENTS.has(htmlOpenStack[k])) return false;
+    }
     htmlOpenStack.length = idx;
     return true;
   };
@@ -617,16 +681,14 @@ export function parseHtml(input) {
     const ch = html[i];
     if (ch !== "<") {
       // 外域内容里的文本不计入 HTML 可见文本；集成点按 frame.textVisible 决定。
-      const frame = currentForeign();
-      const textVisible = !frame ? true : !frame.integration ? false : Boolean(frame.textVisible);
-      if (textVisible) textBuf += ch;
+      if (textVisibleNow()) textBuf += ch;
       i++;
       continue;
     }
 
     const next = html[i + 1];
     if (next === undefined) {
-      if (!inForeignContent()) textBuf += ch;
+      if (textVisibleNow()) textBuf += ch;
       i++;
       continue;
     }
@@ -640,6 +702,8 @@ export function parseHtml(input) {
       && (!currentFrameForCdata.integration || currentFrameForCdata.htmlStack.length === 0);
     if (cdataAllowed && html.startsWith("<![CDATA[", i)) {
       const end = html.indexOf("]]>", i + 9);
+      const contentEnd = end === -1 ? n : end;
+      if (textVisibleNow() && contentEnd > i + 9) textParts.push(html.slice(i + 9, contentEnd));
       i = end === -1 ? n : end + 3;
       continue;
     }
@@ -675,7 +739,7 @@ export function parseHtml(input) {
       if (!endTag) {
         // `</` 后面直接 EOF：按浏览器行为输出 "<" "/" 两个字符；否则按 bogus comment。
         if (i + 2 >= n) {
-          if (!inForeignContent()) textBuf += html.slice(i);
+          if (textVisibleNow()) textBuf += html.slice(i);
           i = n;
           break;
         }
@@ -698,18 +762,19 @@ export function parseHtml(input) {
         continue;
       }
 
-      // 2) 外域结束标签：从栈顶向下找同名 frame，找到就弹到它。
+      // 2) 外域结束标签：从栈顶向下找同名 frame，找到就弹到它；但如果命中的是
+      //    仍有 HTML 子元素的集成点帧，先不弹，交给 HTML 子元素栈规则判断。
       let matched = -1;
       for (let k = foreign.length - 1; k >= 0; k--) {
         if (foreign[k].name === endTag.name) { matched = k; break; }
       }
+      if (matched >= 0 && foreign[matched].integration && foreign[matched].htmlStack.length > 0) {
+        matched = -1;
+      }
       if (matched >= 0) {
         foreign.length = matched;
-        if (endTag.name === "template" && templateDepth > 0) {
-          templateDepth--;
-          foreign = templateForeignStack.pop() || [];
-          htmlOpenStack = templateHtmlStack.pop() || [];
-        }
+        // 外域元素 `<template>` 的 </template> 只弹外域帧，绝不能改动 HTML
+        // template 的隔离栈（HTML template 从不作为 foreign frame 出现）。
         continue;
       }
 
@@ -718,8 +783,9 @@ export function parseHtml(input) {
       if (handleIntegrationHtmlEnd(endTag.name)) continue;
 
       // 3) 没有匹配的外域 frame：如果这个结束标签匹配 HTML 祖先元素，
-      //    浏览器会退回到 HTML 规则并弹掉外域内容（例如 `<div><svg></div>`）。
-      if (foreign.length > 0 && popHtmlAncestor(endTag.name)) {
+      //    浏览器会退回到 HTML 规则并弹掉外域内容（例如 `<div><svg></div>`），
+      //    但会在 table/object/marquee/applet/select 等 scope 边界停止。
+      if (foreign.length > 0 && popHtmlAncestorAcrossScope(endTag.name)) {
         foreign = [];
         continue;
       }
@@ -746,7 +812,8 @@ export function parseHtml(input) {
       flushText();
       const parsed = parseStartTag(html, i);
       if (!parsed) {
-        // EOF 在不完整开始标签里：该标签 token 不会被浏览器发出，标签内容也不是文本。
+        // EOF 在不完整开始标签里：浏览器 tokenizer 不会 emit 该开始标签（也不把
+        // 标签字符当文本），tree builder 不插入元素；这里与浏览器 DOM 一致地丢弃。
         i = n;
         break;
       }
@@ -842,8 +909,8 @@ export function parseHtml(input) {
       }
       if (!inTemplate()) elements.push(tag);
       if (tag.name === "plaintext") {
-        // plaintext 之后全部是文本，不再有标签
-        if (!inTemplate()) textBuf = html.slice(i);
+        // plaintext 之后全部是文本，不再有标签（外域/不渲染集成点里不计入可见文本）。
+        if (!inTemplate() && textVisibleNow()) textBuf = html.slice(i);
         i = n;
         break;
       }
@@ -858,7 +925,7 @@ export function parseHtml(input) {
         const contentEnd = closeAt === -1 ? n : closeAt;
         tag.content = html.slice(i, contentEnd);
         // xmp 虽然是 RAWTEXT，但浏览器会把内容按文本渲染；其余 RAWTEXT 不进可见文本。
-        if (!inTemplate() && VISIBLE_RAWTEXT.has(tag.name) && tag.content) textParts.push(tag.content);
+        if (!inTemplate() && textVisibleNow() && VISIBLE_RAWTEXT.has(tag.name) && tag.content) textParts.push(tag.content);
         i = closeAt === -1 ? n : afterEndTag(html, closeAt);
         continue;
       }
@@ -867,7 +934,7 @@ export function parseHtml(input) {
         const contentEnd = closeAt === -1 ? n : closeAt;
         tag.content = decodeCharacterReferences(html.slice(i, contentEnd));
         // title 是文档标题，不是「可见文本」；textarea 的内容则属于可见文本。
-        if (!inTemplate() && tag.content && tag.name !== "title") textParts.push(tag.content);
+        if (!inTemplate() && textVisibleNow() && tag.content && tag.name !== "title") textParts.push(tag.content);
         i = closeAt === -1 ? n : afterEndTag(html, closeAt);
         continue;
       }
@@ -876,8 +943,8 @@ export function parseHtml(input) {
       continue;
     }
 
-    // "<" 后面不是标签起始：当普通文本
-    textBuf += ch;
+    // "<" 后面不是标签起始：当普通文本（外域/不渲染集成点里不进入可见文本）。
+    if (textVisibleNow()) textBuf += ch;
     i++;
   }
   flushText();

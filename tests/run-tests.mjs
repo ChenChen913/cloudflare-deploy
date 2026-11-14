@@ -2533,6 +2533,208 @@ for (const [label, htmlText, expectedCanon] of stateEdgeCases) {
     JSON.stringify(canonHrefs(leakHtml)), "adversarial");
 }
 
+// 3c) HTML 自闭合语义（本轮）：HTML 命名空间只有 void 元素是真空元素；
+// `<div/>`/`<span/>`/`<p/>` 的 self-closing flag 被浏览器忽略，必须保持打开。
+// 期望值来自 tests/fixtures/html5-oracle.json 的 SC1-SC15 / I1-I7（Chrome/Edge 双引擎一致）。
+// 判别用例：依赖 HTML 子元素栈的 SC1-SC5、I1-I3/I5-I7；其余条目为回归锁定。
+const selfClosingCases = [
+  ["HTML div 自闭合后仍打开，</div> 能弹掉 svg", `<div/><svg></div><link rel="canonical" href="/real">`, ["/real"]],
+  ["集成点内 div 自闭合后 </foreignObject> 被忽略，后续 link 仍是 HTML", `<svg><foreignObject><div/></foreignObject><link rel="canonical" href="/real">`, ["/real"]],
+  ["集成点内 div 自闭合后 link 在 div 内、后续第二个 link 也在", `<svg><foreignObject><div/><link rel="canonical" href="/in"></foreignObject><link rel="canonical" href="/after">`, ["/in", "/after"]],
+  ["MathML 文本集成点内 span 自闭合后 </mtext> 被忽略", `<math><mtext><span/></mtext><link rel="canonical" href="/real">`, ["/real"]],
+  ["集成点内 span 自闭合 + 嵌套 svg：fake 是 SVG 外域，真实 link 仍是 HTML", `<svg><foreignObject><span/></foreignObject><svg><link rel="canonical" href="/fake"></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["HTML p 自闭合 + div 自闭合", `<p/><div/><link rel="canonical" href="/real">`, ["/real"]],
+  ["template 内的 HTML 自闭合 div 不泄漏到 template 之后", `<template><div/></template><link rel="canonical" href="/real">`, ["/real"]],
+  ["foreignObject 内 template 里的自闭合 div 仍隔离", `<svg><foreignObject><template><div/></template><link rel="canonical" href="/real"></foreignObject></svg>`, ["/real"]],
+  ["foreign 元素 g 自闭合生效（不吞后续 HTML）", `<svg><g/></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["foreign 元素 foreignObject 自闭合生效", `<svg><foreignObject/></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["MathML mtext 自闭合生效", `<math><mtext/></math><link rel="canonical" href="/real">`, ["/real"]],
+  ["foreignObject 内嵌套 svg 自闭合生效", `<svg><foreignObject><svg/></foreignObject></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["mtext 内 svg 自闭合生效", `<math><mtext><svg/></mtext></math><link rel="canonical" href="/real">`, ["/real"]],
+  ["外域里的 HTML 非空自闭合 breakout 元素仍按 HTML 插入", `<svg><div/></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["外域里的 a 是 SVG 元素，不能当 HTML 链接", `<svg><a/></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["未引号属性值里的斜杠属于值，不是自闭合标记", `<link rel=canonical href=/a/><link rel="canonical" href="/real">`, ["/a/", "/real"]],
+  ["集成点内错误结束标签不破坏 HTML 子元素栈", `<svg><foreignObject><span></strong></foreignObject><link rel="canonical" href="/canon">`, ["/canon"]],
+  ["集成点内错误结束标签之后 script 仍是 HTML", `<svg><foreignObject><span></svg></foreignObject><script src="/a.js"></script>`, []],
+  ["外域 template 的结束标签不关闭 HTML template 隔离", `<template><svg><template></template><link rel="canonical" href="/canon"></template>`, []],
+  ["p 被块级开始标签隐式关闭后集成点退出", `<svg><foreignObject><p><div></div></foreignObject><link rel="canonical" href="/canon">`, []],
+  ["p 隐式关闭后 script 是 SVG 外域", `<svg><foreignObject><p><div></div></foreignObject><script src="/a.js"></script>`, []],
+];
+for (const [label, htmlText, expected] of selfClosingCases) {
+  assert(`自闭合语义：${label}`,
+    JSON.stringify(canonHrefs(htmlText)) === JSON.stringify(expected),
+    JSON.stringify(canonHrefs(htmlText)), "adversarial");
+}
+{
+  // HTML 非空自闭合元素仍应出现在 elements/资源提取中，且不被当成 void。
+  const divThenImg = `<div/><div><img src="/img.png"><link rel="canonical" href="/real"></div>`;
+  const facts = {
+    canonical: canonHrefs(divThenImg),
+    imgs: parseHtml(divThenImg).elements.filter((el) => el.name === "img").length,
+    resources: resourceReferences(parseHtml(divThenImg).elements).map((r) => r.value),
+  };
+  assert("自闭合语义：HTML 非空自闭合元素保持打开，内部 img 仍进入资源提取",
+    JSON.stringify(facts.canonical) === JSON.stringify(["/real"]) && facts.imgs === 1 && facts.resources.includes("/img.png"),
+    JSON.stringify(facts), "adversarial");
+}
+{
+  // 集成点外域/错误结束标签/外域 template 的状态与资源（Chrome 对照 I1-I7）。
+  const scriptCount = (htmlText) => parseHtml(htmlText).elements.filter((el) => el.name === "script").length;
+  assert("集成点错误结束标签：span 仍打开，link 仍是 HTML canonical",
+    JSON.stringify(canonHrefs(`<svg><foreignObject><span></strong></foreignObject><link rel="canonical" href="/canon">`)) === JSON.stringify(["/canon"])
+      && scriptCount(`<svg><foreignObject><span></svg></foreignObject><script src="/a.js"></script>`) === 1,
+    JSON.stringify({
+      canonical: canonHrefs(`<svg><foreignObject><span></strong></foreignObject><link rel="canonical" href="/canon">`),
+      scripts: scriptCount(`<svg><foreignObject><span></svg></foreignObject><script src="/a.js"></script>`),
+    }), "adversarial");
+  assert("外域 template 不关闭 HTML template 隔离",
+    JSON.stringify(canonHrefs(`<template><svg><template></template><link rel="canonical" href="/canon"></template>`)) === JSON.stringify([])
+      && resourceReferences(parseHtml(`<template><svg><template></template><link rel="preload" as="image" href="/p.png"></template>`).elements).length === 0,
+    JSON.stringify({
+      canonical: canonHrefs(`<template><svg><template></template><link rel="canonical" href="/canon"></template>`),
+      resources: resourceReferences(parseHtml(`<template><svg><template></template><link rel="preload" as="image" href="/p.png"></template>`).elements),
+    }), "adversarial");
+  assert("p 被块级开始标签隐式关闭后集成点正确退出",
+    JSON.stringify(canonHrefs(`<svg><foreignObject><p><div></div></foreignObject><link rel="canonical" href="/canon">`)) === JSON.stringify([])
+      && scriptCount(`<svg><foreignObject><p><div></div></foreignObject><script src="/a.js"></script>`) === 0,
+    JSON.stringify({
+      canonical: canonHrefs(`<svg><foreignObject><p><div></div></foreignObject><link rel="canonical" href="/canon">`),
+      scripts: scriptCount(`<svg><foreignObject><p><div></div></foreignObject><script src="/a.js"></script>`),
+    }), "adversarial");
+  assert("可见文本：外域/desc/title 集成点里的 < 不进入 HTML 可见文本",
+    parseHtml(`<svg>1 < 2</svg>`).text.trim() === ""
+      && parseHtml(`<svg><desc><`).text.trim() === ""
+      && parseHtml(`<svg><title>a < b</title></svg>`).text.trim() === ""
+      && parseHtml(`<template><svg><template></template>LEAK</template>`).text.trim() === "",
+    JSON.stringify({
+      svg: parseHtml(`<svg>1 < 2</svg>`).text,
+      desc: parseHtml(`<svg><desc><`).text,
+      title: parseHtml(`<svg><title>a < b</title></svg>`).text,
+      template: parseHtml(`<template><svg><template></template>LEAK</template>`).text,
+    }), "adversarial");
+  // 浏览器在其上下文里会丢弃的开始标签不能污染 HTML 祖先栈。
+  const droppedTags = ["tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup", "html", "head", "body", "frame", "basefont", "bgsound"];
+  let droppedBad = 0;
+  let droppedDetail = null;
+  for (const dropped of droppedTags) {
+    const htmlText = `<svg><foreignObject><${dropped}></foreignObject><link rel="canonical" href="/fake">`;
+    const got = canonHrefs(htmlText);
+    if (JSON.stringify(got) !== JSON.stringify([])) {
+      droppedBad++;
+      if (!droppedDetail) droppedDetail = { dropped, got };
+    }
+  }
+  assert("集成点：浏览器丢弃的开始标签不污染 HTML 祖先栈", droppedBad === 0,
+    JSON.stringify(droppedDetail || {}), "adversarial");
+  // 外域结束标签回退 HTML 时必须在 scope 边界停止；caption/td/tr 等在 body 上下文
+  // 本身被浏览器丢弃，不是边界（Chrome K9-K16 对照）。
+  const scopeBoundaries = ["table", "object", "marquee", "applet", "select"];
+  let scopeBoundaryBad = 0;
+  let scopeBoundaryDetail = null;
+  for (const boundary of scopeBoundaries) {
+    const htmlText = `<div><${boundary}><svg></div><link rel="canonical" href="/fake">`;
+    const got = canonHrefs(htmlText);
+    if (JSON.stringify(got) !== JSON.stringify([])) {
+      scopeBoundaryBad++;
+      if (!scopeBoundaryDetail) scopeBoundaryDetail = { boundary, got };
+    }
+  }
+  assert("外域结束标签：HTML 祖先回退在 scope 边界停止", scopeBoundaryBad === 0,
+    JSON.stringify(scopeBoundaryDetail || {}), "adversarial");
+  assert("外域结束标签：被丢弃的 caption/td/tr 不构成 scope 边界",
+    JSON.stringify(canonHrefs(`<div><caption><svg></div><link rel="canonical" href="/fake">`)) === JSON.stringify(["/fake"])
+      && JSON.stringify(canonHrefs(`<div><td><svg></div><link rel="canonical" href="/fake">`)) === JSON.stringify(["/fake"])
+      && JSON.stringify(canonHrefs(`<div><tr><svg></div><link rel="canonical" href="/fake">`)) === JSON.stringify(["/fake"]),
+    JSON.stringify({
+      caption: canonHrefs(`<div><caption><svg></div><link rel="canonical" href="/fake">`),
+      td: canonHrefs(`<div><td><svg></div><link rel="canonical" href="/fake">`),
+      tr: canonHrefs(`<div><tr><svg></div><link rel="canonical" href="/fake">`),
+    }), "adversarial");
+  assert("外域结束标签：非 scope 边界 HTML 祖先仍可被弹出",
+    JSON.stringify(canonHrefs(`<div><p><svg></div><link rel="canonical" href="/real">`)) === JSON.stringify(["/real"])
+      && JSON.stringify(canonHrefs(`<div><span><svg></div><link rel="canonical" href="/real">`)) === JSON.stringify(["/real"]),
+    JSON.stringify({
+      p: canonHrefs(`<div><p><svg></div><link rel="canonical" href="/real">`),
+      span: canonHrefs(`<div><span><svg></div><link rel="canonical" href="/real">`),
+    }), "adversarial");
+  assert("select 插入模式：嵌套 select / input 不会污染集成点栈",
+    JSON.stringify(canonHrefs(`<svg><foreignObject><select><select></foreignObject><link rel="canonical" href="/real">`)) === JSON.stringify([])
+      && JSON.stringify(canonHrefs(`<svg><foreignObject><select><input></foreignObject><link rel="canonical" href="/real">`)) === JSON.stringify([]),
+    JSON.stringify({
+      nestedSelect: canonHrefs(`<svg><foreignObject><select><select></foreignObject><link rel="canonical" href="/real">`),
+      selectInput: canonHrefs(`<svg><foreignObject><select><input></foreignObject><link rel="canonical" href="/real">`),
+    }), "adversarial");
+  assert("可见文本：隐藏集成点内 xmp/textarea 不计入，foreignObject CDATA 计入",
+    !parseHtml(`<svg><title><xmp>leak</xmp></title></svg><p>VISIBLE</p>`).text.includes("leak")
+      && parseHtml(`<svg><title><xmp>leak</xmp></title></svg><p>VISIBLE</p>`).text.includes("VISIBLE")
+      && parseHtml(`<svg><foreignObject><![CDATA[visible]]></foreignObject></svg><p>VISIBLE</p>`).text.includes("visible"),
+    JSON.stringify({
+      hiddenXmp: parseHtml(`<svg><title><xmp>leak</xmp></title></svg><p>VISIBLE</p>`).text,
+      cdata: parseHtml(`<svg><foreignObject><![CDATA[visible]]></foreignObject></svg><p>VISIBLE</p>`).text,
+    }), "adversarial");
+}
+
+// 3d) EOF 不完整标签：浏览器 tokenizer 在 EOF 时不会 emit 未完成开始标签，
+// 因此不产生元素、也不把标签字符并入文本；`<`/`</` 单独出现则保留为文本。
+// 期望值来自 EF1-EF12 / Chrome+Edge。
+{
+  const eofNoElement = [
+    `text <link rel="canonical" href="/real"`,
+    `text <link rel="canonical"`,
+    `text <link rel='canonical' href='/real'`,
+    `text <link rel=`,
+    `text <link`,
+    `<svg><foreignObject><link rel="canonical" href="/real"`,
+  ];
+  for (const htmlText of eofNoElement) {
+    const parsed = parseHtml(htmlText);
+    assert(`EOF：未完成开始标签不产生元素（${htmlText.slice(0, 28)}）`,
+      parsed.elements.length === 0 && !parsed.text.includes("<link"),
+      JSON.stringify({ elements: parsed.elements.map((el) => el.name), text: parsed.text }), "boundary");
+  }
+  {
+    const completeNoHref = parseHtml(`text <link rel=canonical>`).elements.find((el) => el.name === "link");
+    assert("EOF：完整但缺 href 的 canonical 仍是元素（href=null），与浏览器一致",
+      Boolean(completeNoHref) && !getAttribute(completeNoHref, "href").present,
+      JSON.stringify(completeNoHref), "boundary");
+  }
+  {
+    const parsed = parseHtml(`<div>text</div`);
+    assert("EOF：未完成结束标签被丢弃，元素与文本保留",
+      JSON.stringify(parsed.elements.map((el) => el.name)) === JSON.stringify(["div"]) && parsed.text.trim() === "text",
+      JSON.stringify({ elements: parsed.elements.map((el) => el.name), text: parsed.text }), "boundary");
+  }
+  {
+    const title = parseHtml(`<title>Hi`).elements.find((el) => el.name === "title");
+    const script = parseHtml(`<script>var a=1`).elements.find((el) => el.name === "script");
+    assert("EOF：未闭合 title/script 元素的内容保留（EOF 不产生执行/结束标签）",
+      title?.content === "Hi" && script?.content === "var a=1",
+      JSON.stringify({ title: title?.content, script: script?.content }), "boundary");
+  }
+  {
+    const a = parseHtml(`<a href='/x`).elements;
+    const img = parseHtml(`<img src="/x"`).elements;
+    assert("EOF：属性值/引号中途 EOF 不产生元素",
+      a.length === 0 && img.length === 0,
+      JSON.stringify({ a: a.map((el) => el.name), img: img.map((el) => el.name) }), "boundary");
+  }
+  {
+    const parsed = parseHtml(`<div>text</`);
+    assert("EOF：`</` 作为字面文本保留", parsed.text.includes("</"),
+      JSON.stringify(parsed.text), "boundary");
+    const angle = parseHtml(`<div>text<`);
+    assert("EOF：单个 `<` 作为字面文本保留", angle.text.includes("text<"),
+      JSON.stringify(angle.text), "boundary");
+  }
+  {
+    const script = parseHtml(`<script>x</script`).elements.find((el) => el.name === "script");
+    assert("EOF：script 内未闭合的 </script 成为 script 文本内容", script?.content === "x</script",
+      JSON.stringify(script?.content), "boundary");
+    const title = parseHtml(`<title>x</title`).elements.find((el) => el.name === "title");
+    assert("EOF：RCDATA title 内未闭合的 </title 成为 title 内容", title?.content === "x</title",
+      JSON.stringify(title?.content), "boundary");
+  }
+}
 // 4) srcset：URL 可含逗号；候选由「URL + 空白 + descriptor + 逗号」切分。
 const srcsetCases = [
   ["a.png 1x,b.png 2x", ["a.png", "b.png"]],
@@ -2611,11 +2813,13 @@ for (const oracleCase of oracleFixture.cases) {
   assert(`HTML5 浏览器 oracle：${oracleCase.id}`, ok,
     JSON.stringify({ expected, actual, html: oracleCase.html }), "adversarial");
 }
-assert("HTML5 浏览器 oracle：fixture 用例数不少于 62 且结构完整",
-  oracleFixture.cases.length >= 62 && /Chrome|Edge|Chromium/i.test(oracleFixture._browser || "")
+assert("HTML5 浏览器 oracle：fixture 用例数不少于 115 且结构完整",
+  oracleFixture.cases.length >= 115 && /Chrome|Edge|Chromium/i.test(oracleFixture._browser || "")
     && typeof oracleFixture._provenance === "string" && oracleFixture._provenance.length > 80
     && typeof oracleFixture._recordedAt === "string" && oracleFixture._schema === 1
+    && typeof oracleFixture._doctypePrefixRule === "string" && /Edge/i.test(oracleFixture._edgeBrowser || "")
     && new Set(oracleFixture.cases.map((c) => c.id)).size === oracleFixture.cases.length
+    && new Set(oracleFixture.cases.map((c) => c.html)).size === oracleFixture.cases.length
     && oracleFixture.cases.every((c) => typeof c.id === "string" && typeof c.html === "string"
       && typeof c.wrappedDoctype === "boolean" && c.expect
       && Array.isArray(c.expect.canonical) && Array.isArray(c.expect.htmlTitles)

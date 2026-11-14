@@ -17,7 +17,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 615 项，分层覆盖 core 284 / adversarial 184 / boundary 24 / combination 5 / unit 118：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 714 项，分层覆盖 core 284 / adversarial 269 / boundary 38 / combination 5 / unit 118：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -36,10 +36,10 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     615/615 通过（分层：core 284 / adversarial 184 / boundary 24 / combination 5 / unit 118）
+node tests/run-tests.mjs     714/714 通过（分层：core 284 / adversarial 269 / boundary 38 / combination 5 / unit 118）
 node tests/check-skill.mjs   通过（SKILL.md 333 行，引用路径 31 个，无绝对路径）
-node tests/browser-diff.mjs  62/62 一致（可选，真实 Chrome 157；无浏览器时退出码 2 跳过）
-quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执行）
+node tests/browser-diff.mjs  115/115 一致（可选开发期：本机 Chrome 157 与本机 Edge 157 分别跑过；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1，180s 超时退出码 3）
+quick_validate.py            Skill is valid!（本机一次性结果；脚本在仓库外，见上文可复现性说明）
 ```
 
 完整输出由测试脚本自动写入 `tests/last-run.txt`（每次 `node tests/run-tests.mjs` 覆盖，报告不再依赖人工复制）。
@@ -154,10 +154,14 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | HTML5 状态机：DOCTYPE（adversarial） | public/system 标识符里的 `>` abrupt 结束（引号不保护）、残余 `<link>` 可能成为真实元素、unclosed quote EOF、bogus DOCTYPE；期望来自 Chrome 实测 |
 | HTML5 状态机：SVG/MathML 命名空间栈（adversarial） | 嵌套 svg、foreignObject/desc/title、g 内 title、MathML mi/mtext/mglyph、annotation-xml encoding 两种取值与未编码、annotation-xml 上的 svg、breakout img、`</p>` 结束、HTML 祖先结束标签（div/p/select）、template 隔离、foreignObject 内未闭合 HTML 子元素、关闭后恢复；无状态泄漏 |
 | HTML5 状态机：结束标签属性 / EOF 文本（boundary） | 结束标签游离 `=`/引号不吞后续标签（含 RAWTEXT 结束标签）、EOF 不完整开始标签不并入文本、`</` EOF 按文本、可见文本边界 |
+| HTML 自闭合语义（adversarial） | `<div/>`/`<span/>`/`<p/>` 在 HTML 内容、foreignObject、MathML 文本集成点中不关闭；`</div>`/`</foreignObject>`/`</mtext>` 的忽略/弹栈；foreign `<g/>`/`<foreignObject/>`/`<mtext/>`/嵌套 `<svg/>` 自闭合生效；template 隔离；breakout 的 HTML 自闭合；资源与 canonical 最终结果 |
+| EOF 不完整标签（boundary） | `<link`、未闭合引号、属性名/值一半、`<a href='/x`、`<img src="/x"` EOF 均不产生元素；`</`/`<` 单独 EOF 保留为文本；未闭合 title/script 内容保留；`text <link ...` 只保留文本 |
+| 外域结束标签 scope / 丢弃标签 / select（adversarial） | 外域结束标签回退 HTML 在 table/object/marquee/applet/select/caption/td 等 scope 边界停止；tr/td/th/thead/tbody/tfoot/caption/colgroup/html/head/body/frame/basefont/bgsound 不进入祖先栈；嵌套 select/input 关闭 select；J1-J6 Chrome/Edge oracle |
+| 可见文本集成点（adversarial） | 隐藏集成点（SVG title/desc）内的 xmp/textarea/plaintext 不计入；foreignObject 内 CDATA 计入；外域/隐藏集成点里的 `<` 不计入；textarea 可见文本为本地口径 |
 | srcset 解析（unit） | 40+ 组：逗号后无空格、data URI、URL 含逗号、尾随逗号、空候选、无 descriptor、畸形/重复/互斥 descriptor（w/h/x 冲突）、`a.png, 2x` 等规范边角 |
 | 资源属性白名单（unit） | `src` 仅对 img/script/iframe/embed/video/audio/source/track/input，`poster` 仅 video，`srcset` 仅 img/source；`<div src/poster/srcset>` 不进入资源探测 |
-| 浏览器差分（adversarial，默认套件） | `html5-oracle.json` 62 个 Chrome/Edge 真实 DOM facts：HTML 命名空间 canonical 列表、HTML title、script 数量/精确 textContent、HTML img/base 数量；逐项比较本地 tokenizer |
-| 浏览器差分（可选，开发期） | `node tests/browser-diff.mjs` 用本机 Chrome/Edge CDP 现场重跑 62 例，并同时报告“fixture 是否过期”和“parser 与浏览器是否一致”；无浏览器/Node<22 时跳过 |
+| 浏览器差分（adversarial，默认套件） | `html5-oracle.json` 115 个 Chrome/Edge 真实 DOM facts：HTML 命名空间 canonical 列表、HTML title、script 数量/精确 textContent、HTML img/base 数量；逐项比较本地 tokenizer |
+| 浏览器差分（可选，开发期） | `node tests/browser-diff.mjs` 用本机 Chrome/Edge CDP 现场重跑 115 例，并同时报告“fixture 是否过期”和“parser 与浏览器是否一致”；无浏览器/Node<22 时跳过 |
 | 组合与随机状态（adversarial） | 四类问题同时出现；300 组确定性状态组合（注释/template/script 三态/DOCTYPE/SVG 外域隐藏 fake；foreignObject/title/desc/mtext/mi 集成点必须识别 fake 为 HTML）+ 旧 300 组 canonical 上下文 fuzz |
 
 ### 部署探针（纯逻辑 + 本地假 wrangler，不接触真实账号）
@@ -210,7 +214,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 - 相对 URL 按文档 URL 解析（无 base 时不强行补尾斜杠）：根 302→`/noslash` 与 `--url .../subpage.html` 两种真实服务器场景都证明浏览器同款解析；重定向后 canonical/资源/CORS 默认目标都基于最终页面 URL。
 - check-build 与 verify 对同一 HTML 的 `<base href>`（含跨源）、srcset、顶层大小写、symlink/junction 产物给出一致结论；测试目录里的 junction 指向 work 内技能副本，不会让备份沿链接递归。
 - `tests/last-run.txt` 由测试脚本自动生成，测试计数、分层统计、results.md/README 的最近一次结果不再靠人工同步。
-- **HTML5 状态机与真实浏览器一致**：script data 的 escaped/double-escaped、DOCTYPE 标识符里的 `>` abrupt 结束、SVG/MathML 命名空间栈（含 annotation-xml、集成点、breakout、HTML 祖先结束标签、template 隔离、无状态泄漏）、结束标签属性引号、srcset 规范边角，都有独立回归；62 个用例的期望来自 Chrome/Edge 真实 DOM facts，而不是本实现自证。
+- **HTML5 状态机与真实浏览器一致**：script data 的 escaped/double-escaped、DOCTYPE 标识符里的 `>` abrupt 结束、SVG/MathML 命名空间栈（含 annotation-xml、集成点、breakout、HTML 祖先结束标签、template 隔离、无状态泄漏）、HTML 非空元素的自闭合语义、结束标签属性引号、EOF 不完整标签、srcset 规范边角，都有独立回归；115 个用例的期望来自 Chrome/Edge 真实 DOM facts，而不是本实现自证。**可见文本断言是本地规则（未全部纳入浏览器 fixture）**；EOF 的 `</`/`<` 文本保留、title/script raw text 也由本地断言覆盖，fixture 只存 canonical/title/script/img/base 事实。
 - **资源提取不再被非资源属性误导**：`<div src>` 等不会触发探测；srcset 的 URL/data URI/逗号后无空格/畸形 descriptor 按规范处理，不会漏候选或误探测。
 - **差分可复现**：默认套件只需 Node + fixture；有浏览器时可用可选脚本现场重跑真实 Chromium 差分，二者分离，不破坏零安装分发。
 - 配置读取有独立权威 `scripts/config-scan.mjs`：JS/TOML/JSONC/YAML 注释与字符串不会冒充配置值；JSONC 结构化解析、TOML section、workflow 注释、`node --inspect`、`.env export/小写键`、Nuxt `ssr:false`、`public/index.html` 都有真实夹具。
@@ -233,7 +237,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | GitHub Actions 部署 | 当前环境没有对应仓库/CI | 在测试仓库跑生成的 workflow |
 | 链路探针 `--deploy` 的真实写入/删除 | 没有 Cloudflare 账号，且属于写操作 | 获用户同意后在小规模测试账号跑一次，核对临时 Worker 被删除 |
 | 真实账号的套餐 / R2 / Containers 可用性 | 没有账号与 Token | 用 API Token 查订阅，或在控制台 Billing 核对 |
-| 完整 HTML5 DOM / tree construction | `html-scan.mjs` 是有明确边界的 tokenizer/局部状态机，不是完整 HTML5 parser：不建模隐式闭合、foster parenting、活动格式化元素重建/adoption agency；SVG/MathML 只做命名空间栈（含 annotation-xml encoding 分支），不做完整树构建 | 需要 DOM 级结论时用浏览器或 parse5 等外部工具另行核对；独立 550 例随机差分唯一不一致是 foster parenting（另有已知命名实体子集限制） |
+| 完整 HTML5 DOM / tree construction | `html-scan.mjs` 是有明确边界的 tokenizer/局部状态机，不是完整 HTML5 parser：不建模隐式闭合、foster parenting、活动格式化元素重建/adoption agency；SVG/MathML 只做命名空间栈（含 annotation-xml encoding 分支），不做完整树构建 | 需要 DOM 级结论时用浏览器或 parse5 等外部工具另行核对；独立一次性随机差分（未纳入仓库）未发现状态机 bug；唯一不一致是已声明的 foster parenting（不建树），另有命名实体子集限制 |
 | 全部命名实体 | 只覆盖常用集合；legacy（无分号）实体仅常见子集（`&notit;` 等仍是原文） | 不影响 script/DOCTYPE/命名空间状态机；需要完整实体表时用浏览器或外部库 |
 | 真实浏览器 CORS 判定 | 脚本只发 GET/HEAD/OPTIONS 并检查响应头，不执行浏览器同源策略 | 用浏览器 DevTools 或端到端测试确认 |
 | 真实用户登录态的多账号/本地化输出 | 假 wrangler 只覆盖常见英文/JSON 形态 | 用真实 `wrangler whoami` 各版本、多账号环境采样 |
@@ -294,7 +298,11 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 52. **srcset 旧的 `split(/,(?=\s)/)` 既漏候选又误拆 URL。** 改为按 WHATWG 算法：URL 取到空白（可含逗号/data URI）；URL 以逗号结尾则剥尾逗号且无 descriptor；否则读取 descriptor 到逗号，descriptor tokenizer 处理括号（括号里的空白/逗号属于同一 token，随后按非法丢弃）；descriptor 校验 w/h 为小写单位的非负整数、x 为 valid floating-point（支持指数/`.5`/`-0`），互斥/重复/冲突（w+density、h 无 w）都丢弃候选。`a.png 1x,b.png 2x`、`a.png,b.png 2x`、`data:...`、`a.png, 2x`、`a.png 100w, 200w`、`a.png 1.5x`、`a.png 1.5w`、`a.png (x, 1x), b.png` 等都有测试。
 53. **结束标签/EOF 文本的 tokenizer 边界。** 旧 `skipTagToGt()` 用“前一非空白字符是 `=`”判引号，遇到 `</div ="><link>` 会把引号当属性值、吞到 EOF；`<div></div =">...`、`</script =">...` 同理。现在用完整属性状态机（before-attr-name/attr-name/after-name/before-value/quoted/unquoted），`=` 出现在属性名前时只是名字字符；EOF 处不完整开始标签不再并入可见文本，`</`+EOF 按浏览器输出为文本。
 54. **资源属性对任意元素生效的误报。** 旧 `resourceReferences()` 把 `<div src>`、`<div poster>`、`<div srcset>` 都当资源，verify 会探测不存在的地址并判 `assets fail`。现在按元素白名单：`src` 仅 img/script/iframe/embed/video/audio/source/track/input（input 还要求 type=image），`poster` 仅 video，`srcset` 仅 img/source；`<image>` 按浏览器别名成 img；`<link href>` 规则不变。
-55. **差分测试依赖自证 / 测试无法发现偏差。** 新增 `tests/fixtures/html5-oracle.json`：62 个用例的 HTML 命名空间 canonical/title/script/img/base 事实来自 Chrome 157 + Edge 157 两个真实引擎（CDP `namespaceURI` 过滤；两引擎结果逐字段一致）。默认套件直接对照 fixture（零依赖可复现）；另有 `tests/browser-diff.mjs` 在装有 Chrome/Edge 时现场重跑，并检测 fixture 是否过期。独立审查（一次性，脚本/种子未纳入仓库）另用固定种子做 550 例随机浏览器差分（真实 Chromium 157）：最终快照 549/550 一致，唯一差异是已声明的 foster parenting（不建树），未再发现状态机 bug；剩余不一致另有命名实体子集限制（`&notit;` 等）。差分只证明这些边界与 Chromium 一致，不证明完整 tree construction 或真实部署。
+55. **差分测试依赖自证 / 测试无法发现偏差。** 新增 `tests/fixtures/html5-oracle.json`：115 个用例的 HTML 命名空间 canonical/title/script/img/base 事实来自 Chrome 157 + Edge 157 两个真实引擎（CDP `namespaceURI` 过滤；两引擎结果逐字段一致）。默认套件直接对照 fixture（零依赖可复现）；另有 `tests/browser-diff.mjs` 在装有 Chrome/Edge 时现场重跑，并检测 fixture 是否过期。独立审查（一次性，脚本/种子未纳入仓库）另做过一次性的随机浏览器差分（脚本/种子未纳入仓库）：未再发现状态机 bug，唯一不一致是已声明的 foster parenting（不建树）；另有命名实体子集限制（`&notit;` 等）。差分只证明这些边界与 Chromium 一致，不证明完整 tree construction 或真实部署。
+56. **HTML 非空元素的自闭合被误当成空元素（第三代专项）。** `trackHtmlChildStart()` 用 `!tag.selfClosing` 决定是否压栈，导致 `<div/>`、`<span/>`、`<p/>` 在 HTML 内容/集成点中不进入祖先栈，产生 canonical/资源漏检或误报。按 HTML 规范，self-closing flag 只对 void 元素和 foreign 元素生效，HTML 非空元素的 `/` 仅报解析错误、元素保持打开。修复后 `<div/>` 等正常压栈，foreign `<g/>`/`<foreignObject/>`/`<mtext/>`/嵌套 `<svg/>` 仍按外域语义自闭合。**判别用例**：SC1-SC5、SC9-SC15 中依赖 HTML 子元素栈的用例，以及 I1-I3/I5-I7；其余自闭合矩阵条目是回归锁定（旧实现也通过），不当作本次修复证据。oracle 期望来自 Chrome+Edge 双引擎一致结果。
+57. **EOF 不完整标签：本轮的改动是注释、文档与 oracle/回归锁定，不是策略变更。** `parseStartTag()` 在标签名/属性/引号中遇到 EOF 返回 null、主循环丢弃剩余输入；核对 WHATWG tokenizer：EOF-in-tag 只 emit EOF token，未完成开始标签不会 emit，tree builder 不插入元素、标签字符也不变成文本；`<`/`</` 后直接 EOF 才保留为文本；title/script 的 raw text 保留。该策略在上一版已实现并与浏览器 DOM 等价，本轮补齐 EF1-EF12 浏览器事实、手写 EOF 文本断言和注释/文档说明。**注意**：fixture 只存 canonical/title/script/img/base 四类事实；“`</`/`<` 保留为文本、title/script raw text 保留”由本地断言覆盖，未纳入 fixture。
+58. **集成点 HTML 结束规则/外域 template/隐式 p 关闭（独立审查发现并修复）。** (a) `applyHtmlEndRule` 之前边扫边弹，遇到 special 元素时已破坏 HTML 子栈，导致 `</strong>`、`</span>` 等错误结束标签把未闭合 HTML 子元素弹掉，`</foreignObject>` 被误当外域命中；改为非破坏性查找，只有命中同名 HTML 元素才截断栈，special 不匹配直接忽略。(b) 外域元素 `<template>` 的 `</template>` 误触发 HTML template 隔离栈恢复；删除 matched 分支里的 template 处理，HTML template 只由专门分支关闭。(c) 新增 `textVisibleNow()`，避免外域/不渲染集成点里的 `<` 进入可见文本。(d) 用最小 `P_CLOSING_START_TAGS` 近似浏览器隐式关闭 `<p>`，修复 `<p><div>` 后 `</foreignObject>` 被吞导致的 canonical/资源误报（仍不做完整树构建）。I1-I7 oracle（Chrome+Edge）锁定。
+59. **外域结束标签回退的 scope 边界与「被浏览器丢弃的开始标签」（独立审查发现并修复）。** (a) `popHtmlAncestor` 用 `lastIndexOf` 跨过 table/object/marquee/applet/select/caption/td 等 scope 边界找同名 HTML 祖先，导致 `<div><table><svg></div><link ...>` 把浏览器中的 SVG link 误判为 HTML canonical；改为复用非破坏性 HTML 结束规则，碰 special/scope 边界即停止。(b) 浏览器在 body 上下文会丢弃的 `tr/td/th/thead/tbody/tfoot/caption/colgroup/html/head/body/frame/basefont/bgsound` 曾被压进 HTML 祖先栈，挡住 `</foreignObject>`，产生假 canonical/资源；现统一不追踪。(c) select 插入模式做最小近似：嵌套 select 关闭旧 select 并忽略 token，input/keygen/textarea 关闭 select 后继续处理，其余标签在 select 内大多忽略。(d) 可见文本修正：隐藏集成点内 xmp/textarea/plaintext 不计入，foreignObject 内 CDATA 计入。J1-J6 oracle（Chrome+Edge）锁定。仍不做完整 table/select/格式化元素建树。
 
 ## CLI / JSON 兼容性
 

@@ -1,7 +1,7 @@
 {
-  "_provenance": "Recorded from a real Chromium HTML5 parser (Chrome 157.0.8103.52 headless via CDP Runtime.evaluate; facts filtered by namespaceURI === http://www.w3.org/1999/xhtml). Edge 157 produced identical facts for these cases. Regenerate with: node tests/browser-diff.mjs --record (requires Chrome/Edge and Node 22+ for the global WebSocket); run-tests.mjs only reads this JSON, so the default test suite stays browser-free. Additional cases F1-F15 recorded from Chrome/157.0.8103.52 and merged. Additional cases G1-G8 recorded from Chrome/157.0.8103.52 (fuzz-derived state leaks) and merged. Additional cases H1-H8 recorded from Chrome/157.0.8103.52 and merged (script <!-->, integration exit, annotation encoding, image alias).",
+  "_provenance": "Recorded from a real Chromium HTML5 parser (Chrome 157.0.8103.52 headless via CDP Runtime.evaluate; facts filtered by namespaceURI === http://www.w3.org/1999/xhtml). Edge 157 produced identical facts for these cases. Regenerate with: node tests/browser-diff.mjs --record (requires Chrome/Edge and Node 22+ for the global WebSocket); run-tests.mjs only reads this JSON, so the default test suite stays browser-free. Additional cases F1-F15 recorded from Chrome/157.0.8103.52 and merged. Additional cases G1-G8 recorded from Chrome/157.0.8103.52 (fuzz-derived state leaks) and merged. Additional cases H1-H8 recorded from Chrome/157.0.8103.52 and merged (script <!-->, integration exit, annotation encoding, image alias). Additional cases SC1-SC15 / EF1-EF12 recorded from Chrome 157 + Edge 157 (self-closing HTML semantics and EOF incomplete tags; both engines agreed) and merged. Additional cases I1-I7 recorded from Chrome/157.0.8103.52 (non-destructive HTML end rules, foreign template, implied p close) and merged. F15 removed as an exact duplicate of E4 during third-round review. Additional cases J1-J6 recorded from Chrome/157.0.8103.52 (tree-builder-discarded tags, scope boundaries, select mode) and merged. Additional cases K1-K16 recorded from Chrome/157.0.8103.52 (HTML-ancestor fallback scope boundaries vs discarded tags) and merged. K9/K13 removed as exact duplicates of J3/J4 during third-round review.",
   "_browser": "Chrome/157.0.8103.52",
-  "_recordedAt": "2026-11-14T13:05:38.098Z",
+  "_recordedAt": "2026-11-14T14:03:25.331Z",
   "cases": [
     {
       "id": "A1",
@@ -805,23 +805,6 @@
       "wrappedDoctype": true
     },
     {
-      "id": "F15",
-      "html": "<math><mi><link rel=\"canonical\" href=\"/mi\"></mi></math><link rel=\"canonical\" href=\"/real\">",
-      "expect": {
-        "canonical": [
-          "/mi",
-          "/real"
-        ],
-        "htmlTitles": [],
-        "scripts": [],
-        "htmlCounts": {
-          "img": 0,
-          "base": 0
-        }
-      },
-      "wrappedDoctype": true
-    },
-    {
       "id": "G1",
       "html": "<math><mi><mglyph><img src=\"/html-img.png\"></mi><link rel=\"canonical\" href=\"/x\">",
       "expect": {
@@ -1071,6 +1054,833 @@
             "text": "<!---><script>"
           }
         ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC1",
+      "html": "<div/><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC2",
+      "html": "<svg><foreignObject><div/></foreignObject><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC3",
+      "html": "<math><mtext><span/></mtext><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC4",
+      "html": "<svg><foreignObject><div/><link rel=\"canonical\" href=\"/in\"></foreignObject><link rel=\"canonical\" href=\"/after\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/in",
+          "/after"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC5",
+      "html": "<svg><foreignObject><span/></foreignObject><svg><link rel=\"canonical\" href=\"/fake\"></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC6",
+      "html": "<div/><div><img src=\"/img.png\"><link rel=\"canonical\" href=\"/real\"></div>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 1,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC7",
+      "html": "<svg><g/></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC8",
+      "html": "<svg><foreignObject/></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC9",
+      "html": "<math><mtext/></math><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC10",
+      "html": "<svg><svg/></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC11",
+      "html": "<svg><foreignObject><svg/></foreignObject></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC12",
+      "html": "<math><mtext><svg/></mtext></math><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC13",
+      "html": "<p/><div/><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC14",
+      "html": "<template><div/></template><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "SC15",
+      "html": "<svg><foreignObject><template><div/></template><link rel=\"canonical\" href=\"/real\"></foreignObject></svg>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF1",
+      "html": "text <link rel=\"canonical\" href=\"/real\"",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF2",
+      "html": "text <link rel=\"canonical\"",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF3",
+      "html": "text <link rel='canonical' href='/real'",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF4",
+      "html": "text <link rel=canonical>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          null
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF5",
+      "html": "text <link rel=",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF6",
+      "html": "text <link",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF7",
+      "html": "<div>text</div",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF8",
+      "html": "<div>text</",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF9",
+      "html": "<div>text<",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF10",
+      "html": "<svg><foreignObject><link rel=\"canonical\" href=\"/real\"",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF11",
+      "html": "<script>x</script",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 9,
+            "text": "x</script"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "EF12",
+      "html": "<title>x</title",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [
+          "x</title"
+        ],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I1",
+      "html": "<svg><foreignObject><span></strong></foreignObject><link rel=\"canonical\" href=\"/canon\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/canon"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I2",
+      "html": "<svg><foreignObject><span></svg></foreignObject><script src=\"/a.js\"></script>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 0,
+            "text": ""
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I3",
+      "html": "<template><svg><template></template><link rel=\"canonical\" href=\"/canon\"></template>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I4",
+      "html": "<template><svg><template></template><link rel=\"preload\" as=\"image\" href=\"/p.png\"></template>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I5",
+      "html": "<svg><foreignObject><p><div></div></foreignObject><link rel=\"canonical\" href=\"/canon\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I6",
+      "html": "<svg><foreignObject><p><div></div></foreignObject><script src=\"/a.js\"></script>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "I7",
+      "html": "<svg><foreignObject><div/></foreignObject><link rel=\"canonical\" href=\"/canon\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/canon"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J1",
+      "html": "<svg><foreignObject><tr></foreignObject><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J2",
+      "html": "<svg><foreignObject><td></foreignObject><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J3",
+      "html": "<div><table><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J4",
+      "html": "<div><object><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J5",
+      "html": "<svg><foreignObject><select><select></foreignObject><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "J6",
+      "html": "<svg><foreignObject><select><input></foreignObject><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K1",
+      "html": "<div><p><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K2",
+      "html": "<div><span><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K3",
+      "html": "<div><button><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K4",
+      "html": "<div><pre><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K5",
+      "html": "<div><section><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K6",
+      "html": "<div><form><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K7",
+      "html": "<div><b><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K8",
+      "html": "<div><h1><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K10",
+      "html": "<div><caption><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/fake"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K11",
+      "html": "<div><td><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/fake"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K12",
+      "html": "<div><select><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K14",
+      "html": "<div><marquee><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K15",
+      "html": "<div><applet><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "K16",
+      "html": "<div><tr><svg></div><link rel=\"canonical\" href=\"/fake\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/fake"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
         "htmlCounts": {
           "img": 0,
           "base": 0
