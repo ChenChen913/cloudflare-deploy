@@ -30,6 +30,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseHtml, resourceReferences, effectiveBaseUrl } from "./html-scan.mjs";
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
@@ -238,7 +239,13 @@ function main() {
     return 1;
   }
 
+  // 符号链接/junction 要跟随（产物里可能有 workspace 链接），同时用 realpath 防环。
+  const visitedDirs = new Set();
   function walk(d, acc = []) {
+    let realDir = d;
+    try { realDir = fs.realpathSync(d); } catch { /* 用原路径 */ }
+    if (visitedDirs.has(realDir)) return acc;
+    visitedDirs.add(realDir);
     let entries = [];
     try {
       entries = fs.readdirSync(d, { withFileTypes: true });
@@ -247,14 +254,16 @@ function main() {
     }
     for (const ent of entries) {
       const full = path.join(d, ent.name);
-      if (ent.isDirectory()) walk(full, acc);
+      if (ent.isSymbolicLink()) {
+        let st = null;
+        try { st = fs.statSync(full); } catch { continue; } // 坏链接不中断检查
+        if (st.isDirectory()) walk(full, acc);
+        else if (st.isFile()) acc.push(full);
+      } else if (ent.isDirectory()) walk(full, acc);
       else if (ent.isFile()) acc.push(full);
     }
     return acc;
   }
-  const isFile = (p) => {
-    try { return fs.statSync(p).isFile(); } catch { return false; }
-  };
 
   const files = walk(dir);
   const rel = (f) => path.relative(dir, f).replace(/\\/g, "/");
@@ -293,9 +302,14 @@ function main() {
 
   if (total > 1024 * 1024 * 1024) push("total-size", "warn", "产物超过 1 GiB；确认目标套餐和缓存行为");
 
-  const hasIndex = isFile(path.join(dir, "index.html"));
-  const has404 = isFile(path.join(dir, "404.html"));
+  // 顶层文件必须按「部署后的真实名字」严格比较：Windows 上 Index.HTML 不能被
+  // 当成 index.html（Cloudflare 区分大小写，`/` 会 404）。
+  const hasTopLevel = (name) => fileSet.has(name);
+  const wrongCaseTopLevel = (name) => [...fileSet].some((f) => f.toLowerCase() === name.toLowerCase() && f !== name);
+  const hasIndex = hasTopLevel("index.html");
+  const has404 = hasTopLevel("404.html");
   if (hasIndex) push("index", "pass", "存在 index.html");
+  else if (wrongCaseTopLevel("index.html")) push("index", "warn", "index.html 大小写与部署后不一致（如 Index.HTML）；Cloudflare 区分大小写，站点根会 404", { severity: "high" });
   else if (mode === "spa") push("index", "warn", "SPA 模式但没有 index.html；app shell 通常就是 index.html，部署前确认入口文件", { severity: "high" });
   else push("index", "warn", "产物根目录没有 index.html；站点根路径会 404");
 
@@ -321,15 +335,15 @@ function main() {
   }
 
   for (const f of ["_headers", "_redirects"]) {
-    if (isFile(path.join(dir, f))) push(f, "pass", `${f} 在产物根目录`);
+    if (hasTopLevel(f)) push(f, "pass", `${f} 在产物根目录`);
     else push(f, "skip", `没有 ${f}`);
   }
 
-  if (isFile(path.join(dir, "CNAME"))) {
+  if (hasTopLevel("CNAME")) {
     push("cname", "warn", "产物里有 CNAME；它不应该出现在 Cloudflare 构建产物中", { severity: "medium" });
   }
 
-  if (isFile(path.join(dir, ".nojekyll"))) {
+  if (hasTopLevel(".nojekyll")) {
     push("nojekyll", "skip", "存在 .nojekyll（仅 GitHub Pages 用，无害）");
   }
 
@@ -339,26 +353,57 @@ function main() {
   if (hasIndex) {
     let html = "";
     try { html = fs.readFileSync(path.join(dir, "index.html"), "utf8"); } catch { html = ""; }
-    const refs = [...html.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
-      .map((m) => m[1])
-      .filter((u) => !/^(?:https?:)?\/\//i.test(u) && !u.startsWith("data:") && !u.startsWith("#") && !u.startsWith("mailto:") && !u.startsWith("tel:"))
-      .map((u) => u.split(/[?#]/)[0])
-      .filter(Boolean);
-    const unique = [...new Set(refs)].slice(0, 40);
+    // 与 verify-deployment 共用同一个 HTML tokenizer + 资源属性规则：
+    // 注释/RAWTEXT/template 里的伪标签不算；导航链接、canonical href 也不算资源。
+    const { elements } = parseHtml(html);
+    // <base href> 也影响产物内相对资源路径（HTML 语义），与 verify 保持一致。
+    const docBase = effectiveBaseUrl(elements, "http://artifact.invalid/");
+    const refs = [];
+    for (const ref of resourceReferences(elements)) {
+      const value = ref.value;
+      if (value.startsWith("#")) continue;
+      // 绝对 / 协议相对 / data: 等外部引用不在产物内检查
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) continue;
+      const rawPath = value.split(/[?#]/)[0];
+      if (!rawPath) continue;
+      let bare = rawPath;
+      // .. 逃逸保留原始路径，交给下面的 escape 判定报坏；其余按 <base href> 解析。
+      if (!/(^|\/)\.\.(\/|$)/.test(rawPath)) {
+        try {
+          const abs = new URL(value, docBase);
+          // 跨源 <base href> 下的相对引用是外链，产物里没有，也不该判坏（与 verify 一致）。
+          if (abs.origin !== "http://artifact.invalid") continue;
+          bare = abs.pathname;
+        } catch { /* 保留原值 */ }
+      }
+      if (bare) refs.push(bare);
+    }
+    const allRefs = [...new Set(refs)];
+    const unique = allRefs.slice(0, 40);
+    const limitNote = allRefs.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allRefs.length} 个；不是全站爬取）` : `（共 ${allRefs.length} 个，覆盖首页引用）`;
     checkedAssets = unique.length;
     for (const u of unique) {
-      let decoded = u;
-      try { decoded = decodeURIComponent(u); } catch { /* 保留原值 */ }
+      // %2F / %5C 解码后可能变成路径分隔符：先保护再解码，避免把不存在当存在。
+      const guarded = u.replace(/%2f/gi, "%252F").replace(/%5c/gi, "%255C");
+      let decoded = guarded;
+      try { decoded = decodeURIComponent(guarded); } catch { /* 保留原值 */ }
       // 统一成 posix 相对路径；拒绝 .. 逃逸与绝对路径，再和产物文件集合严格比对。
       const clean = decoded.replace(/\\/g, "/").replace(/^\/+/, "");
       if (!clean) continue;
       const normalized = path.posix.normalize(clean);
-      if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized) || !fileSet.has(normalized)) {
-        broken.push(u);
+      const escaped = normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized);
+      const candidates = [];
+      if (!escaped) {
+        candidates.push(normalized);
+        // 目录式 / pretty URL：/about/ 或 /about 对应 about/index.html（静态托管常见行为）
+        const trimmed = normalized.replace(/\/+$/, "");
+        if (trimmed && !path.posix.extname(trimmed)) candidates.push(`${trimmed}/index.html`);
       }
+      if (!escaped && !candidates.some((c) => fileSet.has(c))) broken.push(u);
+      else if (escaped) broken.push(u);
     }
-    if (broken.length) push("assets", "warn", `${broken.length} 个引用资源在产物中找不到：${broken.slice(0, 5).join("、")}`, { broken, checked: checkedAssets });
-    else push("assets", "pass", `首页引用的 ${checkedAssets} 个同源资源都能找到（只检查首页，不是全站）`, { checked: checkedAssets });
+    if (broken.length) push("assets", "warn", `${broken.length} 个引用资源在产物中找不到${limitNote}：${broken.slice(0, 5).join("、")}`, { broken, checked: checkedAssets, total: allRefs.length, limited: allRefs.length > unique.length });
+    else push("assets", "pass", `首页引用的 ${checkedAssets} 个同源资源都能找到${limitNote}（只检查首页，不是全站）`, { checked: checkedAssets, total: allRefs.length, limited: allRefs.length > unique.length });
   }
 
   const blocking = checks.filter((c) => c.status === "fail").length;
@@ -388,5 +433,13 @@ function main() {
 
 // 用 exitCode 而不是 process.exit()：Windows 上偶发 0xC0000409，会把已输出的 JSON 判成失败。
 // 主模块守卫：测试可以 import 上面的纯函数，而不会触发一次真实检查。
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// 用 realpath 比较：通过 symlink/junction 安装技能时 argv[1] 是链接路径，直接比较会
+// 得出「不是主模块」，脚本静默不执行（exit 0、无 JSON）——这会让 Agent 误以为检查通过。
+const isMain = (() => {
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+})();
 if (isMain) process.exitCode = main();

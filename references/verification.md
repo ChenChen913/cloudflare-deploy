@@ -54,7 +54,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
   --json
 ```
 
-脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。参数写错时脚本以退出码 2 报用法错误，不会输出半截 JSON：`--api` / `--expect-404` 的 URL 无法解析、`--timeout` 非正数、`--assets-limit` 非正整数、`--backup` 不是合法 URL。
+脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。参数写错时脚本以退出码 2 报用法错误，不会输出半截 JSON：`--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` 不是合法 URL、`--timeout` 非正数、`--assets-limit` 非正整数、`--origin` 非法、或给了 CORS 参数却没给 `--origin`。
 
 ### 2.1 SSR / 全栈的自动基线
 
@@ -67,7 +67,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 
 `--api` 可重复传；每个接口检查 2xx、`Content-Type` 是否为 JSON，以及（给了 `--expect-json` 时）把预期值和响应体都解析成 JSON 做**子集比较**——字段顺序与格式化空格不影响结论，字段缺失、值不匹配、无效 JSON、非 JSON 响应都会给出具体原因。旧版的「字符串包含」判断已废弃；现在 `--expect-json` 必须是一段合法 JSON。没给 `--api` 却给了 `--expect-json` 会报 `warn`。
 
-`--mode ssr` 下：未知路径 404 判通过，返回 200 只给 `warn`（要确认是自定义 404 还是 catch-all）；另外检查首页服务端渲染的可见文本长度（空壳会 `warn`）和单次 TTFB。**单次 TTFB 不是性能结论**，冷启动会污染它。
+`--mode ssr` 下：未知路径 404 判通过，返回 200 只给 `warn`（要确认是自定义 404 还是 catch-all）；另外检查首页服务端渲染的可见文本长度（空壳会 `warn`；`title`、注释、`script`/`style` 等 RAWTEXT 内容不计入可见文本）和单次 TTFB。**单次 TTFB 不是性能结论**，冷启动会污染它。
 
 CORS 预检要把「实际请求」说清楚，只填你确实会用的项：
 
@@ -81,7 +81,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
   --cors-credentials --json
 ```
 
-`OPTIONS` 返回 200/204 **不等于** CORS 通过。脚本始终检查 `ACAO` 是否匹配请求 Origin；`Allow-Methods`、`Allow-Headers`、`Allow-Credentials` 只在你显式提供对应参数时才断言。没提供的检查会写进结果的 `notChecked`，报告里必须写「未验证」，不能合并成「CORS 正常」。
+`OPTIONS` 返回 200/204 **不等于** CORS 通过。脚本始终检查 `ACAO` 是否匹配请求 Origin；`Allow-Methods`、`Allow-Headers`、`Allow-Credentials` 只在你显式提供对应参数时才断言，而且**不会凭空发送** `Access-Control-Request-Method/Headers`。没提供的检查会写进结果的 `notChecked`；没有显式方法/请求头断言的预检最多给 `warn`，不能判通过。`--cors-url` 返回非 2xx（含 3xx 重定向）时 CORS 检查不判通过（脚本不跟随 CORS URL 的重定向，最终响应未验证）。
 
 `--cors-credentials` 是**用户声明的预期请求模式**，不是脚本真的携带了浏览器 Cookie 或身份凭据——脚本只发 GET / HEAD / OPTIONS。简单请求的凭据判定只看这个声明：响应里的 `Access-Control-Allow-Credentials: true` 不能反推请求带凭据，所以「无凭据 + `ACAO: *` + `ACAC: true`」仍然有效；只有显式声明带凭据时，才要求 `ACAO` 精确匹配 Origin 且必须有 `ACAC: true`。预检断言不受影响，仍只按显式提供的参数执行。
 
@@ -90,18 +90,29 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - `Allow-Methods` / `Allow-Headers` 的 `*` **只在无凭据请求里**是通配符；带 `--cors-credentials` 时它是字面值，必须显式列出方法和请求头。
 - 简单请求里 `ACAO: *` 只对无凭据请求有效；凭据模式由 `--cors-credentials` 决定，与响应头 `ACAC` 无关。
 - `GET` / `HEAD` / `POST` 是 **CORS-safelisted method**，永远允许，不要求出现在 `Allow-Methods` 里；`PUT` / `DELETE` 等才需要显式匹配。
-- `Authorization` / `Range` 是 **CORS non-wildcard request-header name**，即使无凭据，`Allow-Headers: *` 也不覆盖。
+- `Authorization` 是 **CORS non-wildcard request-header name**：即使无凭据，`Allow-Headers: *` 也不覆盖它。`Range` 不是 non-wildcard，可以被 `*` 覆盖。
 - HTTP 方法名大小写敏感：浏览器只把已知方法（`DELETE/GET/HEAD/OPTIONS/POST/PUT`）规范化成大写，所以服务器回小写 `delete` 不会匹配 `DELETE`。
 - 失败原因会点名具体是哪个响应头不符合要求。
+
+### 2.2 HTML 解析与资源引用边界
+
+脚本的 HTML 识别统一走 `scripts/html-scan.mjs`（显式状态机，零依赖），不是标签正则：
+
+- 只统计 DOM 中真实存在的元素。注释、bogus comment（`<!-->`、`<!DOCTYPE>`、`<?...>`、CDATA）、RAWTEXT（`script` / `style` / `xmp` / `iframe` / `noembed` / `noframes` / `noscript`）、RCDATA（`title` / `textarea`）、`template` 惰性内容、SVG/MathML 外部内容（`foreignObject` 内部恢复 HTML）、属性值和畸形/未闭合标签里的伪标签都不算。
+- 属性支持单/双引号、无引号、属性值里的 `>`、重复属性（第一个生效）和字符引用（`&amp;`、数字引用等，含缺分号的数字引用与 C1 字符的 windows-1252 映射）；标签名/属性名 ASCII 大小写归一。
+- 相对 URL 按 `<base href>`（第一个带 href 的 base）解析；没有 base 时按**文档 URL**解析（与浏览器一致，例如最终页面 `/sub` 里的 `app.js` 解析为 `/app.js`，不会强行补成 `/sub/app.js`）。根路径有同源重定向时，404 / API / CORS / `/index.html` / 资源 / canonical 都基于**最终页面 URL**。
+- 资源引用只取真实元素上的子资源属性：`src`、`srcset`、`poster`、`<object data>`、`<link href>`。`srcset` 按「逗号 + 空白」拆候选（URL 里的逗号不误拆）；`<a href>` 导航链接、canonical、`<base>` 不是资源；跨源 / 畸形引用只记进 `ignored`，不发请求。
+- `probed[].finalUrl` 只表示最后真正请求过的地址；没跟随的目标在 `redirectTarget`，超过跳数在 `limitReached`。不要再把 `finalUrl` 当成「期望跟随到的目标」。
+- 只有最终 200 的首页才做 title/canonical/资源/可见文本检查；4xx/5xx 错误页的内容不作为站点证据。
 
 **HTTP 验收不是全栈验收。** 这条命令只证明页面和指定接口能返回；数据库写入、登录会话、第三方回调、真实 Secrets、冷启动仍要人工或专项验证，没测就在报告里写「未验证」。
 
 三个限制必须写进报告：
 
 - 同源资源只查首页引用的前 20 个（`--assets-limit`），不是全站爬取；报告要写 `checked / total`。
-- 主站、资源和 `--backup` 请求都用 `redirect: "manual"`，且**只自动跟随同源重定向**（同源 = 协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）。三者共用 `MAX_REDIRECTS=5`：**最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址**（共最多 6 次请求）；如果最终地址仍返回 3xx，也就是第 6 次重定向，判「超出跳数 / 循环」，不请求它的目标，主站结果的 `limitHop` 保留未跟随那一跳的状态码与 Location（资源探针的未跟随跳保留在 `chain` 里）。跨源、协议变化（HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失或无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网地址或云厂商元数据端点；跨源恰好发生在跳数边界时仍优先按跨源分类。主站结果的 `redirectOutcome` 区分：同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`（少见 3xx）；跨源时是 `warn` 且 `verified: false`，别的网站返回 200 不会给原始站点判 pass。**5 次重定向后最终 404 是 `same-origin-final-failed`，不是跳数超限。**
+- 主站、资源和 `--backup` 请求都用 `redirect: "manual"`，且**只自动跟随同源重定向**（同源 = 协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）。三者共用 `MAX_REDIRECTS=5`：**最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址**（共最多 6 次请求）；如果最终地址仍返回 3xx，也就是第 6 次重定向，判「超出跳数 / 循环」，不请求它的目标，主站结果的 `limitHop` 保留未跟随那一跳的状态码与 Location（资源探针的未跟随跳保留在 `chain` 里）。跨源、协议变化（HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失/含 userinfo/无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网地址或云厂商元数据端点；跨源恰好发生在跳数边界时仍优先按跨源分类。主站结果的 `redirectOutcome` 区分：同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`（少见 3xx）；跨源时是 `warn` 且 `verified: false`，别的网站返回 200 不会给原始站点判 pass。根路径有同源重定向时，后续 404 / API / CORS / `/index.html` / 资源 / canonical 都按**最终页面 URL** 解析。**5 次重定向后最终 404 是 `same-origin-final-failed`，不是跳数超限。**
 - **3xx 不等于重定向。** 只有 `301 / 302 / 303 / 307 / 308` 需要读取 Location 并继续请求；`304 Not Modified` 是缓存协商结果（`statusClass: "not-modified"`），不进入重定向链，也不会因为缺少 Location 被报成「无效重定向」。其他 3xx（`300`、`305` 等，`statusClass: "unexpected-3xx"`）既不跟随也不能当成功。主站链、资源探针和 `/index.html` 检查共用同一分类规则（`scripts/redirect-policy.mjs` 的 `classifyStatus()`），结果里的跳记录都带 `statusClass`。
-- 资源 3xx **不算通过**：同源按上述同一跳数语义跟随并验证最终 2xx；跨主机只记录最终地址、不跟随，判 `warn` 交人工确认；循环、缺 `Location`、非 HTTP(S) 目标、最终 4xx/5xx 判 `fail`。只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度推断），`probed` / `warnings` / `redirects` 都保留原始地址、最终地址、最终状态、跨主机标记与完整链。**304 不是重定向，也不代表资源可用**：不进入 `redirects`，判 `fail`；少见 3xx 判 `warn` 且不进 `redirects`，需要人工确认。首页里的跨源 / 非 HTTP(S) 资源引用（包括用反斜杠伪装成相对地址的跨源 URL）在解析后按 origin 过滤：不请求目标，只记进 `ignored`。
+- 资源 3xx **不算通过**：同源按上述同一跳数语义跟随并验证最终 2xx；跨主机只记录最终地址、不跟随，判 `warn` 交人工确认；循环、缺 `Location`、非 HTTP(S) 目标、最终 4xx/5xx 判 `fail`。只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度推断），`probed` / `warnings` / `redirects` 都保留原始地址、最终地址、最终状态、跨主机标记与完整链。**304 不是重定向，也不代表资源可用**：不进入 `redirects`，判 `fail`；少见 3xx 判 `warn` 且不进 `redirects`，需要人工确认。资源只从真实元素的子资源属性（`src` / `srcset` / `poster` / `<object data>` / `<link href>`）收集；导航链接、canonical、`<base>` 不算资源。相对地址按 `<base href>`（没有则最终站点根）解析；跨源 / 畸形引用（包括用反斜杠伪装成相对地址的跨源 URL）解析后只记进 `ignored`，不请求目标。`probed[].finalUrl` 只表示最后真正请求过的地址，未跟随目标在 `redirectTarget`，超限在 `limitReached`。
 - CORS 检查默认查 `--url` 首页；API 在别的子域时必须用 `--cors-url`，否则“首页没有 CORS 头”会被误读成接口有问题。
 
 ## 3. 脚本做不到的人工检查
@@ -148,11 +159,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 
 ### 状态码
 
-- `/` 至少 200。
+- `/` 至少 200；只有最终 200 才做内容检查（4xx/5xx 错误页的 title/canonical 不作为站点证据）。
 - `static`/`ssg`：未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
 - `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受。
 - `ssr`：未知路径通常 404；返回 200 要人工确认是自定义 404 还是 catch-all 把所有路径渲染成首页。
-- Pages 上 `/index.html` 跳 `/`（301/308）是正常的。脚本只把**同源且目标就是站点根**的重定向判 `pass`（结果带 `convergesToRoot`）；跨源、非 HTTP(S)、其他路径只给 `warn`，不请求目标，也不证明收敛到 `/`。
+- Pages 上 `/index.html` 跳 `/`（301/308）是正常的。脚本只把**同源且目标就是站点根**的重定向判 `pass`（结果带 `convergesToRoot`）；跨源、非 HTTP(S)、其他路径只给 `warn`，不请求目标，也不证明收敛到 `/`；`/index.html` 返回 5xx 判 `fail`。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
 - 资源检查只覆盖首页引用的前 N 个。写了“资源正常”就必须说明检查了多少个。
 - 资源 301/302/307/308 只是**一跳**，不是结论；要看最终状态。跨主机重定向（CDN、签名 URL）要单独确认，不能默默算正常；脚本不会为了确认而自动请求跨源目标。
@@ -177,10 +188,10 @@ curl -sI https://site.example.com/ | grep -iE 'server|cache-control|x-robots-tag
 curl -s https://site.example.com/ | grep -io '<link[^>]*canonical[^>]*>'
 ```
 
-多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。脚本只统计真正的 `<link rel="canonical">`：`rel` 按 HTML 空白分隔 token 精确匹配（`canonicalized` 以及 `data-rel` / `aria-rel` 都不算），HTML 注释和 `<script>` / `<style>` 里的假标签也不计入。
+多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。脚本用共享 HTML tokenizer 只统计 DOM 中真实存在的 `<link rel="canonical">`：注释、bogus comment、RAWTEXT（`script`/`style`/`xmp`/`iframe`/`noembed`/`noframes`）、RCDATA（`title`/`textarea`）、`template` 惰性内容、属性值和畸形标签里的伪标签都不计入；`rel` 按 HTML 空白分隔 token 精确匹配（`canonicalized` 以及 `data-rel` / `aria-rel` 都不算）。
 
 - 主站：只有一个 canonical，指向自己。**指向自己要求协议、主机、规范化路径三者全部一致**；只比 host + pathname 会把 `https` 页面上的 `http` canonical 误判成 self-canonical。脚本在 `canonical` 检查结果里给出 `sameProtocol` / `sameHost` / `samePath`。
-- `href` 缺失、`href=""`、`href` 无法解析分别判 `fail`，结果带 `hrefState`（`missing` / `empty` / `invalid`）；**不会**把空值交给 `new URL("", base)` 解析成当前站点再误判成指向自身。合法的属性值支持双引号、单引号和不带引号三种写法。
+- `href` 缺失、`href=""`、`href` 无法解析分别判 `fail`，结果带 `hrefState`（`missing` / `empty` / `invalid`）；**不会**把空值交给 `new URL("", base)` 解析成当前站点再误判成指向自身。属性值支持单/双引号、无引号、属性值里的 `>` 和字符引用（`&amp;` 等）；相对 canonical 按 `<base href>`（第一个带 href 的 base）或最终页面 URL 解析。
 - 一个页面出现多个 canonical 标签 → 模板重复输出，必须修（脚本会判 `fail`）。
 - canonical 指向其他主机 → 如果这是备用站、策略是“指主站”，属预期；否则权重被指向外部。
 - canonical 指向另一个路径 → 可能是有意的（分页/聚合），确认后再接受。

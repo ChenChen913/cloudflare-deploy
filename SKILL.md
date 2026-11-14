@@ -109,8 +109,9 @@ node "<技能目录>/scripts/probe.mjs"
 
 - 退出码 `0` = ready；`1` = limited（先读 warn，判断缺口是否影响本次目标）；`2` = blocked（**硬停**）。
 - blocked 时不要改配置、装适配器或跑构建。给出具体下一步（`npx wrangler login`，或 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`）；**不要让用户在聊天里粘贴 Token**。
+- 登录态判定是 **fail-closed** 的（`check-env` 与 `probe` 共用 `scripts/wrangler-auth.mjs`）：`wrangler whoami` 退出码 0 但输出为空、只有 `loggedIn:false`、或没有邮箱 / Account ID / 明确登录文本时，判「无法确认」而不是已登录；`canDeploy` 不会为 true、`probe` 会 blocked。执行失败与未登录分开报告。
 - `npx wrangler deploy --temporary` 只在未登录时可用，用的是临时账号，**不能验证用户的账号、权限或套餐**，且会过期；它只能证明网络可达。
-- `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。**部署命令成功不等于线上验证成功**：必须解析到 URL 并真实请求通过才判 `pass`；没 URL 或 URL 不可访问只会得到 `warn` / `fail`，清理失败也会单独记 `warn`；部署本身失败时没有创建 Worker，清理记为 `skip`，不要写成「删除失败」。没有账号时不要声称已验证部署链路。
+- `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。**部署命令成功不等于线上验证成功**：必须解析到 URL 并真实请求通过才判 `pass`；没 URL 或 URL 不可访问只会得到 `warn` / `fail`，清理失败也会单独记 `warn`；部署本身失败时确认不了是否创建过 Worker，清理记为 `skip` 并提示到控制台核对，不要写成「删除失败」，也不要断言一定没创建。部署 URL 返回 3xx 不算线上验证通过（脚本不跟随）。没有账号时不要声称已验证部署链路。
 
 接着用 10 分钟做**可行性判定**（只查文档，不写代码）：框架有没有适配器且版本匹配？ORM / 驱动能否跑在 workerd（WASM、原生模块、Node API）？体积和套餐够不够？产出「可行 / 不可行 + 依据」。三问、已知不可行组合、现行额度与成本表见 `references/runtime-compat.md`。
 
@@ -182,7 +183,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 node "<技能目录>/scripts/check-env.mjs"
 ```
 
-退出码就是结论：`0` 可部署、`1` 可构建但不可部署、`2` 连构建条件都不满足。**不要忽略非零退出码继续往下走。** 只想本地构建、不打算部署时用 `--build-only`。登录缺失会给出准确命令，**不要让用户在聊天里粘贴 Token**。
+退出码就是结论：`0` 可部署、`1` 可构建但不可部署、`2` 连构建条件都不满足。**不要忽略非零退出码继续往下走。** 只想本地构建、不打算部署时用 `--build-only`。登录缺失会给出准确命令，**不要让用户在聊天里粘贴 Token**。登录判定要求正向证据：`whoami` 退出码 0 但没有邮箱 / Account ID / 明确登录文本时只会给 `warn`（`authState: "unknown"`），不能当成已登录继续部署。
 
 用项目自己的构建命令，然后检查产物：
 
@@ -202,7 +203,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 
 `--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
-产物检查的补充规则：资源存在性按产物里的**真实文件名大小写敏感**匹配（Cloudflare 区分大小写，Windows 本地不区分）；`..` 逃逸或绝对路径引用直接判坏。`check-build` 只核对显式参数 / 环境变量 / 项目依赖里的套餐证据，账号套餐和 Pages 项目设置仍需人工确认。
+产物检查的补充规则：资源存在性按产物里的**真实文件名大小写敏感**匹配（Cloudflare 区分大小写，Windows 本地不区分；顶层 `index.html` / `404.html` / `_headers` 也按大小写严格判断）；`..` 逃逸判坏；以 `/` 开头的引用按产物根相对路径解析（存在即通过，不是逃逸），相对引用受 `<base href>` 影响；目录式 URL（`/about/`、`/about`）按 `about/index.html` 查找；产物里的 symlink/junction 会跟随并计入。 `check-build` 只核对显式参数 / 环境变量 / 项目依赖里的套餐证据，账号套餐和 Pages 项目设置仍需人工确认。
 
 **文件数按套餐 + 部署目标判定**：默认 Free **20,000**。Paid **100,000** 只有显式 `--plan paid` 才考虑，且两套产品的启用条件不同，必须用 `--target` 指明：
 
@@ -242,7 +243,7 @@ npx wrangler deploy
 node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**，对应检查会列进 `notChecked`。`--cors-credentials` 只是声明「预期请求带凭据」：脚本不会真的发浏览器 Cookie 或身份凭据，响应里的 `ACAC: true` 也不代表请求带凭据，无凭据时 `ACAO: *` 依旧有效；显式声明带凭据时才要求 ACAO 精确匹配 Origin 且必须有 `ACAC: true`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization`/`Range` 永远不被 `Allow-Headers: *` 覆盖；方法名大小写敏感（已知方法先规范化为大写）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**：脚本不会凭默认值发送 `Access-Control-Request-Method/Headers`，对应断言列进 `notChecked`，未提供实际方法/请求头的预检最多 `warn`，不能判通过；同时给 `--cors-*` 却漏 `--origin` 会直接退出码 2。`--cors-credentials` 只是声明「预期请求带凭据」：脚本不会真的发浏览器 Cookie 或身份凭据，响应里的 `ACAC: true` 也不代表请求带凭据，无凭据时 `ACAO: *` 依旧有效；显式声明带凭据时才要求 ACAO 精确匹配 Origin 且必须有 `ACAC: true`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization` 永远不被 `Allow-Headers: *` 覆盖（`Range` 可以被覆盖）；方法名大小写敏感（已知方法先规范化为大写）。简单请求 3xx/4xx/5xx 不判通过（脚本不跟随 CORS URL 的重定向）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
 
 `--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
 
@@ -250,11 +251,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
 - `ssr`：未知路径通常 404；返回 200 只给警告，须人工确认是自定义 404 还是 catch-all。额外检查首页服务端渲染的可见文本长度与单次 TTFB——**单次采样不是性能结论**。
 
-脚本检查：首页状态（只自动跟随同源重定向；主站与资源共用 `MAX_REDIRECTS=5`——最多跟随 5 次并额外请求最终地址，第 6 次重定向判超限且主站结果的 `limitHop` 记录未跟随的一跳；跨源、协议变化、非 HTTP(S) 协议、Location 无法解析都不请求目标，用 `redirectOutcome` 区分「同源验证成功」「跨源目标未验证」「循环或超跳数」「Location 无法解析」「协议不受支持」「`not-modified`（304 不是重定向）」「`unexpected-3xx`（少见 3xx 不判通过）」）、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符、**协议不一致**；三者全一致才算指向自身；**href 缺失 / 空值 / 无法解析分别判失败**，不被解析成当前站点；双引号 / 单引号 / 不带引号三种合法写法都支持；只统计真正的 `<link rel=canonical>`——`rel` 按 HTML 空白分隔 token 匹配，忽略注释、`<script>`/`<style>` 与 `data-rel`/`aria-rel`）、meta robots、同源资源（HEAD 失败自动用 GET 复核；3xx 只有 301/302/303/307/308 跟随同源重定向并验最终 2xx，跨主机只记录并标 `warn`；304 不进入重定向链、判失败；跨源 / 非 HTTP(S) 引用解析后不请求）、响应头、`/index.html` 重定向（只有同源且目标是站点根才判通过；304 / 少见 3xx / 跨源 / 其他路径只告警）、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。三处 3xx 判断共用 `classifyStatus()`，结果带 `statusClass`。
+脚本检查：首页状态（只自动跟随同源重定向；主站与资源共用 `MAX_REDIRECTS=5`——最多跟随 5 次并额外请求最终地址，第 6 次重定向判超限且主站结果的 `limitHop` 记录未跟随的一跳；跨源、协议变化、非 HTTP(S) 协议、Location 缺失/含 userinfo/无法解析都不请求目标；只有最终 **200** 的首页才做内容检查，错误页的 title/canonical 不作为站点证据；`/index.html` 5xx 判失败）、模式对应的 404/回退（`spa` 回退必须有可识别的 app shell 标记，否则只 `warn`）、标题（只认真实 `<title>`）、canonical（重复标签、跨主机、路径不符、**协议不一致**；三者全一致才算指向自身；**href 缺失 / 空值 / 无法解析分别判失败**，不被解析成当前站点；属性支持引号 / 无引号 / 属性值里的 `>` / 字符引用；只统计真正的 `<link rel=canonical>`——`rel` 按 HTML 空白分隔 token 匹配，注释、RAWTEXT（script/style/xmp/iframe/noembed/noframes/noscript）、RCDATA（title/textarea）、template、SVG/MathML 外域内容、属性值与畸形标签里的伪标签都不算；相对 canonical 按 `<base href>` / 最终页面 URL 解析）、meta robots（真实元素）、同源资源（HTML 与 check-build 共用同一个 tokenizer 和资源属性规则：只取 `src` / `srcset` / `poster` / `<object data>` / `<link href>`，`srcset` 按「逗号 + 空白」拆候选，导航链接、canonical、`<base>` 不算；相对地址按 `<base href>`，没有 base 时按文档 URL（与浏览器一致，不强行补斜杠）；HEAD 失败自动用 GET 复核；3xx 只有 301/302/303/307/308 跟随同源重定向并验最终 2xx，跨主机只记录并标 `warn`；304 不进入重定向链、判失败；`finalUrl` 只表示最后真正请求过的地址，未跟随目标在 `redirectTarget` / `limitReached`；跨源 / 畸形引用只记进 `ignored`，不请求）、响应头、`/index.html` 重定向（只有同源且目标是站点根才判通过；304 / 少见 3xx / 跨源 / 其他路径只告警；5xx 判失败）、可选 CORS（预检只发送显式提供的方法/请求头，未提供的断言只进 `notChecked` 且最多 `warn`；简单请求 3xx/4xx/5xx 不判通过；只有 Authorization 不被 `Allow-Headers: *` 覆盖）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。三处 3xx 判断共用 `classifyStatus()`，结果带 `statusClass`。
 
 **HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON 且（给了 `--expect-json` 时）符合期望的 JSON 子集；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。CORS 预检 `notChecked` 里的项同样要写成「未验证」，不要写成「已通过」。
 
-同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。结果里的 `probed` 保留每个资源的原始地址、`chain` 重定向链、`finalUrl` / `finalStatus` 和 `crossHost`；只要收到带有效 Location 的 3xx 就记进 `redirects`（同主机与跨主机都算），`probed` / `warnings` / `redirects` 三处一致。首页里的跨源 / 非 HTTP(S) 引用（包括反斜杠伪装的跨源 URL）解析后不请求，只记进 `ignored`。重定向、循环、最终 4xx/5xx 都不会被当成正常；**304 不是重定向，也不代表资源可用**，不进入 `redirects` 且判失败。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
+同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。资源属性规则与 check-build 共用：只取真实元素上的 `src` / `srcset` / `poster` / `<object data>` / `<link href>`；`srcset` 按「逗号 + 空白」拆候选；`<a href>` 导航链接、canonical、`<base>` 不算资源；相对地址按 `<base href>`，没有 base 时按文档 URL（不强行补尾斜杠），根路径有同源重定向时按最终页面 URL。结果里的 `probed` 保留每个资源的原始地址、`chain` 重定向链、`finalUrl` / `finalStatus` 和 `crossHost`；`finalUrl` 只表示**最后真正请求过**的地址，没跟随的目标在 `redirectTarget`，超限在 `limitReached`。只要收到带有效 Location 的 3xx 就记进 `redirects`（同主机与跨主机都算），`probed` / `warnings` / `redirects` 三处一致。跨源 / 畸形引用（包括反斜杠伪装的跨源 URL）只记进 `ignored`，不请求。重定向、循环、最终 4xx/5xx 都不会被当成正常；**304 不是重定向，也不代表资源可用**，不进入 `redirects` 且判失败。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
 再按项目类型执行 `references/verification.md` 里的检查。纯静态站不要跑数据库和登录测试。每次修复后重新请求验证；没有新响应，就不能说“已修复”。
 
@@ -280,7 +281,10 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **主站、资源、`--backup` 共用 5 次重定向上限。** 5 次重定向后仍要请求最终地址并验最终状态；只有最终地址再返回 3xx（第 6 次重定向）才判超限。「5 次重定向后 404」是最终状态失败，不是跳数超限；边界处出现跨源重定向仍按跨源分类，不跟随。主站结果的 `limitHop` 记录未跟随的那一跳，资源探针的未跟随跳保留在 `chain` 里。
 - **`/index.html` 只有同源且目标是站点根才算收敛。** 跨源、非 HTTP(S)、其他路径的重定向只告警、不判通过，也不请求目标；`httpStatus` 和 `convergesToRoot` / `redirectKind` 给出机器可读证据。
 - **验收参数写错直接报用法错误。** `--api` / `--expect-404` 非法 URL、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--backup` 都会以退出码 2 结束，不会输出半截 JSON，也不会静默跳过检查（例如把 `--assets-limit abc` 当成 0 个资源）。
-- **canonical 必须协议、主机、规范化路径全部一致才算指向自身。** `https` 页面上写 `http` canonical 判 `warn` 并点名协议不一致，不能算通过；跨主机、跨路径、多个标签的原有判定不变。canonical 的 `href` 缺失、为空或无法解析都判 `fail`（`hrefState` 分别为 `missing` / `empty` / `invalid`），不会被空值回退成当前站点；双引号 / 单引号 / 不带引号三种合法属性值都支持。
+- **canonical 必须协议、主机、规范化路径全部一致才算指向自身。** `https` 页面上写 `http` canonical 判 `warn` 并点名协议不一致，不能算通过；跨主机、跨路径、多个标签的原有判定不变。canonical 的 `href` 缺失、为空或无法解析都判 `fail`（`hrefState` 分别为 `missing` / `empty` / `invalid`），不会被空值回退成当前站点；相对 href 按 `<base href>` / 最终页面 URL 解析。只统计真正的 `<link rel=canonical>`：注释、RAWTEXT/RCDATA、template、畸形标签里的伪标签与 `data-rel`/`aria-rel`/`canonicalized` 都不算。
+- **HTML、配置、命令行输出都必须有明确的解析/判定权威。** HTML 用 `scripts/html-scan.mjs`，配置用 `scripts/config-scan.mjs`，登录态用 `scripts/wrangler-auth.mjs`；不允许在调用方再写「标签正则 / 注释扫描 / 字符串包含」来模拟解析，改规则只改权威实现并补回归测试。
+- **退出码 0 不等于成功，缺证据不等于通过。** 登录态、部署验证、CORS 预检、SPA 回退、资源引用都按 fail-closed 处理：没有可验证证据时最多 `warn`，不能判 `pass`；`canDeploy`/`ready` 只认正向证据。
+- **资源引用只认子资源属性。** `src` / `srcset` / `poster` / `<object data>` / `<link href>` 才是资源；导航链接、canonical、`<base>` 不探测。`finalUrl` 不能指向从未请求过的地址；跨源目标只记录不请求。
 - **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
 - **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。

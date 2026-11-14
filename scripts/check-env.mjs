@@ -14,6 +14,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
+import { classifyWranglerWhoami } from "./wrangler-auth.mjs";
 
 const json = process.argv.includes("--json");
 const root = process.cwd();
@@ -134,21 +135,21 @@ if (gh.status === "pass") {
 
 if (wrangler.status === "pass") {
   const who = run(wranglerCmd, [...wranglerPrefix, "whoami"], 15000);
-  const text = `${who.stdout}\n${who.stderr}`;
-  const notLoggedIn = /not authenticated|not logged in|no account/i.test(text);
-  const loggedIn = who.ok && !notLoggedIn;
+  // 单一权威：退出码 0 不等于已登录，必须有可验证的登录证据。
+  const auth = classifyWranglerWhoami({ ok: who.ok, stdout: who.stdout, stderr: who.stderr, error: who.error });
+  const loggedIn = auth.state === "logged-in";
   const detail = loggedIn
-    ? firstLine(who.stdout || who.stderr)
-    : !who.ok && !notLoggedIn
-      // 命令执行失败（例如 npx 不可用）不能写成「未登录」。
-      ? `wrangler whoami 执行失败（${who.error || firstLine(who.stderr) || `退出码 ${who.status}`}），无法确认登录态`
-      : "未登录。执行：npx wrangler login（或设置 CLOUDFLARE_API_TOKEN）。";
+    ? auth.reason
+    : auth.state === "logged-out"
+      ? "未登录。执行：npx wrangler login（或设置 CLOUDFLARE_API_TOKEN）。"
+      : `${auth.reason}；到 \`npx wrangler whoami\` 手动确认，当前不能判定为已登录`;
   checks.push({
     id: "wrangler-auth",
     label: "Cloudflare 登录",
     status: loggedIn ? "pass" : "warn",
     version: null,
     detail,
+    authState: auth.state,
     required: false,
   });
 } else {

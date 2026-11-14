@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：279/279 通过（`node tests/run-tests.mjs`）。
+- 本地测试：439/439 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -23,7 +23,7 @@
 3. **计划**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。
 4. **构建检查**：部署前按站点模式、套餐和部署目标检查产物。默认 Free 20,000 文件；`--plan paid --target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，`--plan paid --target workers` 要 Wrangler >= 4.34.0，才按 100,000。目标未知、版本非法或证据不足一律退回 20,000 并给 `warn`；`ssr` 明确报告「不适用」。
 5. **部署**：先到 `pages.dev` / `workers.dev` 或预览分支。
-6. **验收**：首页（只自动跟随同源重定向，最多 5 次并额外请求最终地址；跨源、协议变化、非 HTTP(S) 目标不请求，只记录并分类；3xx 里只有 301/302/303/307/308 是重定向，304 与其他 3xx 单独分类）、按模式判定的 404/回退、资源（3xx 跟随同源到最终 2xx，跨主机记录并告警；304 不进入重定向链）、响应头、canonical/noindex（协议 / 主机 / 路径三者一致才算指向自身；href 缺失 / 空值 / 无法解析分别判失败，支持三种合法引号写法）、CORS（预检按 Fetch 规范处理 `*` / 凭据 / 安全列表方法；简单请求的凭据模式只由 `--cors-credentials` 声明）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
+6. **验收**：首页（只自动跟随同源重定向，最多 5 次并额外请求最终地址；跨源、协议变化、非 HTTP(S) 目标不请求，只记录并分类；3xx 里只有 301/302/303/307/308 是重定向，304 与其他 3xx 单独分类；只有最终 200 才做内容检查）、按模式判定的 404/回退、资源（HTML 由共享 tokenizer 解析，注释/script/style/textarea/template 内的伪标签不算；只取真实子资源属性，按 `<base href>` / 最终页面 URL 解析；304 不进入重定向链）、响应头、canonical/noindex（href 缺失 / 空值 / 无法解析分别判失败；只统计真正的 `<link rel=canonical>`）、CORS（预检只发送显式提供的方法/请求头，未提供的断言只进 `notChecked`；CORS URL 非 2xx/重定向不判通过）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容（RAWTEXT 不计入可见文本）、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
 ## 目录
@@ -51,6 +51,9 @@ cloudflare-deploy/
 │   ├── probe.mjs             # 第 0 步：链路探针
 │   ├── deploy-verdict.mjs    # 探针 --deploy 的可测判定逻辑
 │   ├── redirect-policy.mjs  # 重定向同源判定（纯函数，主站与资源共用）
+│   ├── html-scan.mjs         # 共享 HTML tokenizer（注释/RAWTEXT/RCDATA/template、字符引用）
+│   ├── config-scan.mjs       # 配置注释/JSONC/TOML 读取（detect-project 用）
+│   ├── wrangler-auth.mjs     # 登录态判定的唯一权威（check-env 与 probe 共用）
 │   ├── detect-project.mjs
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -135,7 +138,9 @@ node scripts/verify-deployment.mjs --url https://site.example.com --mode static 
 
 CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；按 Fetch 规范，`*` 只在无凭据请求里作通配，`GET/HEAD/POST` 是 CORS-safelisted method，`Authorization` 不被 `*` 覆盖，方法名大小写敏感。**`--cors-credentials` 是用户声明的预期请求模式**：脚本只发 GET / HEAD / OPTIONS，不会真的带浏览器 Cookie 或身份凭据；响应里出现 `Access-Control-Allow-Credentials: true` 也不会把无凭据请求变成带凭据请求。只有显式声明带凭据时，才要求 `ACAO` 精确匹配 Origin 且必须有 `ACAC: true`。
 
-主站与资源都只自动跟随**同源**（协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）重定向，共用 `MAX_REDIRECTS=5` 的跳数语义：最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址；该地址仍返回 3xx（第 6 次重定向）就判「超出跳数 / 循环」，且不请求它的目标。跨源、协议变化（含 HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失或无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网或云元数据地址；即使跨源发生在跳数边界，也按跨源分类、不跟随。主站结果用 `redirectOutcome` 区分同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`（少见 3xx），另有 `no-redirect` / `network-error` / `same-origin-final-failed`；超限时 `limitHop` 记录未跟随的那一跳。资源只要收到带有效 Location 的 3xx 就记进 `redirects`（不再用链长度判断），`probed` / `warnings` / `redirects` 三处一致。3xx 里只有 `301/302/303/307/308` 需要读取 Location；`304 Not Modified` 是缓存协商结果，不进入重定向链，也不会因为缺少 Location 被报成无效重定向；其他 3xx（300、305 等）不跟随、不判通过。主站链、资源探针和 `/index.html` 检查共用 `classifyStatus()`，结果里的跳记录带 `statusClass`。canonical 的 `href` 缺失、为空、无法解析分别判 `fail` 并给出 `hrefState`（`missing` / `empty` / `valid` / `invalid`），不会把空值解析成当前站点；双引号、单引号和不带引号的合法属性值都支持；只统计真正的 `<link rel="canonical">`（`rel` 按 HTML 空白分隔 token 精确匹配，注释、`<script>`/`<style>`、`data-rel` / `aria-rel` 都不算）。canonical 只有**协议 + 主机 + 规范化路径**都一致才算指向自身；主机和路径相同但协议不同（`https` 站点写了 `http` canonical）判 `warn` 并点名协议不一致。首页里的跨源或非 HTTP(S) 资源引用（包括用反斜杠伪装成相对地址的跨源 URL）不会被请求，只记进 `ignored`；`/index.html` 只有同源且目标是站点根时才判通过，跨源 / 非 HTTP(S) / 其它路径只告警。参数写错（`--api` / `--expect-404` 非法 URL、`--timeout` 非正数、`--assets-limit` 非正整数、`--backup` 非法 URL）会以退出码 2 报用法错误，不会输出半截 JSON。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
+主站与资源都只自动跟随**同源**（协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）重定向，共用 `MAX_REDIRECTS=5` 的跳数语义：最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址；该地址仍返回 3xx（第 6 次重定向）就判「超出跳数 / 循环」，且不请求它的目标。跨源、协议变化（含 HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失/含 userinfo/无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网或云元数据地址。主站结果用 `redirectOutcome` 区分同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`，另有 `no-redirect` / `network-error` / `same-origin-final-failed`；超限时 `limitHop` 记录未跟随的那一跳。3xx 里只有 `301/302/303/307/308` 需要读取 Location；304 与其他 3xx 不进入重定向链、不判通过。主站链、资源探针和 `/index.html` 检查共用 `classifyStatus()`。只有最终 **200** 的首页才做内容检查（错误页的 title/canonical 不作为站点证据）；`/index.html` 5xx 判失败。
+
+HTML 由共享 tokenizer（`scripts/html-scan.mjs`，显式状态机、零依赖）解析：注释、RAWTEXT（script/style/xmp/iframe/noembed/noframes/noscript）、RCDATA（title/textarea）、template 惰性内容、SVG/MathML 外部内容、属性值和畸形标签里的伪标签都不会被当成真实 HTML 元素；`verify-deployment` 与 `check-build` 共用同一套资源属性规则。资源引用只取真实元素上的子资源属性（`src` / `srcset` / `poster` / `<object data>` / `<link href>`；`<a href>` 导航链接、canonical、`<base>` 不算资源），`srcset` 按「逗号 + 空白」拆候选（URL 里的逗号不误拆），字符引用按 HTML 语义解码；相对地址按 `<base href>`，没有 base 时按文档 URL（与浏览器一致，不强行补尾斜杠）。根路径有同源重定向时，404/API/CORS/`/index.html`/资源/canonical 都基于最终页面 URL。`probed.finalUrl` 只表示最后真正请求过的地址，未跟随的目标在 `redirectTarget` / `limitReached`；跨源、畸形引用只记进 `ignored`，不请求。canonical 只统计真正的 `<link rel="canonical">`（`rel` 按 HTML 空白分隔 token 精确匹配，`data-rel` / `aria-rel` / `canonicalized` 不算），href 缺失 / 空 / 无法解析分别判 `fail`，不会把空值解析成当前站点；协议、主机、规范化路径三者一致才算指向自身。CORS 预检只发送显式提供的 `--cors-method` / `--cors-headers`（没提供就不发 ACRM/ACRH，只断言 ACAO，最多 `warn`）；简单请求的 3xx/4xx/5xx 不判通过；`Allow-Headers: *` 不覆盖 Authorization（Range 可被通配）；`--backup` 与主站同源不构成独立入口。`check-env` 与 `probe` 共用登录判定：`whoami` 退出码 0 但输出没有邮箱 / Account ID / 明确登录文本时判 `unknown`，不允许 `canDeploy`/ready，避免 fail-open。参数写错（非法 `--api` / `--expect-404` / `--backup` / `--cors-url` / `--url`、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--origin`、CORS 参数缺 `--origin`）会以退出码 2 报用法错误。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
 
 SSR / 全栈的 HTTP 基线：
 
@@ -164,13 +169,13 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 279 项：识别、套餐与产物、真实 HTTP 验收、CORS、主站/资源重定向与 SSRF 防护、跳数边界、canonical 协议 / href 形态 / rel 识别、3xx 状态分类（304）、CLI 参数校验、JSON 结构、链路探针
+node tests/run-tests.mjs        # 439 项，分层覆盖（core 278 / adversarial 62 / boundary 22 / combination 5 / unit 72）：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 ```
 
-测试会创建 13 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon、wrangler.jsonc 静态资源），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用 15 台本地 HTTP 服务器 + 1 台本地 HTTPS 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、canonical href 六种形态、304 与少见 3xx 的状态分类、跨源资源引用不请求、301 假备用站、`--api` 的 JSON 结构与期望值比较。HTTPS 服务器用仓库自带的自签回环证书（`tests/fixtures/loopback-tls.mjs`，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启，不需要 openssl 或第三方包），让 canonical 协议矩阵能真的以 `https://` 站点执行。
+测试会创建 20 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon、wrangler.jsonc、以及「注释噪声 / 只有 public/index.html / Nuxt ssr:false 与 generate / routeRules / node 启动参数」等配置识别夹具），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 12 个构建产物夹具（含伪资源引用、目录式 URL、`%2F`、srcset 逗号、跨源 base、超 40 条引用、大小写/符号链接），并用 15 台本地 HTTP 服务器 + 1 台本地 HTTPS 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、HTML 上下文隔离（注释/RAWTEXT/RCDATA/template/属性值/SVG/MathML/foreignObject）、`<base href>` 与重定向后的最终 URL、304 与少见 3xx、跨源资源引用不请求、500 错误页门控、301 假备用站、`--api` 的 JSON 结构与期望值比较。HTTPS 服务器用仓库自带的自签回环证书（`tests/fixtures/loopback-tls.mjs`，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启，不需要 openssl 或第三方包），让 canonical 协议矩阵能真的以 `https://` 站点执行。
 
-专项回归包括：套餐按目标分流与完整版本比较（Pages 条件齐全 / 缺环境变量、Workers 4.34.0 / 4.33.0 / Free、目标未知、非法版本号、纯函数文件数边界，不真造两万个文件）、CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、204 但无 ACAO、未提供的检查不推断、通配符 × 凭据、Authorization 非通配、安全列表方法、方法大小写）、CORS 简单请求凭据矩阵（`ACAO=*` × ACAC 有无 × 是否声明 `--cors-credentials`）、主站重定向矩阵（同源 301→200 / 302→404、跨主机、127.0.0.1、HTTP→HTTPS、循环、无效 Location、非 HTTP(S) 协议、备用站跳主站）、重定向策略纯函数（含 HTTPS→HTTP）、资源重定向与汇总一致性（直接 200 / 同主机 301 / 跨主机 302 / 循环 / 缺 Location / 协议拒绝，`probed` / `warnings` / `redirects` 对齐）、主站 / 备用站跳数边界（5 次重定向 + 最终 200 / 最终 404 / 第 6 次重定向判超限 / 边界处跨源不跟随 / 原有循环用例，用服务器收到的路径数证明真的请求了最终地址）、canonical 协议矩阵（HTTPS 站点 × HTTPS 自身 / HTTP canonical / 其他主机 / 其他路径 / 多个标签，全部真实执行脚本并断言 JSON 里的 `sameProtocol` / 状态）、canonical href 形态矩阵（真实 HTTP 站点：缺 href / 空字符串 / 单引号 / 双引号 / 不带引号 / 无法解析，断言 JSON 里的 `hrefState` 与判定结果）、canonical rel 识别矩阵（`data-rel` / `aria-rel` / `canonicalized` / 注释 / `<script>` 内的假标签不识别，属性顺序与 `alternate canonical` 多 token 正常识别）、3xx 状态分类矩阵（主站 / 资源 / `/index.html` × 304 / 300 / 301 / 302 / 303 / 307 / 308，断言 `statusClass`、`httpStatus`、`redirectOutcome`、`redirect` 与 `redirects` 汇总；原有重定向循环、跨源、跳数边界用例继续通过）、wrangler.jsonc 的 JSON 键值解析与输出目录优先级、CLI 参数校验（非法 `--api` / `--expect-404` / `--assets-limit` / `--timeout` / `--backup` 退出码 2 且不输出半截 JSON）、首页资源引用的 SSRF 防护（反斜杠伪装跨源 URL 零请求、`javascript:` 不探测）、`/index.html` 跨源 / 非 HTTP(S) / 其他路径不判通过、`404` / `spa-fallback` / `api` 检查的 `httpStatus`、响应头检查（title / content-type / cache-control / security-headers）、备用站与 SPA 回退的 304 / 少见 3xx、check-build 的资源大小写敏感与 `..` 逃逸、含空格项目路径下的本地 wrangler、`check-skill` 的 BOM / 块标量 / fenced code 自检、`--expect-json` 结构用例（键顺序、字段缺失、类型不符、嵌套数组、无效 JSON）。跨源目标用另一台本地 HTTP 服务器记录收到的请求路径，用来证明脚本**没有跟随**，不访问真实内网地址或云厂商元数据地址。本地假 wrangler 验证链路探针在 `whoami --json` 调用失败时不会误判未登录，并覆盖 `--deploy` 的无 URL / 清理失败 / 部署失败；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
+专项回归包括：HTML tokenizer 单元 / 对抗 / 随机组合（注释、bogus comment、CDATA、DOCTYPE、RAWTEXT/RCDATA/plaintext/template、属性值含 `>`、不完整标签、重复属性、字符引用、`<base href>`、可见文本）；canonical 上下文隔离矩阵（注释 / script / style / textarea / title / iframe / xmp / noembed / noframes / plaintext / template / 属性值 / 不完整标签 / 真实+伪标签组合）；元数据隔离（伪 title/meta 不算）；资源引用规则与伪引用（src/srcset/poster/object data/link href，导航链接与 canonical 排除，`<base href>`、跨源不请求、`ignored` 汇总）；套餐按目标分流与完整版本比较；CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、未提供参数不推断且最多 warn、通配符 × 凭据、Authorization/Range 通配规则、安全列表方法、方法大小写、显式声明后 403 判失败）；CORS 简单请求（`ACAO=*` × ACAC × `--cors-credentials`、500 错误响应、3xx 重定向）；主站重定向矩阵（同源 301→200 / 302→404、跨主机、127.0.0.1、HTTP→HTTPS、循环、无效 Location、userinfo、非 HTTP(S) 协议、备用站跳主站）；资源重定向与汇总一致性（`finalUrl` 只指向实际请求地址、未跟随目标在 `redirectTarget`/`limitReached`）；跳数边界；canonical 协议 / href 形态 / rel token 矩阵；`<base href>` 与重定向最终 URL 解析；3xx 状态分类矩阵；配置注释噪声（Vite/Next/wrangler JSONC/TOML/YAML、`node --inspect`、`.env` export/小写键、Nuxt ssr:false、public/index）；登录判定 fail-closed（空输出 / `loggedIn:false` / 执行失败分开处理）；SPA 回退 fail-closed 与 `/index.html` 5xx；check-build 大小写 / `..` / `%2F` / 目录式 URL / 40 条上限提示 / symlink 主模块守卫；CLI 参数与模式矩阵；`--expect-json` 结构用例。跨源目标用另一台本地 HTTP 服务器记录收到的请求路径，用来证明脚本**没有跟随**，不访问真实内网地址或云厂商元数据地址。本地假 wrangler 覆盖登录态异常、`--deploy` 的无 URL / 清理失败 / 部署失败 / 跳转响应；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
 
 这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为。
 
@@ -182,8 +187,11 @@ node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 - 识别结果分三层：`confirmed` / `inferred` / `unknown`；部署目标是候选，不是定论。
 - 同一个 `--mode` 贯穿构建检查和验收，避免 404 结论互相矛盾。
 - 脚本确定性执行并输出 JSON，人类摘要按需输出。
+- 解析/判定单一权威：HTML 走 `scripts/html-scan.mjs`，配置走 `scripts/config-scan.mjs`，登录态走 `scripts/wrangler-auth.mjs`，3xx 分类走 `scripts/redirect-policy.mjs`，资源属性规则由 `resourceReferences()` 统一。不在调用方重复实现同类规则。
+- 安全失败优先：缺证据不等于通过；登录态、SPA 回退、CORS 预检、资源引用在无法验证时最多 `warn`，不能判 `pass`。
 - 不建空目录、不放占位资源。
 - 报告必须区分 已验证 / 失败 / 未验证。
+- HTML 解析不引入 parse5 等运行期依赖：本技能以「复制目录 + 纯 `node` 运行」分发，没有 package.json / `npm install` 步骤；`html-scan.mjs` 用显式状态机覆盖注释、RAWTEXT/RCDATA/plaintext、template、属性语法与字符引用，代价是不做完整 HTML5 tree construction。
 
 ## 限制
 
@@ -192,3 +200,4 @@ node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 - DNS、自定义域名、生产密钥、数据库迁移、删除操作必须用户确认。
 - SSR / 全栈的脚本能力只到 HTTP 层，`check-build.mjs` 对它不适用。
 - 本仓库的自动化测试全部在本机跑合成夹具，没有执行真实 Cloudflare 部署；实战记录见 `references/migration-guide.md`，两者不是一回事。
+- HTML tokenizer 不是完整 HTML5 tree builder：不建模隐式闭合、foster parenting 与完整的 foreign content 树构建（SVG/MathML 根与 `foreignObject` 会跟踪深度），不做 script double-escaped 状态；命名实体只覆盖常用集合。需要 DOM 级精确结论时人工用浏览器复核。

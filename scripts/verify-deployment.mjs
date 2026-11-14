@@ -49,6 +49,7 @@
  */
 
 import { classifyRedirect, classifyStatus } from "./redirect-policy.mjs";
+import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, resourceReferences } from "./html-scan.mjs";
 
 const argv = process.argv.slice(2);
 const getArg = (name, fallback = null) => {
@@ -110,9 +111,9 @@ const splitTokens = (v) => String(v || "").split(",").map((s) => s.trim().toLowe
 const methodTokens = (v) => String(v || "").split(",").map((s) => s.trim()).filter(Boolean);
 const CORS_SAFELISTED_METHODS = ["GET", "HEAD", "POST"];
 const NORMALIZED_METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"];
-// Fetch 规范：Authorization / Range 是 CORS non-wildcard request-header name，
-// 即使是无凭据请求，`Access-Control-Allow-Headers: *` 也不覆盖它们。
-const NON_WILDCARD_HEADERS = ["authorization", "range"];
+// Fetch 规范：只有 Authorization 是 CORS non-wildcard request-header name，
+// 即使是无凭据请求，`Access-Control-Allow-Headers: *` 也不覆盖它（Range 可以被 * 覆盖）。
+const NON_WILDCARD_HEADERS = ["authorization"];
 const normalizeMethod = (m) => {
   const raw = String(m || "").trim();
   const upper = raw.toUpperCase();
@@ -164,6 +165,15 @@ const corsArg = getArg("--cors-url");
 if (corsArg) {
   try { new URL(corsArg, base); } catch { console.error(`--cors-url 不是合法 URL：${corsArg}`); process.exit(2); }
 }
+// CORS 参数离开 --origin 没有意义：给了却没生效会被误认为「验过 CORS」。
+if (!origin && (corsArg || corsMethod || corsHeadersArg || corsCredentials)) {
+  console.error("--cors-url / --cors-method / --cors-headers / --cors-credentials 需要同时提供 --origin；否则不会执行 CORS 检查");
+  process.exit(2);
+}
+if (origin && origin !== "null" && !/^https?:\/\/[^\s]+$/i.test(origin)) {
+  console.error(`--origin 必须是 http(s) origin 或 "null"：${origin}`);
+  process.exit(2);
+}
 // 数值参数和 URL 参数在这里先校验：否则运行到一半才抛 TypeError 时，
 // 用户拿不到 JSON 结果，也无法区分是参数写错还是站点有问题。
 if (!Number.isFinite(timeout) || timeout <= 0) {
@@ -190,40 +200,46 @@ const checks = [];
 const add = (id, status, detail, extra = {}) => checks.push({ ...extra, id, status, detail });
 // 站点可能挂在子路径下（GitHub Pages project site、多站点同域）。
 // 相对路径按站点根解析；以 / 开头的仍按域名根解析。
-const dirBase = base.endsWith("/") ? base : `${base}/`;
-const resolve = (u) => new URL(u, dirBase).toString();
+const siteRootOf = (url) => {
+  const u = new URL(url);
+  u.hash = "";
+  u.search = "";
+  if (!u.pathname.endsWith("/")) u.pathname = `${u.pathname}/`;
+  return u.toString();
+};
+// 主站有同源重定向时，404 / API / CORS / `/index.html` / 资源都用最终站点根，
+// 而不是最初 --url 的路径（初始值在拿到最终响应后再更新）。
+let siteBase = siteRootOf(base);
+const resolve = (u) => new URL(u, siteBase).toString();
 
 /**
- * 从首页 HTML 收集「可探测的同源 http(s) 资源」。
+ * 从首页 HTML 的真实元素属性里收集「可探测的同源 http(s) 资源」。
  *
- * 不能只按字符串前缀过滤：`\\\\127.0.0.1:port/x` 这类写法会经 URL 解析变成
- * 协议相对地址，脚本若直接 fetch 就违反了「只请求同源」的承诺。这里先解析，
- * 再按协议与 origin 判定；跨源、非 HTTP(S)、畸形地址只记录，不发请求。
- * 带 scheme 或 `//` 的绝对/协议相对引用沿用旧行为：不探测（外链、CDN、canonical）。
+ * 输入来自 html-scan 的元素列表（注释 / RAWTEXT / template 内的伪标签已剔除），
+ * 资源属性规则由 html-scan 的 resourceReferences() 统一提供，与 check-build 共用，
+ * 避免两个脚本对「什么算资源」给出相反结论（导航链接、canonical href 不算资源）。
  *
- * @returns {{unique:{url:string,abs:string}[], ignored:{url:string,reason:string}[]}}
+ * 这里只做 URL 归一与安全检查：跨源、非 HTTP(S)、畸形地址只记录，绝不请求。
+ * 解析基准：有 <base href> 时按 HTML 语义用它，否则沿用「站点根」约定。
  */
-function collectAssetRefs(htmlText, siteBase, pageBase) {
-  const site = new URL(siteBase);
+function collectAssetRefs(elements, assetBase, siteOrigin) {
   const entries = [];
   const ignored = [];
-  for (const m of htmlText.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
-    const raw = m[1].trim();
+  for (const ref of resourceReferences(elements)) {
+    const raw = ref.value;
     if (!raw || raw.startsWith("#")) continue;
-    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//")) continue;
     const bare = raw.split(/[?#]/)[0];
     if (!bare) continue;
     let abs = null;
-    try { abs = new URL(bare, pageBase); } catch { ignored.push({ url: raw, reason: "URL 无法解析" }); continue; }
-    if (abs.protocol !== "http:" && abs.protocol !== "https:") {
-      ignored.push({ url: raw, reason: `非 HTTP(S) 协议 ${abs.protocol}` });
-      continue;
-    }
-    if (abs.origin !== site.origin) {
+    try { abs = new URL(raw, assetBase); } catch { ignored.push({ url: raw, reason: "URL 无法解析" }); continue; }
+    // data:/javascript:/blob: 等内联或非资源协议：不是网络请求，静默跳过。
+    if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
+    if (abs.origin !== siteOrigin) {
       ignored.push({ url: raw, reason: `跨源地址 ${abs.origin}，按策略不请求` });
       continue;
     }
-    entries.push({ url: bare, abs: abs.href });
+    const isAbsolute = /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//");
+    entries.push({ url: isAbsolute ? abs.href : bare, abs: abs.href });
   }
   // 同一目标用不同写法时按解析后的 URL 去重。
   return { unique: [...new Map(entries.map((e) => [e.abs, e])).values()], ignored };
@@ -340,15 +356,18 @@ const sameHost = (a, b) => {
 async function probeAsset(url) {
   const chainHops = [];
   let current = url;
+  let pendingTarget = null;
   let method = null;
   let fallback = false;
   let sawRedirect = false;
   let startOrigin = null;
   try { startOrigin = new URL(url).origin; } catch { /* resolve() 保证是绝对 URL */ }
+  // finalUrl 只表示「最后真正请求过的地址」；未跟随的重定向目标放 redirectTarget。
   const out = (extra) => ({
     url, current, method, fallback, chainHops,
     redirected: sawRedirect,
-    finalUrl: current, finalStatus: null, crossHost: false,
+    finalUrl: chainHops.at(-1)?.url ?? current,
+    finalStatus: null, crossHost: false, redirectTarget: null, limitReached: false,
     ...extra,
   });
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -381,16 +400,17 @@ async function probeAsset(url) {
       if (c.kind === "unsupported-protocol") {
         return out({
           ok: false, level: "fail", reason: `${status} ${c.reason}；已拒绝且不请求目标`,
-          finalUrl: c.next, finalStatus: status, crossHost: true,
+          finalStatus: status, crossHost: true, redirectTarget: c.next,
         });
       }
       if (c.kind === "cross-origin") {
         return out({
           ok: true, level: "warn",
           reason: `${status} ${c.reason}（按策略不跟随，最终资源未验证）`,
-          finalUrl: c.next, finalStatus: status, crossHost: true,
+          finalStatus: status, crossHost: true, redirectTarget: c.next,
         });
       }
+      pendingTarget = c.next;
       current = c.next;
       continue;
     }
@@ -412,7 +432,11 @@ async function probeAsset(url) {
     }
     return out({ ok: false, level: "fail", reason: `最终状态 ${status} 不是 2xx`, finalStatus: status });
   }
-  return out({ ok: false, level: "fail", reason: `重定向超过 ${MAX_REDIRECTS} 跳，可能循环`, finalStatus: chainHops.at(-1)?.status ?? null });
+  // 最后一跳仍是同源重定向：超过跟随上限；pendingTarget 指向未请求的地址。
+  return out({
+    ok: false, level: "fail", reason: `重定向超过 ${MAX_REDIRECTS} 跳，可能循环`,
+    finalStatus: chainHops.at(-1)?.status ?? null, redirectTarget: pendingTarget, limitReached: true,
+  });
 }
 
 const root = await chain(base);
@@ -450,13 +474,13 @@ if (root.error) {
   add("root", "fail", `主站重定向循环或超过跳数：${root.stopReason}；未取得最终响应`,
     { ...rootExtra, redirectOutcome: "loop-or-limit", verified: false });
 } else {
-  const first = root.hops[0];
+  const last = root.hops.at(-1);
   const sameOriginHops = root.hops.length - 1;
   const ok = root.status === 200;
   add(
     "root",
     ok ? "pass" : "fail",
-    `GET / -> ${root.status}，${first?.ms ?? "?"}ms`
+    `GET / -> ${root.status}，${last?.ms ?? "?"}ms`
       + (sameOriginHops > 0 ? `；同源重定向 ${sameOriginHops} 跳后${ok ? "最终验证成功" : "最终状态未通过"}` : ""),
     {
       ...rootExtra, redirectTarget: null, crossedHost: false, verified: ok,
@@ -465,10 +489,19 @@ if (root.error) {
         : "no-redirect",
     }
   );
-  const ct = root.res.headers.get("content-type") || "";
-  add("content-type", /text\/html/i.test(ct) ? "pass" : "warn", ct || "缺少 content-type");
-  try { html = await root.res.text(); } catch { html = ""; }
+  // 只有最终 200 的首页才做内容检查；4xx/5xx 错误页的 title/canonical/资源
+  // 不能当作站点证据（响应头检查同样只在 200 时进行）。
+  if (ok) {
+    const ct = root.res?.headers?.get("content-type") || "";
+    add("content-type", /text\/html/i.test(ct) ? "pass" : "warn", ct || "缺少 content-type");
+    try { html = await root.res.text(); } catch { html = ""; }
+  }
 }
+
+// 根路径可能经过同源重定向：后续 404 / API / CORS / `/index.html` / 资源都基于
+// 最终站点根，页面内相对地址也基于最终页面 URL，而不是最初的 --url。
+const pageUrl = root.status === 200 ? (root.final || base) : base;
+siteBase = siteRootOf(pageUrl);
 
 // ---------------------------------------------------------------- 404 / SPA 回退
 const missingUrl = resolve(notFoundPath);
@@ -484,17 +517,31 @@ if (!missing.res) {
   if (mode === "spa") {
     if (status === 200 && isHtml) {
       const body = await missing.res.text().catch(() => "");
-      const markers = ["id=\"root\"", "id='root'", "id=\"app\"", "id='app'", "id=\"__next\"", "id='__next'"].filter((m) => html.includes(m));
-      const moduleScript = html.match(/<script[^>]+type=["']module["'][^>]*src=["']([^"']+)["']/i)?.[1];
-      const tokens = [...markers, ...(moduleScript ? [moduleScript] : [])];
-      const shellOk = tokens.length ? tokens.some((t) => body.includes(t)) : body.length > 0;
+      // 从首页真实元素提取 app shell 证据：root/app/__next 容器或 module 入口脚本。
+      const home = html ? parseHtml(html) : { elements: [] };
+      const homeIds = home.elements
+        .map((el) => getAttribute(el, "id"))
+        .filter((attr) => attr.present)
+        .map((attr) => String(attr.value).trim().toLowerCase());
+      const shellIds = ["root", "app", "__next"].filter((id) => homeIds.includes(id));
+      const moduleEntry = home.elements
+        .map((el) => ({ el, type: getAttribute(el, "type"), src: getAttribute(el, "src") }))
+        .find(({ el, type, src }) => el.name === "script" && src.present
+          && String(type.value || "").trim().toLowerCase() === "module");
+      const entry = moduleEntry ? String(moduleEntry.src.value).trim() : null;
+      const bodyShell = /\bid\s*=\s*["']?(?:root|app|__next)\b/i.test(body);
+      const bodyEntry = Boolean(entry) && body.includes(entry);
+      const shellOk = bodyShell || bodyEntry;
+      const homeTokens = shellIds.length + (entry ? 1 : 0);
       add(
         "spa-fallback",
         shellOk ? "pass" : "warn",
         shellOk
           ? `GET ${notFoundPath} -> 200，返回的 HTML 含有 app shell 标记`
-          : `GET ${notFoundPath} -> 200，但返回内容不像 app shell（没有 root 容器或入口脚本）；确认没有把 404 页当 200 返回`,
-        { httpStatus: status, mode, markers: tokens.length }
+          : homeTokens === 0
+            ? `GET ${notFoundPath} -> 200，但首页没有可识别的 app shell 标记（root/app/__next 容器或 module 入口脚本），不能确认回退正确；确认没有把 404 页当 200 返回`
+            : `GET ${notFoundPath} -> 200，但返回内容没有匹配首页的 app shell 标记（${[...shellIds, entry].filter(Boolean).slice(0, 3).join("、")}）；确认没有把 404 页当 200 返回`,
+        { httpStatus: status, mode, homeTokens, entryFound: bodyEntry, idFound: bodyShell }
       );
     } else if (status === 404) {
       add("spa-fallback", "warn", `GET ${notFoundPath} -> 404：纯客户端路由刷新会断；若使用 hash 路由可接受`, { httpStatus: status, mode });
@@ -528,90 +575,31 @@ if (!missing.res) {
   }
 }
 
-/**
- * 读取标签上的属性值，按 HTML 属性语法处理三种合法写法：
- *   href="..." / href='...' / href=不带引号的值
- * 返回 { present, value }：
- *   present=false 标签没有该属性
- *   value=""      有属性但值为空（href=""、href=''、不带值的 href）
- *   value="..."   原始属性值，是否 trim / 能否解析交给调用方
- * 不能只用 /href=(["'])(...)/：那会把不带引号的合法值漏成空字符串，
- * 而后者被 new URL("", base) 解析成当前站点，正是 canonical 误判的来源。
- */
-function readHtmlAttr(tag, name) {
-  // 去掉标签名和结尾的 ">"，逐段扫描属性；引号内的空格不会被当成属性分隔符。
-  const src = tag.replace(/^<\s*[^\s/>]+/, "").replace(/\/?>\s*$/, "");
-  const wanted = name.toLowerCase();
-  let i = 0;
-  while (i < src.length) {
-    while (i < src.length && /\s/.test(src[i])) i++;
-    if (i >= src.length) break;
-    const nameStart = i;
-    while (i < src.length && !/[\s=]/.test(src[i])) i++;
-    const attrName = src.slice(nameStart, i).toLowerCase();
-    while (i < src.length && /\s/.test(src[i])) i++;
-    let value = "";
-    if (src[i] === "=") {
-      i++;
-      while (i < src.length && /\s/.test(src[i])) i++;
-      if (src[i] === '"' || src[i] === "'") {
-        const quote = src[i];
-        i++;
-        const valueStart = i;
-        while (i < src.length && src[i] !== quote) i++;
-        value = src.slice(valueStart, i);
-        if (i < src.length) i++; // 跳过收尾引号
-      } else {
-        const valueStart = i;
-        while (i < src.length && !/[\s"'=<>`]/.test(src[i])) i++;
-        value = src.slice(valueStart, i);
-      }
-    }
-    if (attrName === wanted) return { present: true, value };
-  }
-  return { present: false, value: null };
-}
-
-/**
- * 去掉 <script> / <style> 的内容和 HTML 注释：这两处的 "<link rel=canonical>"
- * 只是字符串或注释，不是真实标签，不能计入 canonical 数量。
- * 先去掉 script/style，避免脚本里的 "<!--" 片段干扰注释扫描。
- */
-const stripNonTagContent = (s) => s
-  .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-  .replace(/<!--[\s\S]*?-->/g, "");
-
-/**
- * rel 是 HTML 空白分隔的 token 列表，token 按 ASCII 大小写不敏感比较。
- * 只匹配完整 token：rel="canonicalized" 不是 canonical，rel="alternate canonical" 是。
- */
-function relHasToken(value, token) {
-  return String(value ?? "")
-    .split(/[\t\n\f\r ]+/)
-    .some((part) => part && part.toLowerCase() === token);
-}
-
 // ---------------------------------------------------------------- HTML 内容
 if (html) {
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim().replace(/\s+/g, " ").slice(0, 120) || null;
+  // 用同一个 HTML tokenizer 提取真实元素和文本：注释、RAWTEXT（script/style/
+  // xmp/iframe/noembed/noframes）与 template 内容里的伪标签都不会被当成真实元素。
+  const parsed = parseHtml(html);
+  // 相对 URL 的解析基准：有 <base href> 按 HTML 语义用它，否则就是最终页面 URL
+  // （不再无条件补 "/"——`/sub` 页面里的 `app.js` 在浏览器里解析为 `/app.js`）。
+  const documentBase = effectiveBaseUrl(parsed.elements, pageUrl);
+
+  const titleEl = parsed.elements.find((el) => el.name === "title");
+  const title = titleEl?.content?.trim().replace(/\s+/g, " ").slice(0, 120) || null;
   add("title", title ? "pass" : "warn", title || "没有 <title>");
 
-  // 只认真正的 <link> 标签上的真正 rel 属性：
-  // 排除注释 / script / style 里的假标签，排除 data-rel / aria-rel，按 token 精确匹配。
-  const canonTags = [...stripNonTagContent(html).matchAll(/<link\b[^>]*>/gi)]
-    .map((m) => m[0])
-    .filter((tag) => {
-      const rel = readHtmlAttr(tag, "rel");
-      return rel.present && relHasToken(rel.value, "canonical");
-    });
+  // 只统计 DOM 中真实存在、且 rel token 含 canonical 的 <link> 元素。
+  const canonElements = parsed.elements.filter((el) => el.name === "link" && relTokens(el).includes("canonical"));
+  const canonTags = canonElements.map((el) => el.raw);
   if (canonTags.length === 0) {
     add("canonical", "skip", "没有 canonical 标签");
   } else if (canonTags.length > 1) {
     add("canonical", "fail", `发现 ${canonTags.length} 个 canonical 标签；浏览器和爬虫只认第一个，通常意味着模板重复输出`, { count: canonTags.length, tags: canonTags.slice(0, 3) });
   } else {
+    const canonEl = canonElements[0];
     const tag = canonTags[0];
     const snippet = tag.length > 160 ? `${tag.slice(0, 157)}…` : tag;
-    const attr = readHtmlAttr(tag, "href");
+    const attr = getAttribute(canonEl, "href");
     if (!attr.present) {
       // 缺 href 不是「空 URL」，更不能拿 base 顶替：它是无效的 canonical 声明。
       add("canonical", "fail", `canonical 标签缺少 href 属性：${snippet}；没有 href 不算指向自身，也没有可解析目标`,
@@ -622,14 +610,14 @@ if (html) {
     } else {
       const href = attr.value;
       let parsed = null;
-      try { parsed = new URL(href, base); } catch { parsed = null; }
+      try { parsed = new URL(href, documentBase); } catch { parsed = null; }
       const norm = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
       if (!parsed) {
         // 明确报告无法解析，绝不回退到 base 再判 self-canonical。
         add("canonical", "fail", `canonical href 无法解析：${href}；不回退到当前站点，也不判指向自身`,
           { href, hrefState: "invalid", tag: snippet });
       } else {
-        const baseUrl = new URL(base);
+        const baseUrl = new URL(pageUrl);
         // 指向自身必须协议、主机、规范化路径三者都一致；只比 host + pathname 会把
         // https 站点上的 http canonical 误判成 self-canonical。
         const protocolOk = parsed.protocol === baseUrl.protocol;
@@ -653,17 +641,19 @@ if (html) {
     }
   }
 
-  const robots = html.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] || null;
+  // meta[name=robots] 也要来自真实元素：注释 / RAWTEXT 里的假 meta 不算。
+  const robotsEl = parsed.elements.find((el) => {
+    if (el.name !== "meta") return false;
+    const nameAttr = getAttribute(el, "name");
+    return nameAttr.present && String(nameAttr.value).trim().toLowerCase() === "robots";
+  });
+  const robots = robotsEl ? robotsEl.raw : null;
   add("meta-robots", robots ? "pass" : "skip", robots ? robots.slice(0, 160) : "没有 meta robots");
 
   // SSR 的关键差异：HTML 里应当已经有服务端渲染的内容，而不是空壳 + 客户端补。
   if (mode === "ssr") {
-    const text = html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    // 可见文本来自 tokenizer：注释、script/style 等 RAWTEXT 内容已剔除。
+    const text = parsed.text.replace(/\s+/g, " ").trim();
     add(
       "ssr-html",
       text.length >= 200 ? "pass" : "warn",
@@ -678,7 +668,9 @@ if (html) {
   }
 
   // ---------------------------------------------------------------- 同源资源
-  const { unique: allUnique, ignored } = collectAssetRefs(html, base, dirBase);
+  // 与浏览器语义一致：相对地址按文档 URL（或 <base href>）解析，而不是强制站点根。
+  const assetBase = documentBase;
+  const { unique: allUnique, ignored } = collectAssetRefs(parsed.elements, assetBase, new URL(pageUrl).origin);
   const unique = allUnique.slice(0, assetsLimit);
   const broken = [];
   const warnings = [];
@@ -689,12 +681,14 @@ if (html) {
     probed.push({
       url: ref.url, method: a.method, status: a.finalStatus, fallback: a.fallback,
       redirected: a.redirected, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
-      crossHost: a.crossHost, chain: a.chainHops, level: a.level, reason: a.reason,
+      crossHost: a.crossHost, redirectTarget: a.redirectTarget, limitReached: a.limitReached,
+      chain: a.chainHops, level: a.level, reason: a.reason,
     });
     // probed / broken / warnings / redirects 用同一组字段，跨源重定向不会在汇总里丢掉。
     const entry = {
       url: ref.url, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
-      redirected: a.redirected, crossHost: a.crossHost, level: a.level, chain: a.chainHops,
+      redirected: a.redirected, crossHost: a.crossHost, level: a.level,
+      redirectTarget: a.redirectTarget, limitReached: a.limitReached, chain: a.chainHops,
     };
     if (a.level === "fail") broken.push({ ...entry, status: a.finalStatus ?? a.reason, method: a.method });
     else if (a.level === "warn") warnings.push(entry);
@@ -702,11 +696,12 @@ if (html) {
   const fallbackCount = probed.filter((p) => p.fallback).length;
   const redirects = probed.filter((p) => p.redirected).map((p) => ({
     url: p.url, finalUrl: p.finalUrl, finalStatus: p.finalStatus,
-    crossHost: p.crossHost, level: p.level, reason: p.reason, chain: p.chain,
+    crossHost: p.crossHost, level: p.level, reason: p.reason,
+    redirectTarget: p.redirectTarget, limitReached: p.limitReached, chain: p.chain,
   }));
   const suffix = allUnique.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allUnique.length} 个；不是全站爬取）` : `（共 ${allUnique.length} 个，覆盖首页引用）`;
   const headNote = fallbackCount ? `；其中 ${fallbackCount} 个 HEAD 不可用，改用 GET` : "";
-  const ignoredNote = ignored.length ? `；另有 ${ignored.length} 个跨源或非 HTTP(S) 引用按策略未请求` : "";
+  const ignoredNote = ignored.length ? `；另有 ${ignored.length} 个跨源/畸形引用按策略未请求` : "";
   const crossRedirects = redirects.filter((r) => r.crossHost).length;
   const redirectNote = redirects.length
     ? `；${redirects.length} 个发生重定向${crossRedirects ? `（其中 ${crossRedirects} 个跨主机／跨源，目标未验证）` : ""}；见 chain / finalUrl / finalStatus`
@@ -805,7 +800,7 @@ if (headers) {
     // 只有「常见重定向状态 + 可解析 Location」才算发生了有效重定向；
     // 304 与少见 3xx 既不跟随，也不能判 pass。
     if (statusClass === "redirect") {
-      const c = classifyRedirect(target, loc, new URL(base).origin);
+      const c = classifyRedirect(target, loc, new URL(pageUrl).origin);
       // HTTP 状态码放 httpStatus：add() 的 status 是检查结论（pass/warn/fail），
       // 同名的附加字段会被覆盖，root / backup 也用 httpStatus。
       const baseExtra = { httpStatus: status, statusClass, location: loc, redirect: false, redirectKind: c.kind, next: c.next || null };
@@ -821,7 +816,7 @@ if (headers) {
       } else {
         // 只有同源且重定向目标就是站点根时才算收敛；指向别处的 3xx 不能判 pass。
         const normPath = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
-        const rootPath = normPath(new URL(base).pathname);
+        const rootPath = normPath(new URL(siteBase).pathname);
         const targetPath = normPath(new URL(c.next).pathname);
         const convergesToRoot = targetPath === rootPath;
         const rootLabel = rootPath === "/" ? "/" : `${rootPath}/`;
@@ -840,17 +835,22 @@ if (headers) {
         `${r.method} /index.html -> ${status}（3xx 但不是可跟随的重定向），不能确认收敛到 /`,
         { httpStatus: status, statusClass, location: loc, redirect: false });
     } else {
-      add("index-redirect", "warn",
-        `${r.method} /index.html -> ${status}${locNote}；没有重定向到 /（确认这是有意为之）`,
+      // 非 3xx：4xx 只告警（可能是 403/404 的有意行为），5xx 是服务器故障，判失败。
+      add("index-redirect", status >= 500 ? "fail" : "warn",
+        `${r.method} /index.html -> ${status}${locNote}${status >= 500 ? "；服务器错误，不能确认收敛到 /" : "；没有重定向到 /（确认这是有意为之）"}`,
         { httpStatus: status, statusClass, location: loc, redirect: false });
     }
+  } else {
+    // 网络失败不能静默跳过：否则 JSON 里没有 index-redirect，看起来像没这项检查。
+    add("index-redirect", "warn", `检查 /index.html 失败：${r.error}；无法确认收敛到 /`, { httpStatus: null, statusClass: null, redirect: false });
   }
 }
 
 // ---------------------------------------------------------------- CORS（可选）
 if (origin) {
   // 默认查首页；API 在别的子域时用 --cors-url 指到真正的接口。
-  const corsUrl = resolve(getArg("--cors-url", base));
+  // 默认目标必须基于最终站点根（resolve("")），否则根 301→/en/ 后会去测旧路径。
+  const corsUrl = resolve(getArg("--cors-url", ""));
   const r = await req(corsUrl, { method: "GET", headers: { "user-agent": UA, origin } });
   if (!r.res) {
     add("cors", "warn", `CORS 检查失败：${r.error}`, { url: corsUrl });
@@ -866,19 +866,26 @@ if (origin) {
     const wildcardRejected = acao === "*" && corsCredentials;
     const matches = acao === origin || (acao === "*" && !corsCredentials);
     const credentialsHeaderOk = !corsCredentials || String(acac || "").trim().toLowerCase() === "true";
+    const httpStatus = r.res.status;
+    const statusClass = classifyStatus(httpStatus);
     const issues = [];
+    if (!(httpStatus >= 200 && httpStatus < 300)) {
+      issues.push(statusClass === "redirect"
+        ? `CORS URL 返回 ${httpStatus} 重定向，未跟随；浏览器会跟随，最终响应未被验证`
+        : `CORS URL 返回 ${httpStatus}，不是 2xx；错误响应不能作为 CORS 通过证据`);
+    }
     if (multiple) issues.push(`多个 Access-Control-Allow-Origin 值：${acao}`);
     if (wildcardRejected) issues.push("ACAO=* 不能用于带凭据请求（--cors-credentials 声明的预期模式），必须精确匹配 Origin");
     else if (acao && !matches) issues.push(`ACAO=${acao} 与请求的 Origin（${origin}）不匹配，浏览器会拒绝`);
     if (acao && !credentialsHeaderOk) issues.push(`带凭据请求需要 Access-Control-Allow-Credentials: true，实际 ${acac || "无"}`);
-    const okDetail = `GET ${new URL(corsUrl).pathname} → ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`
+    const okDetail = `GET ${new URL(corsUrl).pathname} → ${httpStatus}，ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`
       + (corsCredentials ? "；按 --cors-credentials 声明的带凭据模式判定" : "；按无凭据模式判定（ACAC 响应头不改变请求模式）");
     add(
       "cors",
       issues.length ? "fail" : acao ? "pass" : "warn",
       issues.length ? issues.join("；") : acao ? okDetail : "缺少 Access-Control-Allow-Origin；CORS 未验证",
       {
-        url: corsUrl, acao, acac, vary, origin, credentials: corsCredentials,
+        url: corsUrl, httpStatus, statusClass, acao, acac, vary, origin, credentials: corsCredentials,
         credentialsMode: corsCredentials ? "declared-with-credentials" : "declared-no-credentials",
         credentialsDeclaredByUser: true,
       }
@@ -886,27 +893,23 @@ if (origin) {
     if (acao && !vary.toLowerCase().includes("origin")) {
       add("cors-vary", "warn", "缺少 Vary: Origin；CDN 可能把给 A 站的响应缓存给 B 站");
     }
-    // 没显式给实际方法/请求头时，用默认值发「探针」，但不对 Allow-* 做断言。
-    // 不能因为预检返回 200/204 就说 CORS 通过。
-    const probeMethod = corsMethod || "POST";
-    const probeHeaders = corsHeadersArg || "content-type,authorization";
-    const pre = await req(corsUrl, {
-      method: "OPTIONS",
-      headers: {
-        "user-agent": UA, origin,
-        "access-control-request-method": probeMethod,
-        "access-control-request-headers": probeHeaders,
-      },
-    });
+    // 未显式提供实际方法/请求头时，不发送 Access-Control-Request-Method/Headers：
+    // 浏览器预检一定带这两个头，凭空用默认值探针会把服务器对其它请求的反应当成结论。
+    const asserted = Boolean(corsMethod || corsHeadersArg || corsCredentials);
+    const statusAsserted = Boolean(corsMethod || corsHeadersArg);
+    const preHeaders = { "user-agent": UA, origin };
+    if (corsMethod) preHeaders["access-control-request-method"] = corsMethod;
+    if (corsHeadersArg) preHeaders["access-control-request-headers"] = corsHeadersArg;
+    const pre = await req(corsUrl, { method: "OPTIONS", headers: preHeaders });
     const notChecked = [];
-    if (!corsMethod) notChecked.push("Allow-Methods（未提供 --cors-method，预检仅用默认探针 POST）");
-    if (!corsHeadersArg) notChecked.push("Allow-Headers（未提供 --cors-headers，预检仅用默认探针 content-type,authorization）");
+    if (!corsMethod) notChecked.push("Allow-Methods（未提供 --cors-method，未发送 Access-Control-Request-Method，不推断）");
+    if (!corsHeadersArg) notChecked.push("Allow-Headers（未提供 --cors-headers，未发送 Access-Control-Request-Headers，不推断）");
     if (!corsCredentials) notChecked.push("Allow-Credentials（未提供 --cors-credentials，未假设使用 Cookie/凭据）");
 
     if (!pre.res) {
       add("cors-preflight", "warn", `预检请求失败：${pre.error}`, {
         url: corsUrl, origin, requestMethod: corsMethod, requestHeaders: corsHeadersArg,
-        credentials: corsCredentials, probeMethod, probeHeaders, notChecked, issues: [pre.error],
+        credentials: corsCredentials, probeMethod: corsMethod, probeHeaders: corsHeadersArg, notChecked, issues: [pre.error],
       });
     } else {
       const preAcao = pre.res.headers.get("access-control-allow-origin");
@@ -914,15 +917,20 @@ if (origin) {
       const allowHeaders = pre.res.headers.get("access-control-allow-headers") || "";
       const allowCred = pre.res.headers.get("access-control-allow-credentials");
       const issues = [];
-      const checked = ["ACAO", "HTTP 状态"];
+      const checked = ["ACAO"];
 
       // ACAO：始终检查，不依赖额外输入。
       if (!preAcao) issues.push("缺少 Access-Control-Allow-Origin");
       else if (preAcao.includes(",")) issues.push(`ACAO 有多个值：${preAcao}`);
       else if (preAcao !== "*" && preAcao !== origin) issues.push(`ACAO=${preAcao} 与请求 Origin（${origin}）不匹配`);
 
-      // 2xx 是必要条件，不是充分条件。
-      if (!(pre.res.status >= 200 && pre.res.status < 300)) issues.push(`OPTIONS 返回 ${pre.res.status}，不是 2xx`);
+      // 2xx 是必要条件，不是充分条件；只有提供了实际方法/请求头时才把状态当断言。
+      const statusOk = pre.res.status >= 200 && pre.res.status < 300;
+      if (statusOk) {
+        if (statusAsserted) checked.push("HTTP 状态");
+      } else if (statusAsserted) {
+        issues.push(`OPTIONS 返回 ${pre.res.status}，不是 2xx`);
+      }
 
       if (corsMethod) {
         checked.push("Allow-Methods");
@@ -949,14 +957,20 @@ if (origin) {
         if (String(allowCred || "").toLowerCase() !== "true") issues.push(`带凭据需要 Access-Control-Allow-Credentials: true，实际 ${allowCred || "无"}`);
       }
 
-      const detail = `OPTIONS -> ${pre.res.status}；ACAO=${preAcao || "无"}；Allow-Methods=${allowMethods || "无"}；Allow-Headers=${allowHeaders || "无"}${allowCred ? `；ACAC=${allowCred}` : ""}`
-        + (issues.length ? `；失败：${issues.join("；")}` : `；已提供的断言全部通过（${checked.join("、")}）`)
-        + (notChecked.length ? `；未执行：${notChecked.join("；")}` : "");
-      add("cors-preflight", issues.length ? "fail" : "pass", detail, {
-        url: corsUrl, origin,
+      // 没有显式方法/请求头断言时绝不给 pass：只检查 ACAO/ACAC 不足以判定浏览器预检。
+      const preStatus = issues.length ? "fail" : (statusAsserted && statusOk ? "pass" : "warn");
+      let detail = `OPTIONS -> ${pre.res.status}；ACAO=${preAcao || "无"}；Allow-Methods=${allowMethods || "无"}；Allow-Headers=${allowHeaders || "无"}${allowCred ? `；ACAC=${allowCred}` : ""}`;
+      if (issues.length) detail += `；失败：${issues.join("；")}`;
+      else if (asserted && statusOk) detail += `；已提供的断言全部通过（${checked.join("、")}）`;
+      else if (!statusOk) detail += `；OPTIONS 未返回 2xx，且未提供实际方法/请求头，不能据此判断浏览器预检`;
+      else detail += `；ACAO 通过，但未提供实际方法/请求头/凭据，不能判定预检通过`;
+      if (notChecked.length) detail += `；未执行：${notChecked.join("；")}`;
+      add("cors-preflight", preStatus, detail, {
+        url: corsUrl, origin, asserted,
         httpStatus: pre.res.status, acao: preAcao, methods: allowMethods, headers: allowHeaders,
         allowCredentials: allowCred, requestMethod: corsMethod, requestHeaders: corsHeadersArg,
-        credentials: corsCredentials, probeMethod, probeHeaders, checked, notChecked, issues,
+        credentials: corsCredentials, probeMethod: corsMethod, probeHeaders: corsHeadersArg,
+        checked, notChecked, issues,
       });
     }
   }
@@ -967,7 +981,11 @@ if (backup) {
   const b = await chain(backup);
   // 只解析 hops 里的 Location 判断是否指向主站，不需要请求主站；
   // 跨源目标按策略一律不跟随，避免为「识别」而访问不受信任的地址。
-  const mainHost = new URL(base).host;
+  const mainHost = new URL(pageUrl).host;
+  const mainOrigin = new URL(pageUrl).origin;
+  let backupOrigin = null;
+  try { backupOrigin = new URL(backup).origin; } catch { /* CLI 已校验 */ }
+  const sameOriginBackup = backupOrigin === mainOrigin;
   const redirectedToMain = b.hops.some((h) => h.location && (() => {
     try { return new URL(h.location, h.url).host === mainHost; } catch { return false; }
   })());
@@ -975,7 +993,10 @@ if (backup) {
     hops: b.hops, redirectOutcome: b.stopped, redirectTarget: b.redirectTarget,
     httpStatus: b.status, statusClass: b.status == null ? null : classifyStatus(b.status),
   };
-  if (b.error) add("backup", "fail", `备用站请求失败：${b.error}`, bExtra);
+  if (sameOriginBackup) {
+    // 备用站和主站同源，主站挂掉时它也会挂，不构成独立备用入口。
+    add("backup", "fail", `备用站与主站同源（${backupOrigin}），不是独立备用入口`, bExtra);
+  } else if (b.error) add("backup", "fail", `备用站请求失败：${b.error}`, bExtra);
   else if (redirectedToMain) add("backup", "fail", "备用站跳转到主站，不是独立备用入口（只解析 Location 判断，未请求主站）", bExtra);
   else if (b.stopped === "not-modified" || b.stopped === "unexpected-3xx") {
     // 与主站共用状态分类：这两种 3xx 不是重定向，不能写成「重定向未完成验证」。
@@ -997,7 +1018,7 @@ const summary = {
 };
 const result = {
   schemaVersion: 2, url: base, mode, backup, origin,
-  corsUrl: origin ? resolve(getArg("--cors-url", base)) : null,
+  corsUrl: origin ? resolve(getArg("--cors-url", "")) : null,
   corsOptions: origin ? { method: corsMethod, headers: corsHeadersArg, credentials: corsCredentials } : null,
   api: apiPaths.length ? apiPaths : null,
   expectJson,

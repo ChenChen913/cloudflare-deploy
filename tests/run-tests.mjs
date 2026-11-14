@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 import { resolvePlan, evaluateFileCount, parseVersion, compareVersions } from "../scripts/check-build.mjs";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
 import { classifyRedirect } from "../scripts/redirect-policy.mjs";
+import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, decodeCharacterReferences, resourceReferences } from "../scripts/html-scan.mjs";
+import { classifyWranglerWhoami, extractAccountId } from "../scripts/wrangler-auth.mjs";
 import { TLS_KEY, TLS_CERT } from "./fixtures/loopback-tls.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,30 +34,34 @@ function w(rel, content) {
   fs.writeFileSync(p, content);
 }
 function json(rel, obj) { w(rel, JSON.stringify(obj, null, 2)); }
-function assert(name, cond, detail = "") {
-  results.push({ name, ok: Boolean(cond), detail });
+function assert(name, cond, detail = "", layer = "core") {
+  results.push({ name, ok: Boolean(cond), detail, layer });
   console.log(`${cond ? "通过" : "失败"}  ${name}${detail ? ` — ${detail}` : ""}`);
 }
 function detect(dir) {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts/detect-project.mjs"), dir], { encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`识别失败 ${dir}：${r.stderr}`);
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/detect-project.mjs"), dir], { encoding: "utf8", timeout: 30000 });
+  if (r.status !== 0) throw new Error(`识别失败 ${dir}：${r.stderr || r.error || r.status}`);
   return JSON.parse(r.stdout);
 }
 function checkBuild(dir, mode = "static") {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, "--mode", mode, "--json"], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, "--mode", mode, "--json"], { encoding: "utf8", timeout: 30000 });
   return { code: r.status, json: JSON.parse(r.stdout) };
 }
 function runVerify(args, extraEnv = null) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(root, "scripts/verify-deployment.mjs"), ...args], {
-      encoding: "utf8",
       ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
     });
     let out = "";
     let err = "";
+    // 子进程挂起时不能让整轮测试卡死：超时后 kill 并按失败返回。
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* 已退出 */ }
+    }, 60000);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
-    child.on("close", (code) => resolve({ code, out, err }));
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+    child.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, out, err: `${err}\nspawn error: ${e.message}` }); });
   });
 }
 
@@ -86,7 +92,7 @@ json("supabase/package.json", {
 });
 w("supabase/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
 w("supabase/src/lib/supabase.ts", `import { createClient } from "@supabase/supabase-js";\nexport const db = createClient(process.env.VITE_SUPABASE_URL!, process.env.VITE_SUPABASE_ANON_KEY!);\n`);
-w("supabase/.env.example", `VITE_SUPABASE_URL=https://example.supabase.co\nVITE_SUPABASE_ANON_KEY=public-anon-key\n`);
+w("supabase/.env.example", `VITE_SUPABASE_URL=https://example.supabase.co\nVITE_SUPABASE_ANON_KEY=public-anon-key\nexport VITE_EXPORTED_FLAG=1\nlower_case_key=2\n`);
 
 json("hono/package.json", {
   name: "hono-d1", scripts: { deploy: "wrangler deploy" },
@@ -145,6 +151,27 @@ w("multi/docs/index.html", `<!doctype html><html><body>docs</body></html>\n`);
 // wrangler.jsonc：JSONC 注释 + JSON 键值语法（与 wrangler.toml 的 `key = "value"` 不同）
 w("wrangler-json/wrangler.jsonc", `{\n  // JSONC 注释不影响字段解析\n  "name": "wrangler-json-fixture",\n  "compatibility_date": "2026-11-01",\n  "assets": {\n    "directory": "./public",\n    "not_found_handling": "404-page"\n  }\n}\n`);
 w("wrangler-json/public/index.html", `<!doctype html><html><body>assets</body></html>\n`);
+
+// 注释/字符串噪声：注释掉的配置值不能生效（与 HTML 伪标签同一根因：没区分代码与注释）。
+json("noisy-vite/package.json", { name: "noisy-vite", scripts: { build: "vite build" }, devDependencies: { vite: "^5.0.0" } });
+w("noisy-vite/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+w("noisy-vite/vite.config.ts", `// base: "/legacy/", outDir: "dist-legacy"\n/* outDir: "dist-block" */\nexport default { base: "/real/", build: { outDir: "dist-real" } };\n`);
+w("noisy-vite/.github/workflows/pages.yml", `name: pages\non: push\njobs:\n  x:\n    steps:\n      # - uses: actions/configure-pages@v5\n      - run: |\n          echo "actions/deploy-pages and wrangler are only text here"\n      - run: echo hi\n`);
+json("noisy-next/package.json", { name: "noisy-next", scripts: { build: "next build" }, dependencies: { next: "^15.0.0", react: "^19.0.0" } });
+w("noisy-next/next.config.js", `// output: "export"\nmodule.exports = {};\n`);
+json("noisy-wrangler/package.json", { name: "noisy-wrangler" });
+w("noisy-wrangler/wrangler.jsonc", `{\n  // "name": "fake", "directory": "./fake", "main": "src/fake.js"\n  "name": "real-wrangler",\n  "compatibility_date": "2026-11-01",\n  "assets": { "directory": "./public" }\n}\n`);
+w("noisy-wrangler/public/index.html", `<!doctype html><html><body>ok</body></html>\n`);
+w("noisy-toml/wrangler.toml", `# name = "old-site"\n# main = "src/index.js"\ndescription = """\nmain = "src/fake.ts"\n[assets]\ndirectory = "./legacy"\n"""\nname = "real-toml"\ncompatibility_date = "2026-11-01"\n\n[assets]\ndirectory = "./public"\n`);
+w("noisy-toml/public/index.html", `<!doctype html><html><body>ok</body></html>\n`);
+json("start-flags/package.json", { name: "start-flags", scripts: { start: "node -r dotenv/config --inspect src/index.js" } });
+json("nuxt-static/package.json", { name: "nuxt-static", scripts: { build: "nuxt build" }, dependencies: { nuxt: "^3.13.0" } });
+w("nuxt-static/nuxt.config.ts", `// ssr: true\nexport default defineNuxtConfig({ ssr: false });\n`);
+json("nuxt-generate/package.json", { name: "nuxt-generate", scripts: { build: "nuxt generate" }, dependencies: { nuxt: "^3.13.0" } });
+w("nuxt-generate/nuxt.config.ts", `export default defineNuxtConfig({});\n`);
+json("nuxt-route-csr/package.json", { name: "nuxt-route-csr", scripts: { build: "nuxt build" }, dependencies: { nuxt: "^3.13.0" } });
+w("nuxt-route-csr/nuxt.config.ts", `export default defineNuxtConfig({ routeRules: { "/admin/**": { ssr: false } } });\n`);
+w("public-only/public/index.html", `<!doctype html><html><body>public only</body></html>\n`);
 
 // ---------------------------------------------------------------- 识别
 const vite = detect(path.join(work, "vite"));
@@ -223,6 +250,41 @@ assert("wrangler.jsonc：显式 assets.directory 作为输出目录（confirmed�
     && !wjson.risks.some((r) => /输出目录未知/.test(r)),
   JSON.stringify({ outputDir: wjson.project.outputDir, evidence: wjson.evidence.outputDir, target: wjson.target, risks: wjson.risks }));
 
+// 注释 / 字符串噪声：配置字段只认真实值。
+const noisyVite = detect(path.join(work, "noisy-vite"));
+assert("配置噪声：Vite 注释/块标量里的 base/outDir/Pages action 不生效",
+  noisyVite.project.basePath === "/real/" && noisyVite.project.outputDir === "dist-real"
+    && noisyVite.githubPages.configured === false
+    && !noisyVite.githubPages.workflows.some((w) => w.pages || w.cloudflare),
+  JSON.stringify({ basePath: noisyVite.project.basePath, outputDir: noisyVite.project.outputDir, ghPages: noisyVite.githubPages.configured, workflows: noisyVite.githubPages.workflows }), "adversarial");
+const noisyNext = detect(path.join(work, "noisy-next"));
+assert("配置噪声：Next 注释掉的 output:export 不改变 SSR 判定", noisyNext.project.kind === "ssr", `${noisyNext.project.kind}`, "adversarial");
+const noisyWrangler = detect(path.join(work, "noisy-wrangler"));
+assert("配置噪声：wrangler.jsonc 注释字段不生效、结构化字段生效",
+  noisyWrangler.cloudflare.wrangler?.name === "real-wrangler"
+    && noisyWrangler.cloudflare.wrangler?.assetsDirectory === "./public"
+    && noisyWrangler.cloudflare.wrangler?.hasMain === false
+    && noisyWrangler.project.outputDir === "./public",
+  JSON.stringify(noisyWrangler.cloudflare.wrangler), "adversarial");
+const noisyToml = detect(path.join(work, "noisy-toml"));
+assert("配置噪声：wrangler.toml 注释/多行字符串里的 name/main/directory 不生效",
+  noisyToml.cloudflare.wrangler?.name === "real-toml" && noisyToml.cloudflare.wrangler?.hasMain === false
+    && noisyToml.cloudflare.wrangler?.assetsDirectory === "./public",
+  JSON.stringify(noisyToml.cloudflare.wrangler), "adversarial");
+const startFlags = detect(path.join(work, "start-flags"));
+assert("启动脚本：跳过 -r/--inspect 等参数取真实入口", startFlags.project.serverEntry === "src/index.js", startFlags.project.serverEntry, "boundary");
+const nuxtStatic = detect(path.join(work, "nuxt-static"));
+assert("Nuxt ssr:false 判定为静态站（注释里的 ssr:true 不生效）", nuxtStatic.project.framework === "nuxt" && nuxtStatic.project.kind === "static", `${nuxtStatic.project.framework}/${nuxtStatic.project.kind}`, "adversarial");
+const nuxtGenerate = detect(path.join(work, "nuxt-generate"));
+assert("Nuxt generate 判定为静态产物", nuxtGenerate.project.kind === "static", nuxtGenerate.project.kind, "boundary");
+const nuxtRouteCsr = detect(path.join(work, "nuxt-route-csr"));
+assert("Nuxt routeRules 里的 ssr:false 不影响整站 SSR 判定", nuxtRouteCsr.project.kind === "ssr", nuxtRouteCsr.project.kind, "adversarial");
+const publicOnly = detect(path.join(work, "public-only"));
+assert("静态站：只有 public/index.html 也能识别", publicOnly.project.framework === "static-html" && publicOnly.project.outputDir === "public", JSON.stringify({ f: publicOnly.project.framework, out: publicOnly.project.outputDir }), "boundary");
+assert("环境变量键名：支持 export 前缀与小写键",
+  sb.runtime.envKeys.includes("VITE_EXPORTED_FLAG") && sb.runtime.envKeys.includes("lower_case_key"),
+  sb.runtime.envKeys.join(","), "boundary");
+
 // ---------------------------------------------------------------- 产物检查
 const art = path.join(work, "artifact");
 w("artifact/index.html", `<!doctype html><html><head><title>OK</title><link rel="canonical" href="https://example.com/"><link rel="stylesheet" href="/assets/app.css"></head><body><h1>Hello</h1><script src="/missing.js"></script></body></html>`);
@@ -232,7 +294,7 @@ w("artifact/assets/app.css", `body{color:#111}`);
 const buildOk = checkBuild(art);
 assert("产物：通过但有警告", buildOk.code === 0 && buildOk.json.summary.warnings >= 1, `警告=${buildOk.json.summary.warnings}`);
 assert("产物：发现坏资源", buildOk.json.checks.some((c) => c.id === "assets" && c.status === "warn"));
-assert("产物：报告实际检查的资源数", buildOk.json.summary.assetsChecked >= 2, `checked=${buildOk.json.summary.assetsChecked}`);
+assert("产物：报告实际检查的资源数", buildOk.json.summary.assetsChecked === 2, `checked=${buildOk.json.summary.assetsChecked}`);
 assert("产物：_headers 在产物根目录判通过", buildOk.json.checks.some((c) => c.id === "_headers" && c.status === "pass"));
 assert("产物：没有 _redirects 明确跳过", buildOk.json.checks.some((c) => c.id === "_redirects" && c.status === "skip"));
 
@@ -251,15 +313,134 @@ fs.mkdirSync(path.join(weirdIndexDir, "index.html"), { recursive: true });
 const buildWeird = checkBuild(weirdIndexDir, "static");
 assert("产物：index.html 是目录时输出 JSON 不崩溃", buildWeird.json?.mode === "static" && buildWeird.json.checks.some((c) => c.id === "index" && c.status === "warn"), JSON.stringify(buildWeird.json?.checks?.find((c) => c.id === "index")));
 
+// 与 verify-deployment 共用 tokenizer：注释 / script / textarea 里的伪资源引用不参与检查。
+const fakeRefsDir = path.join(work, "fake-refs");
+w("fake-refs/index.html", `<html><head><title>fake refs</title><script>var s='<img src="/not-real.js">';</script><!-- <img src="/fake.png"> --><textarea><img src="/ta.png"></textarea><link rel="stylesheet" href="real.css"></head></html>`);
+w("fake-refs/real.css", `body{}`);
+const buildFakeRefs = checkBuild(fakeRefsDir, "static");
+const fakeRefsAssets = buildFakeRefs.json.checks.find((c) => c.id === "assets");
+assert("产物：注释 / script / textarea 里的伪资源引用不参与检查",
+  buildFakeRefs.code === 0 && fakeRefsAssets?.status === "pass" && fakeRefsAssets.checked === 1 && (fakeRefsAssets.broken?.length ?? 0) === 0,
+  JSON.stringify(fakeRefsAssets), "adversarial");
+
+// 资源引用边界：目录式 URL、导航/canonical 排除、%2F 保护、srcset、无引号、前后空白。
+const refsEdgeDir = path.join(work, "refs-edge");
+w("refs-edge/index.html", `<html><head><title>edge</title>`
+  + `<a href="/login">nav</a>`
+  + `<link rel="canonical" href="/canonical-page">`
+  + `<link rel="stylesheet" href="about/">`
+  + `<link rel="stylesheet" href="docs">`
+  + `<img src=" assets/img.png ">`
+  + `<img src="/img/photo%2Fbad.png">`
+  + `<img src="/img/a.png" srcset="/img/a.png 1x, /img/b.png 2x">`
+  + `<script src=/js/app.js></script>`
+  + `</head></html>`);
+w("refs-edge/assets/img.png", "x");
+w("refs-edge/img/a.png", "x");
+w("refs-edge/img/b.png", "x");
+w("refs-edge/js/app.js", "x");
+w("refs-edge/about/index.html", "<html></html>");
+w("refs-edge/docs/index.html", "<html></html>");
+const buildEdge = checkBuild(refsEdgeDir, "static");
+const edgeAssets = buildEdge.json.checks.find((c) => c.id === "assets");
+assert("产物资源：目录式 URL/无引号/srcset/前后空白正确解析，导航与 canonical 不算资源",
+  edgeAssets?.status === "warn" && edgeAssets.checked === 7 && edgeAssets.broken?.length === 1
+    && edgeAssets.broken[0] === "/img/photo%2Fbad.png"
+    && !edgeAssets.broken.includes("/login") && !edgeAssets.broken.includes("/canonical-page"),
+  JSON.stringify(edgeAssets), "adversarial");
+
+// 超过 40 个引用时必须说明只检查前 40 个，不能让人误以为全查了。
+const refsManyDir = path.join(work, "refs-many");
+let manyHtml = "<html><body>";
+for (let i = 0; i < 45; i++) manyHtml += `<img src="/missing-${i}.png">`;
+manyHtml += "</body></html>";
+w("refs-many/index.html", manyHtml);
+const buildMany = checkBuild(refsManyDir, "static");
+const manyAssets = buildMany.json.checks.find((c) => c.id === "assets");
+assert("产物资源：超过上限时写明只检查前 40/共 45",
+  manyAssets?.checked === 40 && manyAssets.total === 45 && manyAssets.limited === true && /共 45 个/.test(manyAssets.detail || ""),
+  JSON.stringify(manyAssets), "boundary");
+
+// 主模块守卫：通过 symlink/junction 安装技能时也必须真正执行，而不是静默 exit 0。
+// 链接指向 work 内的技能副本（不能指向仓库根，否则测试目录递归/备份会沿链接膨胀）。
+const installedSkill = path.join(work, "installed-skill");
+fs.mkdirSync(path.join(installedSkill, "scripts"), { recursive: true });
+for (const f of fs.readdirSync(path.join(root, "scripts"))) {
+  if (f.endsWith(".mjs")) fs.copyFileSync(path.join(root, "scripts", f), path.join(installedSkill, "scripts", f));
+}
+const skillLink = path.join(work, "skill-link");
+fs.symlinkSync(installedSkill, skillLink, process.platform === "win32" ? "junction" : "dir");
+const linkedRun = spawnSync(process.execPath, [path.join(skillLink, "scripts", "check-build.mjs"), "--dir", art, "--json"], { encoding: "utf8" });
+let linkedJson = null;
+try { linkedJson = JSON.parse(linkedRun.stdout); } catch { /* 断言里带上输出 */ }
+assert("主模块守卫：通过 symlink/junction 安装时仍执行检查并输出 JSON",
+  linkedRun.status === 0 && linkedJson?.summary?.files > 0,
+  `status=${linkedRun.status} out=${(linkedRun.stdout || "").slice(0, 100)} err=${(linkedRun.stderr || "").slice(0, 160)}`, "boundary");
+
+// check-build 与 verify 对齐：<base href> 决定产物内相对资源路径。
+w("refs-base/index.html", `<html><head><base href="assets/"><link rel="stylesheet" href="app.css"></head><body>x</body></html>`);
+w("refs-base/assets/app.css", `body{}`);
+const buildBase = checkBuild(path.join(work, "refs-base"), "static");
+const baseAssets = buildBase.json.checks.find((c) => c.id === "assets");
+assert("产物资源：<base href> 决定相对资源路径（与 verify 一致）",
+  baseAssets?.status === "pass" && baseAssets.checked === 1,
+  JSON.stringify(baseAssets), "combination");
+
+// 顶层文件名大小写必须与部署后一致（Windows 不区分，CDN 区分）。
+w("case-top/Index.HTML", `<html><body>x</body></html>`);
+w("case-top/404.HTML", `<html><body>nf</body></html>`);
+w("case-top/_Headers", `/*\n  X-Test: 1\n`);
+const buildCaseTop = checkBuild(path.join(work, "case-top"), "static");
+const caseIndex = buildCaseTop.json.checks.find((c) => c.id === "index");
+const case404 = buildCaseTop.json.checks.find((c) => c.id === "404");
+const caseHeaders = buildCaseTop.json.checks.find((c) => c.id === "_headers");
+assert("产物：顶层 index/404/_headers 大小写不一致时不判存在",
+  caseIndex?.status === "warn" && /大小写/.test(caseIndex.detail || "")
+    && case404?.status === "warn" && caseHeaders?.status === "skip",
+  JSON.stringify({ index: caseIndex, notFound: case404, headers: caseHeaders }), "adversarial");
+
+// 产物里的 symlink/junction 要跟随并计入（否则 20,000 上限会 fail-open）。
+w("link-assets/app.css", `body{}`);
+w("link-build/index.html", `<html><head><link rel="stylesheet" href="assets/app.css"></head><body>x</body></html>`);
+fs.symlinkSync(path.join(work, "link-assets"), path.join(work, "link-build", "assets"), process.platform === "win32" ? "junction" : "dir");
+const buildLink = checkBuild(path.join(work, "link-build"), "static");
+const linkAssets = buildLink.json.checks.find((c) => c.id === "assets");
+assert("产物：symlink/junction 目录被递归统计且资源可解析",
+  buildLink.json.summary.files === 2 && linkAssets?.status === "pass" && linkAssets.checked === 1,
+  JSON.stringify({ files: buildLink.json.summary.files, assets: linkAssets }), "boundary");
+
+// 跨源 <base href> 下的相对引用是外链：产物里没有也不该判坏（与 verify 一致）。
+w("refs-cross-base/index.html", `<html><head><base href="https://cdn.example.com/lib/"><script src="jquery.js"></script></head><body>x</body></html>`);
+const buildCrossBase = checkBuild(path.join(work, "refs-cross-base"), "static");
+const crossBaseAssets = buildCrossBase.json.checks.find((c) => c.id === "assets");
+assert("产物资源：跨源 <base href> 下的相对引用按外链跳过",
+  crossBaseAssets?.status === "pass" && crossBaseAssets.checked === 0,
+  JSON.stringify(crossBaseAssets), "adversarial");
+
+// srcset 的 URL 可以含逗号；只有「逗号 + 空白」才是候选分隔。
+w("refs-srcset/index.html", `<html><head><title>ss</title></head><body><img srcset="/img/a,b.png 1x, /img/c.png 2x"></body></html>`);
+w("refs-srcset/img/a,b.png", "x");
+w("refs-srcset/img/c.png", "x");
+const buildSrcset = checkBuild(path.join(work, "refs-srcset"), "static");
+const srcsetAssets = buildSrcset.json.checks.find((c) => c.id === "assets");
+assert("产物资源：srcset 含逗号的 URL 不被拆坏",
+  srcsetAssets?.status === "pass" && srcsetAssets.checked === 2,
+  JSON.stringify(srcsetAssets), "adversarial");
+
 const no404 = path.join(work, "no404");
 w("no404/index.html", `<html><body>hi</body></html>`);
 const buildStatic = checkBuild(no404, "static");
 assert("产物：static 模式缺 404 被警告", buildStatic.json.checks.some((c) => c.id === "404" && c.status === "warn"), "Pages 会当成 SPA");
 const buildSpa = checkBuild(no404, "spa");
 assert("产物：spa 模式不要求 404", buildSpa.json.checks.some((c) => c.id === "404" && c.status === "pass" && c.mode === "spa"), buildSpa.json.mode);
-assert("产物：--spa 与 --mode spa 等价", (() => {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", no404, "--spa", "--json"], { encoding: "utf8" });
-  return JSON.parse(r.stdout).mode === "spa";
+assert("产物：--spa 与 --mode spa 行为完全等价", (() => {
+  const a = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", no404, "--spa", "--json"], { encoding: "utf8" });
+  const b = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", no404, "--mode", "spa", "--json"], { encoding: "utf8" });
+  try {
+    const ja = JSON.parse(a.stdout);
+    const jb = JSON.parse(b.stdout);
+    return a.status === b.status && JSON.stringify(ja.checks) === JSON.stringify(jb.checks);
+  } catch { return false; }
 })());
 
 const nested = path.join(work, "nested");
@@ -267,7 +448,7 @@ w("nested/index.html", `<!doctype html><html><body><link rel="stylesheet" href="
 w("nested/assets/css/site.css", `body{}`);
 for (let i = 0; i < 60; i++) w(`nested/assets/js/chunk-${i}.js`, `export const n=${i};`);
 const buildNested = checkBuild(nested, "static");
-assert("嵌套产物：递归统计文件", buildNested.json.summary.files >= 61 && buildNested.code === 0, `files=${buildNested.json.summary.files}`);
+assert("嵌套产物：递归统计文件", buildNested.json.summary.files === 62 && buildNested.code === 0, `files=${buildNested.json.summary.files}`);
 assert("嵌套产物：资源路径能解析", buildNested.json.checks.some((c) => c.id === "assets" && c.status === "pass"));
 
 const ssrBuild = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--mode", "ssr", "--json"], { encoding: "utf8" });
@@ -361,9 +542,31 @@ let staticBase = "";
 const staticServer = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
   const p = url.pathname;
-  if (p === "/" || p === "") {
+  if (p === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "server": "local-main", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
     res.end(`<!doctype html><html><head><title>Local Static</title><link rel="canonical" href="${staticBase}/"><link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js"></script></head><body>ok</body></html>`);
+    return;
+  }
+  // 元数据对抗页：注释 / script 里的伪 <title>、<meta> 不能参与识别。
+  if (p === "/meta/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head>`
+      + `<!-- <title>Fake Comment Title</title><meta name="robots" content="noindex"> -->`
+      + `<script>document.write('<title>Fake Script Title</title><meta name="robots" content="noindex">')</script>`
+      + `<title>Real Title</title><meta name="robots" content="index,follow">`
+      + `</head><body>ok</body></html>`);
+    return;
+  }
+  // 500 错误页：即使带 title/canonical/资源，也不能作为首页内容证据。
+  if (p === "/broken/") {
+    res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>Error Page</title><link rel="canonical" href="/fake/"><script src="/fake.js"></script></head><body>error</body></html>`);
+    return;
+  }
+  // 两个安全头 → security-headers 应为 pass（不是 pen 分支）。
+  if (p === "/secure/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "strict-transport-security": "max-age=31536000", "x-content-type-options": "nosniff" });
+    res.end(`<!doctype html><html><head><title>secure</title></head><body>ok</body></html>`);
     return;
   }
   // 故意不支持 HEAD：验证 GET 兜底
@@ -373,6 +576,19 @@ const staticServer = http.createServer((req, res) => {
     return;
   }
   if (p === "/assets/app.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end(req.method === "HEAD" ? "" : "console.log(1)"); return; }
+  if (p === "/rel.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end("console.log(2)"); return; }
+  // 无尾斜杠的页面 URL：浏览器把 app.js 解析成 /app.js，脚本不能补成 /subpage.html/app.js。
+  if (p === "/subpage.html") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>subpage</title><script src="rel.js"></script></head><body>ok</body></html>`);
+    return;
+  }
+  // <noscript> 在脚本启用时是 RAWTEXT：里面的伪 base/canonical 不生效。
+  if (p === "/noscript-assets/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>noscript assets</title><noscript><base href="https://evil.example/"><link rel="canonical" href="https://evil.example/"></noscript><link rel="stylesheet" href="/assets/app.css"></head><body>ok</body></html>`);
+    return;
+  }
   if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
   res.writeHead(404, { "content-type": "text/html" }); res.end("not found");
 });
@@ -383,6 +599,12 @@ const spaServer = http.createServer((req, res) => {
   // SPA 回退的状态分类：304 / 少见 3xx 不是「重定向式回退」，也不能判通过。
   if (p === "/deep304") { res.writeHead(304); res.end(); return; }
   if (p === "/deep300") { res.writeHead(300); res.end(); return; }
+  // 未知路径 200 但不含 app shell 标记：必须 warn，不能因为「有内容」就 pass。
+  if (p === "/bare/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>bare</title></head><body>plain page without shell</body></html>`);
+    return;
+  }
   if (p === "/assets/main.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end(req.method === "HEAD" ? "" : "console.log('spa')"); return; }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8", server: "local-spa" });
   res.end(`<!doctype html><html><head><title>Local SPA</title></head><body><div id="root"></div><script type="module" src="/assets/main.js"></script></body></html>`);
@@ -450,6 +672,30 @@ const canonicalHrefCases = {
   "/rel-canonicalized/": "rel-canonicalized",
   "/comment-only/": "comment-only",
   "/in-script/": "in-script",
+  // HTML 上下文隔离矩阵：注释 / RAWTEXT / RCDATA / template / 属性值里的伪标签
+  "/in-comment/": "in-comment",
+  "/in-script-raw/": "in-script-raw",
+  "/in-style/": "in-style",
+  "/in-textarea/": "in-textarea",
+  "/in-title/": "in-title",
+  "/in-iframe/": "in-iframe",
+  "/in-xmp/": "in-xmp",
+  "/in-noembed/": "in-noembed",
+  "/in-noframes/": "in-noframes",
+  "/in-plaintext/": "in-plaintext",
+  "/in-template/": "in-template",
+  "/attr-value/": "attr-value",
+  "/incomplete/": "incomplete",
+  "/title-fake-text/": "title-fake-text",
+  "/in-noscript/": "in-noscript",
+  "/in-svg/": "in-svg",
+  "/svg-cdata/": "svg-cdata",
+  "/svg-title/": "svg-title",
+  "/in-endtag-quote/": "in-endtag-quote",
+  // URL 解析矩阵：相对 canonical / <base href>
+  "/relative-canonical/": "relative-canonical",
+  "/base-tag-canonical/": "base-tag-canonical",
+  "/real-plus-fakes/": "real-plus-fakes",
 };
 const canonicalHrefServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
@@ -473,7 +719,46 @@ const canonicalHrefServer = http.createServer((req, res) => {
   else if (kind === "rel-canonicalized") tag = `<link rel="canonicalized" href="${self}">`;
   else if (kind === "comment-only") tag = `<!-- <link rel="canonical" href="${self}"> -->`;
   else if (kind === "in-script") tag = `<script>document.write('<link rel="canonical" href="${self}">')</script>`;
+  else if (kind === "in-comment") tag = `<!-- <link rel="canonical" href="${self}"> -->`;
+  else if (kind === "in-script-raw") tag = `<script>var s = '<link rel="canonical" href="${self}">';</script>`;
+  else if (kind === "in-style") tag = `<style>/* <link rel="canonical" href="${self}"> */</style>`;
+  else if (kind === "in-textarea") tag = `<textarea><link rel="canonical" href="${self}"></textarea>`;
+  else if (kind === "in-title") tag = `<title>fake <link rel="canonical" href="${self}"></title>`;
+  else if (kind === "in-iframe") tag = `<iframe><link rel="canonical" href="${self}"></iframe>`;
+  else if (kind === "in-xmp") tag = `<xmp><link rel="canonical" href="${self}"></xmp>`;
+  else if (kind === "in-noembed") tag = `<noembed><link rel="canonical" href="${self}"></noembed>`;
+  else if (kind === "in-noframes") tag = `<noframes><link rel="canonical" href="${self}"></noframes>`;
+  else if (kind === "in-plaintext") tag = `<plaintext><link rel="canonical" href="${self}">`;
+  else if (kind === "in-template") tag = `<template><link rel="canonical" href="${self}"></template>`;
+  else if (kind === "attr-value") tag = `<div data-html="<link rel='canonical' href='${self}'>"></div>`;
+  else if (kind === "incomplete") tag = `<link rel="canonical" href="${self}"`;
+  else if (kind === "title-fake-text") tag = `<title>Page <link rel="canonical" href="${self}"> title</title>`;
+  else if (kind === "in-noscript") tag = `<noscript><link rel="canonical" href="${self}"></noscript>`;
+  else if (kind === "in-svg") tag = `<svg><link rel="canonical" href="https://evil.example/"></svg>`;
+  else if (kind === "svg-cdata") tag = `<svg><![CDATA[> <link rel="canonical" href="https://evil.example/"> ]]></svg><link rel="canonical" href="${self}">`;
+  else if (kind === "svg-title") tag = `<svg><title>SVG-ONLY</title></svg>`;
+  else if (kind === "in-endtag-quote") tag = `</a "><link rel="canonical" href="${self}">`;
+  else if (kind === "relative-canonical") tag = `<link rel="canonical" href="./">`;
+  else if (kind === "base-tag-canonical") tag = `<base href="${canonicalHrefBase}/"><link rel="canonical" href="base-tag-canonical/">`;
+  else if (kind === "real-plus-fakes") {
+    tag = `<link rel="canonical" href="${self}">`
+      + `<!-- <link rel="canonical" href="${self}"> -->`
+      + `<script>var s='<link rel="canonical" href="${self}">'</script>`
+      + `<textarea><link rel="canonical" href="${self}"></textarea>`;
+  }
   else tag = `<link rel="canonical" href="http://">`;
+  // 不完整标签必须真的在 EOF 处截断（不能再拼上 </head>，否则浏览器会把它当完整标签）。
+  if (kind === "incomplete") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>canonical href</title><link rel="canonical" href="${self}"`);
+    return;
+  }
+  // title-fake-text 不能带外层真 title，否则测不到 title 内容里的伪标签文本。
+  if (kind === "title-fake-text") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head>${tag}</head><body>ok</body></html>`);
+    return;
+  }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(`<!doctype html><html><head><title>canonical href</title>${tag}</head><body>ok</body></html>`);
 });
@@ -513,6 +798,16 @@ const ssrServer = http.createServer((req, res) => {
   if (p === "/api/array") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"items":[{"id":1},{"id":2}],"ok":true}`); return; }
   if (p === "/api/badjson") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"ok":`); return; }
   if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
+  // RAWTEXT 内容不能算作可见文本，也不能被当成标签。
+  if (p === "/heavy/index.html") { res.writeHead(308, { location: "/heavy/" }); res.end(); return; }
+  if (p === "/heavy/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>Heavy Script</title>`
+      + `<script>${"x".repeat(4000)}; var fake = '<link rel="canonical" href="/fake">';</script>`
+      + `<style>${"y".repeat(3000)}</style>`
+      + `</head><body><main>short</main></body></html>`);
+    return;
+  }
   if (p === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", server: "local-ssr" });
     res.end(`<!doctype html><html><head><title>Local SSR</title></head><body><main>${"服务端渲染的真实内容 ".repeat(30)}</main><script>console.log('client')</script></body></html>`);
@@ -554,6 +849,28 @@ const corsMatrixServer = http.createServer((req, res) => {
   if (p === "/lower-method") h["access-control-allow-methods"] = "delete";
   if (p === "/case-normalize") h["access-control-allow-methods"] = "PUT";
   if (p === "/acao-wildcard") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
+  // CORS 错误响应 / 重定向 / 严格预检服务器（用于证明不会被误判为通过）
+  if (p === "/simple-500") {
+    if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
+    res.writeHead(500, h); res.end("err"); return;
+  }
+  if (p === "/simple-301") {
+    if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
+    res.writeHead(301, { location: "/simple-star-acac" }); res.end(); return;
+  }
+  if (p === "/preflight-strict") {
+    if (req.method === "OPTIONS") {
+      const asked = String(req.headers["access-control-request-headers"] || "");
+      if (/authorization/i.test(asked)) { res.writeHead(403, { "access-control-allow-origin": req.headers.origin || "" }); res.end(); return; }
+      res.writeHead(204, { "access-control-allow-origin": req.headers.origin || "", "access-control-allow-headers": "content-type" }); res.end(); return;
+    }
+    res.writeHead(200, { "content-type": "text/html", ...h }); res.end("ok"); return;
+  }
+  if (p === "/preflight-403") {
+    // 无断言时 OPTIONS 恒 403：不能判 fail，也不能判 pass，只能 warn 并说明无法判断。
+    if (req.method === "OPTIONS") { res.writeHead(403, { "access-control-allow-origin": req.headers.origin || "" }); res.end(); return; }
+    res.writeHead(200, { "content-type": "text/html", ...h }); res.end("ok"); return;
+  }
   if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
   corsMatrixSeen.push({ path: p, cookie: req.headers.cookie || null, authorization: req.headers.authorization || null });
   res.writeHead(200, { "content-type": "text/html", ...h });
@@ -562,6 +879,7 @@ const corsMatrixServer = http.createServer((req, res) => {
 
 // 资源重定向矩阵：同一台服务器按首页路径引用不同资源，另一台模拟跨主机目标。
 let assetTargetBase = "";
+const assetHits = [];
 const assetPages = {
   "/case/direct/": "/a/direct.css",
   "/case/301ok/": "/a/301.css",
@@ -579,6 +897,38 @@ const assetPages = {
 };
 const assetRedirectServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
+  assetHits.push(p);
+  if (p === "/case/hostile-html/") {
+    // 注释 / RAWTEXT / RCDATA / 属性值里的伪资源引用不能触发请求；
+    // 反斜杠伪装的跨源 URL 仍按跨源处理，不发请求。
+    const cross = new URL(crossTargetBase);
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>hostile html</title>`
+      + `<link rel="stylesheet" href="/a/direct.css">`
+      + `<!-- <img src="/fake-comment.png"> -->`
+      + `<script>var s = '<img src="/fake-script.png">';</script>`
+      + `<style>/* <img src="/fake-style.png"> */</style>`
+      + `<textarea><img src="/fake-textarea.png"></textarea>`
+      + `<title><img src="/fake-title.png"></title>`
+      + `<iframe><img src="/fake-iframe.png"></iframe>`
+      + `<xmp><img src="/fake-xmp.png"></xmp>`
+      + `<div data-src="/fake-attr.png"></div>`
+      + `</head><body><img src="\\\\${cross.host}/ssrf-probe"></body></html>`);
+    return;
+  }
+  if (p === "/case/base-tag/") {
+    // 相对资源按 <base href> 解析（HTML 语义），而不是按站点根。
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>base tag</title><base href="/assets/"><link rel="stylesheet" href="base.css"></head><body>ok</body></html>`);
+    return;
+  }
+  if (p === "/case/base-cross/") {
+    // 跨源 <base href> 会让相对资源变成跨源：只记录、不请求。
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>base cross</title><base href="${crossTargetBase}/"><link rel="stylesheet" href="evil.css"></head><body>ok</body></html>`);
+    return;
+  }
+  if (p === "/assets/base.css") { res.writeHead(200, { "content-type": "text/css" }); res.end("body{}"); return; }
   if (p === "/case/hostile/") {
     // 伪装成相对地址的跨源 URL（反斜杠会被 URL 解析成协议相对地址）+ 非 HTTP(S) 链接：
     // 脚本只能请求 /a/direct.css，绝不能请求跨源目标，也不能因 javascript: 链接判坏。
@@ -645,11 +995,32 @@ const rootRedirectServer = http.createServer((req, res) => {
     return;
   }
   if (p === "/final/") {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html><html><head><title>final</title></head><body>final</body></html>`);
+    // 最终页面同时声明 canonical、相对资源与（带 Origin 时）CORS 头：
+    // 用于验证根重定向后 canonical/资源/CORS 默认目标都按最终 URL 解析。
+    const headers = { "content-type": "text/html; charset=utf-8" };
+    if (req.headers.origin) headers["access-control-allow-origin"] = req.headers.origin;
+    res.writeHead(200, headers);
+    res.end(`<!doctype html><html><head><title>final</title><link rel="canonical" href="/final/"><link rel="stylesheet" href="final.css"></head><body>final</body></html>`);
     return;
   }
+  if (p === "/final/final.css") { res.writeHead(200, { "content-type": "text/css" }); res.end("body{}"); return; }
+  // /index.html 探测网络失败：脚本必须输出 index-redirect 警告而不是静默跳过。
+  if (p === "/idxerr/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>idxerr</title></head><body>ok</body></html>`);
+    return;
+  }
+  if (p === "/idxerr/index.html") { try { req.socket.destroy(); } catch { /* ignore */ } return; }
   if (p === "/case/same301/") { res.writeHead(301, { location: "/final/" }); res.end(); return; }
+  // 同源重定向到「无尾斜杠」的最终路径：相对资源必须按文档 URL 解析为 /app.js。
+  if (p === "/case/noSlash/") { res.writeHead(302, { location: "/noslash" }); res.end(); return; }
+  if (p === "/noslash") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>noslash</title><script src="app.js"></script></head><body>ok</body></html>`);
+    return;
+  }
+  if (p === "/app.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end("console.log(3)"); return; }
+  if (p === "/noslash/app.js") { res.writeHead(404, { "content-type": "text/html" }); res.end("nf"); return; }
   if (p === "/case/same302/") { res.writeHead(302, { location: "/gone/" }); res.end(); return; }
   // 3xx 状态分类矩阵：只有 301/302/303/307/308 需要跟随 Location。
   const statusCase = p.match(/^\/case\/r(301|302|303|307|308)\/$/);
@@ -662,6 +1033,12 @@ const rootRedirectServer = http.createServer((req, res) => {
   if (p === "/case/loop/") { res.writeHead(302, { location: "/case/loop/" }); res.end(); return; }
   if (p === "/case/badloc/") { res.writeHead(302, { location: "http://" }); res.end(); return; }
   if (p === "/case/badproto/") { res.writeHead(302, { location: "file:///etc/passwd" }); res.end(); return; }
+  if (p === "/case/userinfo/") {
+    // 带 userinfo 的 Location：fetch 会拒绝，不能当成可跟随的同源重定向。
+    res.writeHead(302, { location: `http://user:pass@127.0.0.1:${new URL(rootRedirectBase).port}/final/` });
+    res.end();
+    return;
+  }
   res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
 });
 const crossTargetServer = http.createServer((req, res) => {
@@ -710,9 +1087,10 @@ const indexStatusServer = http.createServer((req, res) => {
     "/idxfile/index.html": { code: 302, location: "file:///etc/passwd" },
     "/idxelsewhere/index.html": { code: 302, location: "/somewhere/" },
     "/idxnoloc/index.html": { code: 301 },
+    "/idx500/index.html": { code: 500 },
   };
   if (special[p]) { res.writeHead(special[p].code, special[p].location ? { location: special[p].location } : {}); res.end(); return; }
-  const specialRoot = p.match(/^\/(idxcross|idxfile|idxelsewhere|idxnoloc)\/$/);
+  const specialRoot = p.match(/^\/(idxcross|idxfile|idxelsewhere|idxnoloc|idx500)\/$/);
   if (specialRoot) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><html><head><title>idx ${specialRoot[1]}</title><link rel="canonical" href="${indexStatusBase}/${specialRoot[1]}/"></head><body>ok</body></html>`);
@@ -786,6 +1164,30 @@ assert("验收：安全头按数量给结论", (() => {
   return sec?.status === "warn" && /x-content-type-options/.test(sec.detail || "");
 })(), JSON.stringify(v1j.checks.find((c) => c.id === "security-headers")));
 
+// 元数据对抗：注释 / script 里的伪 <title> / <meta name=robots> 不能参与识别。
+const vMeta = await runVerify(["--url", `${staticBase}/meta/`, "--mode", "static", "--json"]);
+const vMetaJ = JSON.parse(vMeta.out);
+const vMetaTitle = vMetaJ.checks.find((c) => c.id === "title");
+const vMetaRobots = vMetaJ.checks.find((c) => c.id === "meta-robots");
+assert("HTML 元数据：真实 <title> 优先于注释/script 里的伪 title",
+  vMetaTitle?.status === "pass" && /Real Title/.test(vMetaTitle.detail || "") && !/Fake/.test(vMetaTitle.detail || ""),
+  JSON.stringify(vMetaTitle), "adversarial");
+assert("HTML 元数据：真实 meta[name=robots] 优先于注释/script 里的伪 meta",
+  vMetaRobots?.status === "pass" && /index,follow/.test(vMetaRobots.detail || "") && !/noindex/.test(vMetaRobots.detail || ""),
+  JSON.stringify(vMetaRobots), "adversarial");
+
+// 非 200 首页的错误页不能作为内容证据；两个安全头应判 pass。
+const vBroken = await runVerify(["--url", `${staticBase}/broken/`, "--mode", "static", "--json"]);
+const vBrokenJ = JSON.parse(vBroken.out);
+assert("首页 500：错误页的 title/canonical 不进入检查结论",
+  vBroken.code === 1 && vBrokenJ.checks.find((c) => c.id === "root")?.status === "fail"
+    && !vBrokenJ.checks.some((c) => c.id === "title") && !vBrokenJ.checks.some((c) => c.id === "canonical")
+    && vBrokenJ.checks.some((c) => c.id === "html" && c.status === "warn"),
+  JSON.stringify(vBrokenJ.checks.map((c) => c.id)), "adversarial");
+const vSecure = await runVerify(["--url", `${staticBase}/secure/`, "--mode", "static", "--json"]);
+const secureHeaders = JSON.parse(vSecure.out).checks.find((c) => c.id === "security-headers");
+assert("安全头：两个常见安全头判 pass", secureHeaders?.status === "pass" && /strict-transport-security/.test(secureHeaders.detail || ""), JSON.stringify(secureHeaders), "boundary");
+
 const vSub = await runVerify(["--url", `${subBase}/`, "--mode", "static", "--json"]);
 const vSubJ = JSON.parse(vSub.out);
 assert("验收：子路径站点查对地址", vSub.code === 0 && vSubJ.checks.some((c) => c.id === "index-redirect" && c.status === "pass"), `exit=${vSub.code}`);
@@ -814,13 +1216,19 @@ assert("SPA 回退：304 不判通过也不写成重定向", vSpa304.code === 1 
 const vSpa300 = await runVerify(["--url", spaUrl, "--mode", "spa", "--expect-404", "/deep300", "--json"]);
 const sf300 = JSON.parse(vSpa300.out).checks.find((c) => c.id === "spa-fallback");
 assert("SPA 回退：少见 3xx（300）不判通过", vSpa300.code === 1 && sf300?.status === "fail" && sf300.httpStatus === 300, JSON.stringify(sf300));
+// 未知路径 200 但首页/目标页都没有 app shell 标记：不能因为「有内容」判 pass。
+const vSpaBare = await runVerify(["--url", spaUrl, "--mode", "spa", "--expect-404", "/bare/", "--json"]);
+const sfBare = JSON.parse(vSpaBare.out).checks.find((c) => c.id === "spa-fallback");
+assert("SPA 回退：200 但没有 app shell 标记只警告（fail-closed）",
+  sfBare?.status === "warn" && sfBare.idFound === false && sfBare.homeTokens > 0,
+  JSON.stringify(sfBare), "adversarial");
 
 const v4 = await runVerify(["--url", spaUrl, "--mode", "static", "--json"]);
 const v4j = JSON.parse(v4.out);
 assert("验收：把 SPA 当静态站会判 404 失败", v4.code === 1 && v4j.checks.some((c) => c.id === "404" && c.status === "fail"), "这正是原逻辑的冲突点");
 assert("验收：404 检查暴露真实 HTTP 状态码", v4j.checks.find((c) => c.id === "404")?.httpStatus === 200, JSON.stringify(v4j.checks.find((c) => c.id === "404")));
 
-const v5 = await runVerify(["--url", staticBase, "--mode", "static", "--origin", "https://app.example.com", "--cors-url", `${corsUrl}/api/data`, "--json"]);
+const v5 = await runVerify(["--url", staticBase, "--mode", "static", "--origin", "https://app.example.com", "--cors-url", `${corsUrl}/api/data`, "--cors-method", "POST", "--cors-headers", "content-type,authorization", "--json"]);
 const v5j = JSON.parse(v5.out);
 assert("验收：CORS 可指向独立子域 API", v5j.checks.some((c) => c.id === "cors" && c.status === "pass") && v5j.corsUrl === `${corsUrl}/api/data`, v5j.corsUrl);
 assert("验收：预检通过", v5j.checks.some((c) => c.id === "cors-preflight" && c.status === "pass"));
@@ -840,10 +1248,42 @@ for (const [name, args] of [
   ["--assets-limit 不是正整数", ["--assets-limit", "abc"]],
   ["--timeout 不是正数", ["--timeout", "0"]],
   ["--backup 不是合法 URL", ["--backup", "http://["]],
+  ["--origin 不是合法 origin", ["--origin", "a b"]],
+  ["CORS 参数缺少 --origin", ["--cors-method", "POST"]],
 ]) {
   const r = await runVerify(["--url", staticBase, "--mode", "static", ...args, "--json"]);
-  assert(`CLI：${name} 退出码 2 且不输出半截 JSON`, r.code === 2 && !r.out.trim() && /无法解析|正整数|正数|合法 URL/.test(r.err), `code=${r.code} out=${r.out.slice(0, 40)} err=${r.err.slice(0, 80)}`);
+  assert(`CLI：${name} 退出码 2 且不输出半截 JSON`, r.code === 2 && !r.out.trim() && /无法解析|正整数|正数|合法 URL|--origin|需要同时提供/.test(r.err), `code=${r.code} out=${r.out.slice(0, 40)} err=${r.err.slice(0, 80)}`);
 }
+
+// 其余 CLI / 模式边界：非法模式、非法 --url、--cors-url、带 query 的 --url、ssg 模式。
+const badMode = await runVerify(["--url", staticBase, "--mode", "bogus", "--json"]);
+assert("CLI：非法 --mode 退出码 2", badMode.code === 2 && /未知模式/.test(badMode.err), `code=${badMode.code} err=${badMode.err.slice(0, 60)}`, "boundary");
+const badUrl = spawnSync(process.execPath, [path.join(root, "scripts/verify-deployment.mjs"), "--url", "not-a-url", "--mode", "static", "--json"], { encoding: "utf8" });
+assert("CLI：非法 --url 退出码 2", badUrl.status === 2 && /不是合法 URL/.test(badUrl.stderr || ""), `code=${badUrl.status}`, "boundary");
+const badCorsUrlArg = await runVerify(["--url", staticBase, "--mode", "static", "--origin", "https://a.example", "--cors-url", "http://[", "--json"]);
+assert("CLI：非法 --cors-url 退出码 2", badCorsUrlArg.code === 2 && /cors-url/.test(badCorsUrlArg.err), `code=${badCorsUrlArg.code}`, "boundary");
+const vQuery = await runVerify(["--url", `${staticBase}/?utm=1`, "--mode", "static", "--json"]);
+const vQueryJ = JSON.parse(vQuery.out);
+assert("CLI：--url 带 query 时站点根仍保留路径",
+  vQuery.code === 0 && vQueryJ.checks.find((c) => c.id === "root")?.status === "pass"
+    && vQueryJ.checks.find((c) => c.id === "404")?.status === "pass",
+  JSON.stringify({ root: vQueryJ.checks.find((c) => c.id === "root")?.status, notFound: vQueryJ.checks.find((c) => c.id === "404")?.status }), "boundary");
+const vSsg = await runVerify(["--url", staticBase, "--mode", "ssg", "--json"]);
+assert("模式：ssg 与 static 的 404 判定一致（真实执行）",
+  vSsg.code === 0 && JSON.parse(vSsg.out).checks.some((c) => c.id === "404" && c.status === "pass"),
+  `code=${vSsg.code}`, "boundary");
+const buildSsg = checkBuild(art, "ssg");
+assert("构建 CLI：ssg 模式可执行且 404 判定同 static", buildSsg.code === 0 && buildSsg.json.checks.some((c) => c.id === "404" && c.status === "pass"), `code=${buildSsg.code}`, "boundary");
+const cbBadMode = spawnSync(process.execPath, [path.join(root, "scripts", "check-build.mjs"), "--dir", art, "--mode", "bogus"], { encoding: "utf8" });
+assert("构建 CLI：非法 --mode 退出码 2", cbBadMode.status === 2 && /未知模式/.test(cbBadMode.stderr || ""), `code=${cbBadMode.status}`, "boundary");
+const cbNoDirArg = spawnSync(process.execPath, [path.join(root, "scripts", "check-build.mjs"), "--mode", "static"], { encoding: "utf8" });
+assert("构建 CLI：缺 --dir 退出码 2", cbNoDirArg.status === 2 && /用法/.test(cbNoDirArg.stderr || ""), `code=${cbNoDirArg.status}`, "boundary");
+const cbMissingDir = spawnSync(process.execPath, [path.join(root, "scripts", "check-build.mjs"), "--dir", path.join(work, "does-not-exist"), "--mode", "static", "--json"], { encoding: "utf8" });
+let cbMissingJson = null;
+try { cbMissingJson = JSON.parse(cbMissingDir.stdout); } catch { /* 断言里带上输出 */ }
+assert("构建 CLI：目录不存在时退出码 1 且输出结构化 JSON",
+  cbMissingDir.status === 1 && cbMissingJson?.checks?.some((c) => c.id === "exists" && c.status === "fail"),
+  `code=${cbMissingDir.status} out=${(cbMissingDir.stdout || "").slice(0, 80)}`, "boundary");
 
 // ---------------------------------------------------------------- CORS 预检矩阵
 const corsCase = async (p, extra = []) => {
@@ -876,7 +1316,28 @@ assert("预检：带凭据但 ACAO=* 判失败", cCred2.pre?.status === "fail" &
 const cNoAcao = await corsCase("/no-acao");
 assert("预检：204 但无 ACAO 不算通过", cNoAcao.pre?.status === "fail" && cNoAcao.pre?.httpStatus === 204, JSON.stringify(cNoAcao.pre?.issues));
 const cDefault = await corsCase("/ok");
-assert("预检：未提供的检查明确列入 notChecked", cDefault.pre?.status === "pass" && cDefault.pre.notChecked.length === 3 && /未执行/.test(cDefault.pre.detail), JSON.stringify(cDefault.pre?.notChecked));
+assert("预检：未提供实际方法/请求头时不判通过、检查项列入 notChecked",
+  cDefault.pre?.status === "warn" && cDefault.pre.notChecked.length === 3 && /未执行/.test(cDefault.pre.detail) && cDefault.pre.asserted === false,
+  JSON.stringify(cDefault.pre), "adversarial");
+const cPfStrictDefault = await corsCase("/preflight-strict");
+assert("预检：未提供实际请求头时不会因默认探针把 403 当失败",
+  cPfStrictDefault.pre?.status === "warn" && cPfStrictDefault.pre.issues?.length === 0 && cPfStrictDefault.pre.httpStatus === 204,
+  JSON.stringify(cPfStrictDefault.pre), "adversarial");
+const cPfStrictAuth = await corsCase("/preflight-strict", ["--cors-headers", "authorization"]);
+assert("预检：显式声明 authorization 后服务器 403 判失败",
+  cPfStrictAuth.pre?.status === "fail" && /OPTIONS 返回 403/.test(cPfStrictAuth.pre.detail || ""),
+  JSON.stringify(cPfStrictAuth.pre), "adversarial");
+const cWildRange = await corsCase("/wildcard-header", ["--cors-headers", "range"]);
+assert("预检：Range 可被 Allow-Headers:* 覆盖（只有 Authorization 是 non-wildcard）",
+  cWildRange.pre?.status === "pass", JSON.stringify(cWildRange.pre?.issues), "boundary");
+const cCredOnly = await corsCase("/ok", ["--cors-credentials"]);
+assert("预检：只声明凭据、没有方法/请求头断言时最多 warn，不判 pass",
+  cCredOnly.pre?.status === "warn" && cCredOnly.pre.notChecked?.length === 2 && cCredOnly.pre.checked?.includes("Allow-Credentials"),
+  JSON.stringify(cCredOnly.pre), "adversarial");
+const cPf403 = await corsCase("/preflight-403");
+assert("预检：无断言时 OPTIONS 恒 403 只 warn（不能据此判 fail）",
+  cPf403.pre?.status === "warn" && cPf403.pre.httpStatus === 403 && cPf403.pre.issues?.length === 0,
+  JSON.stringify(cPf403.pre), "adversarial");
 
 // ---------------------------------------------------------------- CORS 通配符 / 凭据 / 安全列表方法（Fetch 规范）
 const cWildMethod = await corsCase("/wildcard-method", ["--cors-method", "DELETE"]);
@@ -929,6 +1390,16 @@ assert("简单请求：脚本实际没有发送 Cookie / Authorization",
   corsMatrixSeen.length > 0 && corsMatrixSeen.every((r) => !r.cookie && !r.authorization),
   JSON.stringify(corsMatrixSeen.slice(0, 3)));
 
+// CORS 错误响应 / 重定向：即使带 ACAO 也不能判通过。
+const sCors500 = await simpleCase("/simple-500");
+assert("简单请求：500 错误响应即使带 ACAO 也判失败",
+  sCors500?.status === "fail" && sCors500.httpStatus === 500 && /不是 2xx/.test(sCors500.detail || ""),
+  JSON.stringify(sCors500), "adversarial");
+const sCors301 = await simpleCase("/simple-301");
+assert("简单请求：3xx 重定向不判通过、最终响应未验证",
+  sCors301?.status === "fail" && sCors301.httpStatus === 301 && /重定向/.test(sCors301.detail || ""),
+  JSON.stringify(sCors301), "adversarial");
+
 const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
 assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((c) => c.id === "canonical" && c.status === "fail"));
@@ -975,7 +1446,12 @@ const canonicalHrefCase = async (p) => {
   const r = await runVerify(["--url", `${canonicalHrefBase}${p}`, "--mode", "static", "--json"]);
   let j = null;
   try { j = JSON.parse(r.out); } catch { /* 断言里带上 stderr */ }
-  return { code: r.code, err: r.err, canonical: j?.checks?.find((c) => c.id === "canonical") };
+  return {
+    code: r.code, err: r.err,
+    canonical: j?.checks?.find((c) => c.id === "canonical"),
+    title: j?.checks?.find((c) => c.id === "title"),
+    metaRobots: j?.checks?.find((c) => c.id === "meta-robots"),
+  };
 };
 const hrefMissing = await canonicalHrefCase("/missing-href/");
 assert("canonical href：缺少 href 判失败，不当成指向自身",
@@ -1019,7 +1495,7 @@ assert("canonical href：无法解析判失败，不回退到当前站点",
 
 // ---------------------------------------------------------------- canonical rel 识别矩阵
 // 只认真正的 <link> 标签 + 真正的 rel 属性 + 按 HTML 空白分隔的 canonical token。
-const canonicalRelPass = ["/rel-double/", "/rel-single/", "/rel-unquoted/", "/href-first/", "/rel-multi-token/", "/real-plus-comment/"];
+const canonicalRelPass = ["/rel-double/", "/rel-single/", "/rel-unquoted/", "/href-first/", "/rel-multi-token/", "/real-plus-comment/", "/in-endtag-quote/"];
 for (const p of canonicalRelPass) {
   const r = await canonicalHrefCase(p);
   assert(`canonical rel：${p} 正常识别为指向自身`,
@@ -1035,6 +1511,49 @@ for (const p of canonicalRelSkip) {
     JSON.stringify({ canonical: r.canonical, err: r.err }));
 }
 
+// ---------------------------------------------------------------- canonical 上下文隔离矩阵（对抗层）
+// 伪 <link rel=canonical> 出现在注释 / RAWTEXT（script/style/xmp/iframe/noembed/noframes）/
+// RCDATA（textarea/title）/ plaintext / template / 属性值 / 不完整标签里，都不能被识别。
+const canonicalContextSkip = [
+  "/in-comment/", "/in-script-raw/", "/in-style/", "/in-textarea/", "/in-title/",
+  "/in-iframe/", "/in-xmp/", "/in-noembed/", "/in-noframes/", "/in-plaintext/",
+  "/in-template/", "/attr-value/", "/incomplete/", "/in-noscript/", "/in-svg/",
+];
+for (const p of canonicalContextSkip) {
+  const r = await canonicalHrefCase(p);
+  assert(`canonical 上下文：${p} 的伪标签不被识别`,
+    r.code === 0 && r.canonical?.status === "skip" && /没有 canonical/.test(r.canonical?.detail || ""),
+    JSON.stringify({ canonical: r.canonical, err: r.err }), "adversarial");
+}
+const iTitleFake = await canonicalHrefCase("/title-fake-text/");
+assert("canonical 上下文：title 里的标签文本不产生 canonical，也不破坏 title 检查",
+  iTitleFake.canonical?.status === "skip" && iTitleFake.title?.status === "pass" && /<link/.test(iTitleFake.title?.detail || ""),
+  JSON.stringify({ canonical: iTitleFake.canonical, title: iTitleFake.title }), "adversarial");
+const iSvgCdata = await canonicalHrefCase("/svg-cdata/");
+assert("canonical 上下文：SVG CDATA 里的伪标签不计入，真实 canonical 通过",
+  iSvgCdata.code === 0 && iSvgCdata.canonical?.status === "pass",
+  JSON.stringify(iSvgCdata.canonical), "adversarial");
+const iSvgTitle = await canonicalHrefCase("/svg-title/");
+assert("canonical 上下文：SVG title 不成为文档 title",
+  iSvgTitle.title?.status === "pass" && !/SVG-ONLY/.test(iSvgTitle.title?.detail || ""),
+  JSON.stringify(iSvgTitle.title), "adversarial");
+
+// ---------------------------------------------------------------- canonical URL 解析（组合层）
+// 相对 canonical 按最终页面 URL 解析；<base href> 按 HTML 语义改变解析基准。
+const canonicalUrlPass = ["/relative-canonical/", "/base-tag-canonical/"];
+for (const p of canonicalUrlPass) {
+  const r = await canonicalHrefCase(p);
+  assert(`canonical URL：${p} 按页面 URL / base 解析为指向自身`,
+    r.code === 0 && r.canonical?.status === "pass" && r.canonical.sameProtocol === true
+      && r.canonical.sameHost === true && r.canonical.samePath === true,
+    JSON.stringify({ canonical: r.canonical, err: r.err }), "boundary");
+}
+const iRealPlusFakes = await canonicalHrefCase("/real-plus-fakes/");
+assert("canonical 组合：一个真实标签 + 注释/script/textarea 伪标签只算 1 个",
+  iRealPlusFakes.code === 0 && iRealPlusFakes.canonical?.status === "pass"
+    && (iRealPlusFakes.canonical.count === undefined) && !/多个|发现 2/.test(iRealPlusFakes.canonical?.detail || ""),
+  JSON.stringify(iRealPlusFakes.canonical), "combination");
+
 const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup", backupUrl, "--json"]);
 const v8j = JSON.parse(v8.out);
 assert("验收：拒绝 301 备用站", v8.code === 1 && v8j.checks.some((c) => c.id === "backup" && c.status === "fail"), "备用站跳到主站");
@@ -1049,8 +1568,8 @@ assert("备用站：少见 3xx 同样不判通过", b300r.code === 1 && b300?.st
   && b300.statusClass === "unexpected-3xx" && /不是可验证的响应/.test(b300.detail), JSON.stringify(b300));
 
 // ---------------------------------------------------------------- 资源重定向矩阵
-const assetCase = async (casePath) => {
-  const r = await runVerify(["--url", `${assetRedirectBase}${casePath}`, "--mode", "static", "--assets-limit", "1", "--json"]);
+const assetCase = async (casePath, limit = 1) => {
+  const r = await runVerify(["--url", `${assetRedirectBase}${casePath}`, "--mode", "static", "--assets-limit", String(limit), "--json"]);
   const j = JSON.parse(r.out);
   const assets = j.checks.find((c) => c.id === "assets");
   return { code: r.code, assets, probed: assets?.probed?.[0], result: j };
@@ -1062,9 +1581,15 @@ assert("资源：301 同主机跟随到最终 200 判通过", a301.assets?.statu
 const a302 = await assetCase("/case/302bad/");
 assert("资源：302 后最终 404 判失败", a302.assets?.status === "fail" && a302.code === 1 && /最终状态 404/.test(a302.assets.broken[0].reason), JSON.stringify(a302.assets?.broken));
 const aCross = await assetCase("/case/cross/");
-assert("资源：跨主机重定向不默默当正常，记录最终地址与链", aCross.assets?.status === "warn" && aCross.probed?.crossHost === true && aCross.probed.finalUrl.startsWith(assetTargetBase) && aCross.probed.chain.length === 1 && aCross.assets.warnings?.length === 1, JSON.stringify(aCross.probed));
+assert("资源：跨主机重定向不跟随，记录未请求目标而不伪造 finalUrl",
+  aCross.assets?.status === "warn" && aCross.probed?.crossHost === true
+    && aCross.probed.chain.length === 1
+    && aCross.probed.finalUrl === `${assetRedirectBase}/a/cross.css`
+    && aCross.probed.redirectTarget === `${assetTargetBase}/final.css`
+    && aCross.assets.warnings?.length === 1,
+  JSON.stringify(aCross.probed), "boundary");
 const aLoop = await assetCase("/case/loop/");
-assert("资源：重定向循环有跳数上限且判失败", aLoop.assets?.status === "fail" && /超过 5 跳/.test(aLoop.assets.broken[0].reason) && aLoop.probed?.chain?.length === 6, JSON.stringify(aLoop.assets?.broken));
+assert("资源：重定向循环有跳数上限且判失败，未跟随目标有标记", aLoop.assets?.status === "fail" && /超过 5 跳/.test(aLoop.assets.broken[0].reason) && aLoop.probed?.chain?.length === 6 && aLoop.probed.limitReached === true && aLoop.probed.redirectTarget !== null, JSON.stringify(aLoop.probed), "adversarial");
 const a404 = await assetCase("/case/404/");
 assert("资源：直接 404 判失败", a404.assets?.status === "fail" && /最终状态 404/.test(a404.assets.broken[0].reason), JSON.stringify(a404.assets?.broken));
 const aHead405 = await assetCase("/case/head405/");
@@ -1074,7 +1599,8 @@ assert("资源：3xx 缺 Location 判失败", aNoLoc.assets?.status === "fail" &
 const aBadProto = await assetCase("/case/badproto/");
 assert("资源：非 HTTP/HTTPS 重定向目标判失败且不跟随", aBadProto.assets?.status === "fail" && /协议不受支持/.test(aBadProto.assets.broken[0].reason) && aBadProto.probed?.chain.length === 1, JSON.stringify(aBadProto.assets?.broken));
 const crossHitsBefore = crossTargetHits.length;
-const aHostile = await assetCase("/case/hostile/");
+// limit 10：如果跨源过滤失效，反斜杠伪装引用会变成第 2 个待探测资源，checked 变 2、测试失败。
+const aHostile = await assetCase("/case/hostile/", 10);
 assert("资源：伪装成相对地址的跨源 URL 不会被请求（SSRF 防护）",
   aHostile.code === 0 && aHostile.assets?.status === "pass"
     && aHostile.probed?.url === "/a/direct.css"
@@ -1084,6 +1610,28 @@ assert("资源：伪装成相对地址的跨源 URL 不会被请求（SSRF 防�
 assert("资源：javascript: 等非 HTTP(S) 链接不会被当资源探测",
   aHostile.assets?.checked === 1 && aHostile.probed?.url === "/a/direct.css",
   JSON.stringify({ checked: aHostile.assets?.checked, probed: aHostile.probed }));
+
+// 注释 / RAWTEXT / RCDATA / 属性值里的伪资源引用、跨源 <base href>：都不能触发请求。
+const assetHitsBefore = assetHits.length;
+const aHostileHtml = await assetCase("/case/hostile-html/", 10);
+const hostileHits = assetHits.slice(assetHitsBefore);
+assert("资源：注释/RAWTEXT/RCDATA/属性值里的伪资源不被请求",
+  aHostileHtml.code === 0 && aHostileHtml.assets?.status === "pass"
+    && aHostileHtml.assets?.checked === 1
+    && aHostileHtml.probed?.url === "/a/direct.css"
+    && hostileHits.filter((h) => /fake-/.test(h)).length === 0,
+  JSON.stringify({ assets: aHostileHtml.assets, probed: aHostileHtml.probed, hits: hostileHits }), "adversarial");
+const aBaseTag = await assetCase("/case/base-tag/");
+assert("资源：<base href> 决定相对资源解析基准",
+  aBaseTag.assets?.status === "pass" && /\/assets\/base\.css$/.test(aBaseTag.probed?.finalUrl || ""),
+  JSON.stringify(aBaseTag.probed), "adversarial");
+const crossBeforeBase = crossTargetHits.length;
+const aBaseCross = await assetCase("/case/base-cross/");
+assert("资源：跨源 <base href> 下的相对引用按跨源处理、不请求",
+  aBaseCross.code === 0 && aBaseCross.assets?.status === "pass"
+    && aBaseCross.assets.ignored?.some((i) => /跨源/.test(i.reason))
+    && !crossTargetHits.slice(crossBeforeBase).includes("/evil.css"),
+  JSON.stringify({ ignored: aBaseCross.assets?.ignored, hits: crossTargetHits.slice(crossBeforeBase) }), "adversarial");
 
 // ---------------------------------------------------------------- 资源 3xx 状态分类
 const a304 = await assetCase("/case/304/");
@@ -1188,6 +1736,15 @@ assert("index.html：同源但目标不是站点根不判通过", iElsewhere.idx
 const iNoLoc = await indexSpecial("idxnoloc");
 assert("index.html：301 缺 Location 只警告，不当成有效重定向", iNoLoc.idx?.status === "warn"
   && iNoLoc.idx.redirectKind === "invalid-location" && /缺失或无法解析/.test(iNoLoc.idx.detail), JSON.stringify(iNoLoc.idx));
+const i500 = await indexSpecial("idx500");
+assert("index.html：5xx 判失败而不是静默警告", i500.code === 1 && i500.idx?.status === "fail" && i500.idx.httpStatus === 500, JSON.stringify(i500.idx), "adversarial");
+// /index.html 网络失败不能静默跳过：JSON 里必须有 index-redirect 条目说明未检查。
+const iNetErr = await runVerify(["--url", `${rootRedirectBase}/idxerr/`, "--mode", "static", "--json"]);
+const iNetErrJ = JSON.parse(iNetErr.out);
+const iNetErrCheck = iNetErrJ.checks.find((c) => c.id === "index-redirect");
+assert("index.html：请求失败时仍输出 warn，不静默跳过",
+  iNetErrCheck?.status === "warn" && iNetErrCheck.httpStatus === null && /失败|无法确认/.test(iNetErrCheck.detail || ""),
+  JSON.stringify(iNetErrCheck), "adversarial");
 
 // ---------------------------------------------------------------- 重定向策略（纯函数，不发请求）
 assert("重定向策略：相对 Location 同源可跟随", classifyRedirect("http://127.0.0.1:8000/a", "/b", "http://127.0.0.1:8000").kind === "same-origin");
@@ -1227,9 +1784,10 @@ assert("主站：跨主机重定向只记录不跟随，目标未验证",
     && rCross.verified === false && rCross.hops.length === 1 && rCross.redirectTarget.includes("localhost")
     && rCross.hops[0].location === rCross.redirectTarget && !crossTargetHits.includes("/cross-landing"),
   JSON.stringify(rCross));
-assert("主站：跨主机目标返回 200 也不会让原站点判 pass",
-  rCross?.status === "warn" && rCross.httpStatus === 302 && rCross.verified === false,
-  JSON.stringify({ checkStatus: rCross?.status, httpStatus: rCross?.httpStatus }));
+assert("主站：跨主机重定向不请求目标，不能据目标响应判 pass",
+  rCross?.status === "warn" && rCross.httpStatus === 302 && rCross.verified === false
+    && !crossTargetHits.includes("/cross-landing"),
+  JSON.stringify({ checkStatus: rCross?.status, httpStatus: rCross?.httpStatus }), "adversarial");
 const rLoopback = await rootCase("/case/loopback/");
 assert("主站：重定向到 127.0.0.1 不请求该目标",
   rLoopback?.status === "warn" && rLoopback.redirectOutcome === "cross-origin-unverified"
@@ -1279,6 +1837,65 @@ for (const code of [301, 302, 303, 307, 308]) {
       && r.root.hops[0].status === code && r.root.hops[0].statusClass === "redirect",
     JSON.stringify(r.root));
 }
+
+// 根路径经过同源重定向后，canonical / 相对资源必须按「最终页面 URL」解析。
+// 夹具：/case/same301/ -> /final/，/final/ 声明 canonical="/final/" 并引用相对 final.css。
+const vRedirectFinal = await runVerify(["--url", `${rootRedirectBase}/case/same301/`, "--mode", "static", "--json"]);
+const vRedirectFinalJ = JSON.parse(vRedirectFinal.out);
+const rfCanon = vRedirectFinalJ.checks.find((c) => c.id === "canonical");
+const rfAssets = vRedirectFinalJ.checks.find((c) => c.id === "assets");
+assert("重定向：canonical 按最终 URL 判定为指向自身",
+  vRedirectFinal.code === 0 && rfCanon?.status === "pass" && rfCanon.samePath === true && rfCanon.sameHost === true,
+  JSON.stringify(rfCanon), "combination");
+assert("重定向：相对资源按最终页面 URL 解析",
+  rfAssets?.status === "pass" && rfAssets.probed?.some((p) => /\/final\/final\.css$/.test(p.finalUrl || "")),
+  JSON.stringify(rfAssets?.probed), "combination");
+// Location 带 userinfo：fetch 会拒绝，必须单独分类为 invalid-location，而不是网络错误。
+const rUserinfo = await rootCaseFull("/case/userinfo/");
+assert("重定向：Location 含 userinfo 分类为 invalid-location 且不请求目标",
+  rUserinfo.root?.status === "fail" && rUserinfo.root.redirectOutcome === "invalid-location"
+    && /userinfo/.test(rUserinfo.root.detail || ""), JSON.stringify(rUserinfo.root), "adversarial");
+// 根路径同源重定向后，未显式给 --cors-url 时 CORS 默认目标必须是最终站点根。
+const rFinalCors = await runVerify(["--url", `${rootRedirectBase}/case/same301/`, "--mode", "static", "--origin", "https://app.example.com", "--json"]);
+const rFinalCorsJ = JSON.parse(rFinalCors.out);
+const rFinalCorsCheck = rFinalCorsJ.checks.find((c) => c.id === "cors");
+assert("CORS：根重定向后默认目标按最终站点根（不是原始 --url）",
+  /\/final\/$/.test(rFinalCorsJ.corsUrl || "") && rFinalCorsCheck?.status === "pass" && rFinalCorsCheck.httpStatus === 200,
+  JSON.stringify({ corsUrl: rFinalCorsJ.corsUrl, check: rFinalCorsCheck }), "combination");
+// 同源重定向到无尾斜杠路径：相对资源按文档 URL 解析，而不是强制补成 /noslash/app.js。
+const rNoSlash = await runVerify(["--url", `${rootRedirectBase}/case/noSlash/`, "--mode", "static", "--json"]);
+const rNoSlashJ = JSON.parse(rNoSlash.out);
+const noSlashAssets = rNoSlashJ.checks.find((c) => c.id === "assets");
+assert("资源：最终页面无尾斜杠时相对 URL 按文档 URL 解析",
+  noSlashAssets?.status === "pass" && noSlashAssets.checked === 1
+    && /\/app\.js$/.test(noSlashAssets.probed?.[0]?.finalUrl || "")
+    && !/\/noslash\//.test(noSlashAssets.probed?.[0]?.finalUrl || ""),
+  JSON.stringify(noSlashAssets), "adversarial");
+// --url 直接指向 .html 文件：相对资源按 /subpage.html 文档 URL 解析成 /rel.js。
+const rSubpage = await runVerify(["--url", `${staticBase}/subpage.html`, "--mode", "static", "--json"]);
+let rSubpageJ = null;
+try { rSubpageJ = JSON.parse(rSubpage.out); } catch { assert("资源：subpage 探针输出合法 JSON", false, `code=${rSubpage.code} err=${(rSubpage.err || "").slice(0, 400)} out=${(rSubpage.out || "").slice(0, 200)}`); }
+const subpageAssets = rSubpageJ?.checks.find((c) => c.id === "assets");
+assert("资源：--url 指向 .html 时相对资源仍按文档 URL 解析",
+  subpageAssets?.status === "pass" && subpageAssets.probed?.[0]?.finalUrl === `${staticBase}/rel.js`,
+  JSON.stringify(subpageAssets), "adversarial");
+// noscript（脚本启用时是 RAWTEXT）里的伪 base/canonical 不能影响资源与 canonical。
+const rNoscriptAssets = await runVerify(["--url", `${staticBase}/noscript-assets/`, "--mode", "static", "--json"]);
+let rNoscriptAssetsJ = null;
+try { rNoscriptAssetsJ = JSON.parse(rNoscriptAssets.out); } catch { assert("noscript：探针输出合法 JSON", false, `code=${rNoscriptAssets.code} err=${(rNoscriptAssets.err || "").slice(0, 400)}`); }
+const noscriptAssets = rNoscriptAssetsJ?.checks.find((c) => c.id === "assets");
+const noscriptCanonical = rNoscriptAssetsJ?.checks.find((c) => c.id === "canonical");
+assert("noscript：伪 base/canonical 不生效，资源仍按站点根解析",
+  noscriptAssets?.status === "pass" && noscriptAssets.checked === 1
+    && noscriptAssets.probed?.[0]?.finalUrl === `${staticBase}/assets/app.css`
+    && noscriptCanonical?.status === "skip",
+  JSON.stringify({ assets: noscriptAssets, canonical: noscriptCanonical }), "adversarial");
+// 备用站与主站同源不构成独立入口。
+const rBackupSame = await runVerify(["--url", staticBase, "--mode", "static", "--backup", `${staticBase}/`, "--json"]);
+const rBackupSameCheck = JSON.parse(rBackupSame.out).checks.find((c) => c.id === "backup");
+assert("备用站：与主站同源判 fail（不是独立备用入口）",
+  rBackupSame.code === 1 && rBackupSameCheck?.status === "fail" && /同源/.test(rBackupSameCheck.detail || ""),
+  JSON.stringify(rBackupSameCheck), "adversarial");
 
 // 备用站跳主站：只解析 Location 识别，不为识别而请求主站。
 const vBackupMain = await runVerify([
@@ -1352,6 +1969,14 @@ assert("备用站：6 次同源重定向同样判超出跳数",
 const vSsr = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":true}', "--json"]);
 const vSsrJ = JSON.parse(vSsr.out);
 assert("验收：ssr 未知路径 404 通过", vSsrJ.checks.some((c) => c.id === "404" && c.status === "pass"), JSON.stringify(vSsrJ.checks.find((c) => c.id === "404")));
+
+// RAWTEXT 内容既不能产生标签，也不能算作服务端渲染的可见文本。
+const vSsrHeavy = await runVerify(["--url", `${ssrUrl}/heavy/`, "--mode", "ssr", "--json"]);
+const vSsrHeavyJ = JSON.parse(vSsrHeavy.out);
+const heavyCanon = vSsrHeavyJ.checks.find((c) => c.id === "canonical");
+const heavyHtml = vSsrHeavyJ.checks.find((c) => c.id === "ssr-html");
+assert("HTML 上下文：script 里的伪 canonical 不进 canonical 检查", heavyCanon?.status === "skip", JSON.stringify(heavyCanon), "adversarial");
+assert("SSR：script/style 内容不计入可见文本", heavyHtml?.status === "warn" && heavyHtml.textLength < 200, JSON.stringify(heavyHtml), "adversarial");
 assert("验收：ssr 服务端渲染内容有文本", vSsrJ.checks.some((c) => c.id === "ssr-html" && c.status === "pass"), JSON.stringify(vSsrJ.checks.find((c) => c.id === "ssr-html")));
 assert("验收：ssr 记录单次 TTFB", vSsrJ.checks.some((c) => c.id === "ttfb" && typeof c.ms === "number"), "单次采样，不是性能结论");
 assert("验收：--api 状态 + JSON + 期望内容", vSsrJ.checks.some((c) => c.id === "api" && c.status === "pass" && c.path === "/api/health"), JSON.stringify(vSsrJ.checks.filter((c) => c.id === "api")));
@@ -1406,6 +2031,9 @@ const fakeWrangler = [
   'if (a.includes("--version")) { console.log("4.0.0-fake"); process.exit(0); }',
   'if (a[0] === "whoami" && a.includes("--json")) { console.error("Unknown argument: json"); process.exit(1); }',
   'if (a[0] === "whoami") {',
+  '  if (process.env.CF_FAKE_WHOAMI_EMPTY) { process.exit(0); }',
+  '  if (process.env.CF_FAKE_WHOAMI_FALSE) { console.log("{\\"loggedIn\\":false}"); process.exit(0); }',
+  '  if (process.env.CF_FAKE_WHOAMI_ERROR) { console.error("wrangler crashed"); process.exit(1); }',
   '  if (process.env.CF_FAKE_NOT_LOGGED) { console.log("You are not logged in. Please run npx wrangler login."); process.exit(0); }',
   '  console.log("You are logged in with an OAuth Token, associated with the email probe@example.com!");',
   '  console.log("| Account Name | Account ID |");',
@@ -1449,16 +2077,48 @@ assert("探针：wrangler 版本探测通过", pOk.json?.checks?.some((c) => c.i
 assert("探针：OAuth 登录态如实跳过 Token 权限检查", pOk.json?.checks?.some((c) => c.id === "api-read" && c.status === "skip"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "api-read")));
 const pNo = runProbe({ CF_FAKE_NOT_LOGGED: "1" });
 assert("探针：文本明确未登录时判 blocked", pNo.json?.checks?.some((c) => c.id === "auth" && c.status === "fail") && pNo.json?.status === "blocked" && pNo.code === 2, `status=${pNo.json?.status} code=${pNo.code}`);
+const pEmpty = runProbe({ CF_FAKE_WHOAMI_EMPTY: "1" });
+assert("探针：whoami 退出码 0 但空输出不得判已登录（fail-closed）",
+  pEmpty.json?.checks?.find((c) => c.id === "auth")?.status === "fail" && pEmpty.json?.status === "blocked" && pEmpty.code === 2,
+  JSON.stringify({ auth: pEmpty.json?.checks?.find((c) => c.id === "auth"), status: pEmpty.json?.status, code: pEmpty.code }), "adversarial");
+const pFalse = runProbe({ CF_FAKE_WHOAMI_FALSE: "1" });
+assert("探针：whoami 输出 loggedIn:false 判 blocked",
+  pFalse.json?.checks?.find((c) => c.id === "auth")?.status === "fail" && pFalse.code === 2,
+  JSON.stringify(pFalse.json?.checks?.find((c) => c.id === "auth")), "adversarial");
+const pErr = runProbe({ CF_FAKE_WHOAMI_ERROR: "1" });
+assert("探针：whoami 执行失败与未登录分开报告",
+  pErr.json?.checks?.find((c) => c.id === "auth")?.status === "fail" && /执行失败/.test(pErr.json?.checks?.find((c) => c.id === "auth")?.detail || ""),
+  JSON.stringify(pErr.json?.checks?.find((c) => c.id === "auth")), "boundary");
+
+// 登录判定纯函数：未知/本地化输出不能当成已登录；多账号不替用户选。
+const authCases = [
+  [{ ok: true, stdout: "已登录", stderr: "" }, "unknown", "本地化但无正向证据"],
+  [{ ok: true, stdout: "You are logged in with an OAuth Token, associated with probe@example.com!", stderr: "" }, "logged-in", "英文登录 + 邮箱"],
+  [{ ok: true, stdout: "You are logged in with an OAuth Token.\nWarning: no account selected", stderr: "" }, "logged-in", "已登录但未选账号"],
+  [{ ok: true, stdout: "You are not logged in. Please run npx wrangler login.", stderr: "" }, "logged-out", "明确未登录"],
+  [{ ok: true, stdout: "", stderr: "" }, "unknown", "空输出"],
+  [{ ok: false, stdout: "", stderr: "boom", error: "ENOENT" }, "error", "执行失败"],
+  [{ ok: false, stdout: "You are not logged in.", stderr: "" }, "logged-out", "非零退出 + 未登录"],
+];
+for (const [input, expected, label] of authCases) {
+  const got = classifyWranglerWhoami(input);
+  assert(`登录判定：${label} 判 ${expected}`, got.state === expected, JSON.stringify(got), "unit");
+}
+const multiAccount = "| Account Name | Account ID |\n| a | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |\n| b | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb |";
+assert("登录判定：多账号 whoami 不替用户选 Account ID", extractAccountId(multiAccount) === null, JSON.stringify(extractAccountId(multiAccount)), "unit");
 
 // ---------------------------------------------------------------- 部署探针判定（纯逻辑 + 本地假 wrangler 端到端）
 assert("部署探针：能从输出解析 workers.dev URL", parseDeployUrl("Published https://cf-probe-abc.my-account.workers.dev (1.2s)") === "https://cf-probe-abc.my-account.workers.dev");
 assert("部署探针：输出里没有 URL 返回 null", parseDeployUrl("Deployed successfully") === null);
 const fetchOk = async () => ({ status: 200, text: async () => "ok" });
 const fetch503 = async () => ({ status: 503, text: async () => "" });
+const fetch302 = async () => ({ status: 302, text: async () => "" });
 const fetchWrongBody = async () => ({ status: 200, text: async () => "not ok" });
 const fetchThrow = async () => { throw new Error("ECONNREFUSED"); };
 const httpServed = await verifyDeployedUrl("https://x.workers.dev", fetchOk, { attempts: 2, delayMs: 0 });
 assert("部署探针：200 + 内容匹配才算通过", httpServed.served === true && httpServed.attempts === 1);
+const httpRedirect = await verifyDeployedUrl("https://x.workers.dev", fetch302, { attempts: 1, delayMs: 0 });
+assert("部署探针：跳转响应不算线上验证通过", httpRedirect.served === false && /重定向未跟随/.test(httpRedirect.reason), JSON.stringify(httpRedirect), "adversarial");
 const httpNotServed = await verifyDeployedUrl("https://x.workers.dev", fetch503, { attempts: 2, delayMs: 0 });
 assert("部署探针：非 200 重试后仍不算通过", httpNotServed.served === false && httpNotServed.attempts === 2);
 const httpWrongBody = await verifyDeployedUrl("https://x.workers.dev", fetchWrongBody, { attempts: 1, delayMs: 0 });
@@ -1477,7 +2137,9 @@ assert("部署探针：拿到 URL 且 HTTP 通过才判 pass", dOk.deploy.status
 const dCleanupFail = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", http: httpServed, worker: "w1", cleanupOk: false });
 assert("部署探针：清理失败单独记 warn，不影响 deploy", dCleanupFail.cleanup.status === "warn" && dCleanupFail.deploy.status === "pass");
 const dCleanupSkipped = evaluateDeployProbe({ deployOk: false, deployErr: "error: auth", worker: "w1", cleanupSkipped: true });
-assert("部署探针：部署失败时清理结论为 skip，不谎称删除失败", dCleanupSkipped.cleanup.status === "skip" && /无需清理/.test(dCleanupSkipped.cleanup.detail), JSON.stringify(dCleanupSkipped.cleanup));
+assert("部署探针：部署失败时清理结论为 skip，并提示可能残留",
+  dCleanupSkipped.cleanup.status === "skip" && /未确认成功/.test(dCleanupSkipped.cleanup.detail) && /手动删除/.test(dCleanupSkipped.cleanup.detail),
+  JSON.stringify(dCleanupSkipped.cleanup));
 
 const pDeployNoUrl = runProbe({ CF_FAKE_DELETE_FAIL: "1" }, ["--deploy"]);
 const pDepCheck = pDeployNoUrl.json?.checks?.find((c) => c.id === "deploy");
@@ -1489,7 +2151,7 @@ const pDeployFail = runProbe({ CF_FAKE_DEPLOY_FAIL: "1" }, ["--deploy"]);
 assert("探针端到端：部署命令失败判 fail", pDeployFail.json?.checks?.find((c) => c.id === "deploy")?.status === "fail");
 assert("探针端到端：部署失败时不声称清理失败", (() => {
   const c = pDeployFail.json?.checks?.find((x) => x.id === "deploy-cleanup");
-  return c?.status === "skip" && /无需清理/.test(c.detail || "");
+  return c?.status === "skip" && /未确认成功/.test(c.detail || "");
 })(), JSON.stringify(pDeployFail.json?.checks?.find((c) => c.id === "deploy-cleanup")));
 
 // ---------------------------------------------------------------- 预检退出码
@@ -1531,6 +2193,179 @@ assert("预检：whoami 用实际解析到的本地 wrangler，而不是一律 n
   envSpaceJ?.checks?.find((c) => c.id === "wrangler-auth")?.status === "pass",
   JSON.stringify(envSpaceJ?.checks?.find((c) => c.id === "wrangler-auth")));
 
+// 登录判定 fail-closed：退出码 0 但输出不可信时不得 canDeploy=true。
+const envAuthMode = (mode) => {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--json"], {
+    encoding: "utf8", cwd: spaceDir, timeout: 40000, env: { ...process.env, [mode]: "1" },
+  });
+  let j = null;
+  try { j = JSON.parse(r.stdout); } catch { /* 断言里带上原始输出 */ }
+  return { code: r.status, json: j, out: r.stdout, err: r.stderr };
+};
+const envFalse = envAuthMode("CF_FAKE_WHOAMI_FALSE");
+const envFalseAuth = envFalse.json?.checks?.find((c) => c.id === "wrangler-auth");
+assert("预检：whoami 输出 loggedIn:false 判 warn 且不可部署",
+  envFalseAuth?.status === "warn" && envFalseAuth.authState === "logged-out"
+    && envFalse.json?.summary?.canDeploy === false && envFalse.code !== 0,
+  JSON.stringify({ auth: envFalseAuth, summary: envFalse.json?.summary, code: envFalse.code }), "adversarial");
+const envEmpty = envAuthMode("CF_FAKE_WHOAMI_EMPTY");
+const envEmptyAuth = envEmpty.json?.checks?.find((c) => c.id === "wrangler-auth");
+assert("预检：whoami 退出码 0 但空输出判 warn（unknown）且不可部署",
+  envEmptyAuth?.status === "warn" && envEmptyAuth.authState === "unknown"
+    && /没有可验证的登录证据/.test(envEmptyAuth.detail || "")
+    && envEmpty.json?.summary?.canDeploy === false,
+  JSON.stringify({ auth: envEmptyAuth, summary: envEmpty.json?.summary }), "adversarial");
+
+// ================================================================ HTML tokenizer（单元 / 对抗层）
+// 解析可靠性集中在 scripts/html-scan.mjs。这一层直接测 tokenizer 的上下文边界和
+// 畸形输入；上面的真实 HTTP 用例再验证这些输入经过 verify-deployment 后的业务结论。
+const canonElements = (htmlText) => parseHtml(htmlText).elements.filter((el) => el.name === "link" && relTokens(el).includes("canonical"));
+const canonCount = (htmlText) => canonElements(htmlText).length;
+
+const tokenizerCases = [
+  [`<link rel="canonical" href="/a">`, 1, "双引号属性"],
+  [`<link rel='canonical' href='/a'>`, 1, "单引号属性"],
+  [`<link rel=canonical href=/a>`, 1, "无引号属性"],
+  [`<link href="/a" rel="canonical">`, 1, "属性顺序（href 在前）"],
+  [`<LINK REL="Canonical" HREF="/A">`, 1, "标签名/属性名/rel 大小写"],
+  [`<link data-rel="canonical" href="/a">`, 0, "data-rel"],
+  [`<link aria-rel="canonical" href="/a">`, 0, "aria-rel"],
+  [`<link rel="canonicalized" href="/a">`, 0, "canonicalized"],
+  [`<link rel="alternate canonical" href="/a">`, 1, "rel 多 token"],
+  [`<link rel="canonicalized canonical" href="/a">`, 1, "相似 token + 真 token"],
+  [`<link rel="canonicalized" rel="canonical" href="/a">`, 0, "重复 rel 属性第一个生效"],
+  [`<link rel="canonical" rel="canonicalized" href="/a">`, 1, "重复 rel 属性第一个生效 2"],
+  [`<!-- <link rel="canonical" href="/a"> -->`, 0, "HTML 注释"],
+  [`<!--><link rel="canonical" href="/a">`, 1, "abrupt 空注释"],
+  [`<!---><link rel="canonical" href="/a">`, 1, "短注释结束后真实标签"],
+  [`<script>x</script foo="><link rel='canonical' href='/fake'>"><link rel='canonical' href='/a'>`, 1, "结束标签引号里的 > 不提前结束"],
+  [`<!-- <link rel="canonical" href="/a"> --><link rel="canonical" href="/a">`, 1, "注释 + 真实标签"],
+  [`<script>var s = '<link rel="canonical" href="/a">';</script>`, 0, "script RAWTEXT"],
+  [`<script>if (a < b) { }</script><link rel="canonical" href="/a">`, 1, "script 里的 < 不开始标签"],
+  [`<style>/* <link rel="canonical" href="/a"> */</style>`, 0, "style RAWTEXT"],
+  [`<textarea><link rel="canonical" href="/a"></textarea>`, 0, "textarea RCDATA"],
+  [`<title><link rel="canonical" href="/a"></title>`, 0, "title RCDATA"],
+  [`<iframe><link rel="canonical" href="/a"></iframe>`, 0, "iframe RAWTEXT"],
+  [`<xmp><link rel="canonical" href="/a"></xmp>`, 0, "xmp RAWTEXT"],
+  [`<noembed><link rel="canonical" href="/a"></noembed>`, 0, "noembed RAWTEXT"],
+  [`<noframes><link rel="canonical" href="/a"></noframes>`, 0, "noframes RAWTEXT"],
+  [`<plaintext><link rel="canonical" href="/a">`, 0, "plaintext"],
+  [`<template><link rel="canonical" href="/a"></template>`, 0, "template 惰性内容"],
+  [`<template></template><link rel="canonical" href="/a">`, 1, "template 之后的真实标签"],
+  [`<div data-html="<link rel='canonical' href='/a'>"></div>`, 0, "属性值里的伪标签"],
+  [`<link rel="canonical" href="/a" data-x=">">`, 1, "属性值里的 >"],
+  [`<link rel="canonical"`, 0, "不完整标签（EOF）"],
+  [`<link rel="canonical" href="/a"`, 0, "属性中途 EOF"],
+  [`<link rel="canonical"href="/a">`, 1, "属性之间无空格"],
+  [`<link rel="canonical" href=/a/>`, 1, "无引号值以 /> 结尾"],
+  [`<link rel="canonical" href=/a />`, 1, "自闭合标签"],
+  [`<!DOCTYPE html><link rel="canonical" href="/a">`, 1, "DOCTYPE 不干扰"],
+  [`</ link><link rel="canonical" href="/a">`, 1, "畸形结束标签"],
+  [`<> <link rel="canonical" href="/a">`, 1, "空尖括号"],
+  [`<link rel="canonical" href="/a">`.replace(">", " >"), 1, "结束尖括号前有空格"],
+  [`<noscript><link rel="canonical" href="/a"></noscript>`, 0, "noscript（脚本启用时是 RAWTEXT）"],
+  [`<svg><link rel="canonical" href="https://evil/"></svg><link rel="canonical" href="/a">`, 1, "SVG 外域里的 link 不是 HTML 元素"],
+  [`<svg><![CDATA[> <link rel="canonical" href="https://evil/"> ]]></svg><link rel="canonical" href="/a">`, 1, "SVG CDATA 里的伪标签"],
+  [`<math><link rel="canonical" href="https://evil/"></math><link rel="canonical" href="/a">`, 1, "MathML 外域里的 link"],
+  [`<svg><foreignObject><link rel="canonical" href="/in-object"></foreignObject></svg>`, 1, "foreignObject 内部恢复 HTML"],
+  [`</a "><link rel="canonical" href="/a">`, 1, "结束标签里游离引号不吞后续标签"],
+  [`</a '><link rel="canonical" href="/a">`, 1, "结束标签里游离单引号"],
+  [`<link =rel="canonical" href="/a">`, 0, "属性名以 = 开头不等于 rel"],
+  [`<svg><title>SVG-ONLY</title></svg><title>HTML-TITLE</title>`, 0, "文档 title 只认 HTML 命名空间"],
+];
+for (const [htmlText, expected, label] of tokenizerCases) {
+  assert(`HTML tokenizer：${label}`, canonCount(htmlText) === expected, `expected=${expected} actual=${canonCount(htmlText)}`, "unit");
+}
+
+// 属性/实体/URL 解析细节
+const entityEl = canonElements(`<link rel="canonical" href="/q?a=1&amp;b=2">`)[0];
+assert("HTML tokenizer：属性值里的字符引用被解码", getAttribute(entityEl, "href").value === "/q?a=1&b=2", JSON.stringify(getAttribute(entityEl, "href")), "unit");
+assert("HTML tokenizer：数字/十六进制字符引用解码", decodeCharacterReferences("&#47; &#x2f; &#38;") === "/ / &", decodeCharacterReferences("&#47; &#x2f; &#38;"), "unit");
+assert("HTML tokenizer：未知命名实体保持原样", decodeCharacterReferences("&unknown;") === "&unknown;", decodeCharacterReferences("&unknown;"), "unit");
+assert("HTML tokenizer：命名实体大小写敏感（&Amp; 不解码）", decodeCharacterReferences("&Amp; &amp;") === "&Amp; &", decodeCharacterReferences("&Amp; &amp;"), "unit");
+assert("HTML tokenizer：数字引用允许缺分号（文本上下文）", decodeCharacterReferences("&#47 &#x2f") === "/ /", decodeCharacterReferences("&#47 &#x2f"), "unit");
+assert("HTML tokenizer：属性值里缺分号且后接字母/=时不解码", decodeCharacterReferences("&#47x", true) === "&#47x" && decodeCharacterReferences("&#47", true) === "/", JSON.stringify([decodeCharacterReferences("&#47x", true), decodeCharacterReferences("&#47", true)]), "unit");
+assert("HTML tokenizer：C1 控制字符按 windows-1252 映射", decodeCharacterReferences("&#128;") === "\u20ac", JSON.stringify(decodeCharacterReferences("&#128;")), "unit");
+const nulEl = canonElements(`<link rel="canonical" href="/a\u0000b">`)[0];
+assert("HTML tokenizer：输入 NUL 替换为 U+FFFD", getAttribute(nulEl, "href").value === "/a\uFFFDb", JSON.stringify(getAttribute(nulEl, "href")), "unit");
+const dupAttrEl = canonElements(`<link rel="canonical" href="/first" href="/second">`)[0];
+assert("HTML tokenizer：重复属性保留第一个", getAttribute(dupAttrEl, "href").value === "/first", JSON.stringify(getAttribute(dupAttrEl, "href")), "unit");
+const titleEl2 = parseHtml(`<title>A &amp; B</title>`).elements.find((el) => el.name === "title");
+assert("HTML tokenizer：RCDATA title 内容可读取并解码", titleEl2?.content === "A & B", JSON.stringify(titleEl2?.content), "unit");
+
+// <base href>：第一个生效；template 里的不算；无法解析回退 documentUrl
+const baseHtml = `<template><base href="/evil/"></template><base href="/root/"><base href="/ignored/"><link rel="canonical" href="x">`;
+const baseElements = parseHtml(baseHtml).elements;
+assert("HTML tokenizer：<base href> 第一个生效且跳过 template 内容",
+  effectiveBaseUrl(baseElements, "https://example.com/dir/page") === "https://example.com/root/",
+  effectiveBaseUrl(baseElements, "https://example.com/dir/page"), "unit");
+assert("HTML tokenizer：非法 <base href> 回退到文档 URL",
+  effectiveBaseUrl(parseHtml(`<base href="http://"><link rel="canonical" href="/a">`).elements, "https://example.com/dir/page") === "https://example.com/dir/page",
+  effectiveBaseUrl(parseHtml(`<base href="http://">`).elements, "https://example.com/dir/page"), "unit");
+
+// 可见文本：注释 / RAWTEXT / title 排除，textarea 与普通文本保留，实体解码
+const textSample = parseHtml(`<title>T&amp;T</title><!-- hidden --><script>SHOULD_NOT_APPEAR</script><style>CSS</style><textarea>TA</textarea><p>Hello &amp; bye</p>`).text;
+assert("HTML tokenizer：可见文本排除注释/RAWTEXT/title、保留 textarea 与普通文本",
+  /Hello & bye/.test(textSample) && /TA/.test(textSample) && !/T&T/.test(textSample)
+    && !/SHOULD_NOT_APPEAR/.test(textSample) && !/CSS/.test(textSample),
+  JSON.stringify(textSample), "unit");
+assert("HTML tokenizer：xmp 内容计入可见文本（浏览器会渲染）",
+  /XMP-VISIBLE/.test(parseHtml(`<xmp>XMP-VISIBLE</xmp>`).text) && !/SCRIPT-HIDDEN/.test(parseHtml(`<script>SCRIPT-HIDDEN</script>`).text),
+  JSON.stringify(parseHtml(`<xmp>XMP-VISIBLE</xmp>`).text), "unit");
+assert("HTML tokenizer：SVG title 不计入文档 title",
+  parseHtml(`<svg><title>SVG-ONLY</title></svg><title>HTML-TITLE</title>`).elements.find((el) => el.name === "title")?.content === "HTML-TITLE",
+  JSON.stringify(parseHtml(`<svg><title>SVG-ONLY</title></svg><title>HTML-TITLE</title>`).elements.filter((el) => el.name === "title")), "adversarial");
+
+// 资源属性规则：与 check-build 共用的单一权威。
+const refElements = parseHtml(`<a href="/nav">x</a><link rel="canonical" href="/canonical">`
+  + `<link rel="stylesheet" href="/s.css"><link rel="preload" as="style" href="/pre.css">`
+  + `<img src="/i.png" srcset="/img/a,b.png 1x, /i3.png 2x">`
+  + `<video poster="/p.jpg"></video><object data="/o.bin"></object><base href="/assets/">`
+  + `<link rel="alternate canonical" href="/multi-canonical">`).elements;
+const refValues = resourceReferences(refElements).map((r) => r.value);
+assert("HTML 资源引用：只取子资源属性，排除导航/canonical/base",
+  refValues.includes("/s.css") && refValues.includes("/i.png") && refValues.includes("/img/a,b.png")
+    && refValues.includes("/i3.png") && refValues.includes("/p.jpg") && refValues.includes("/o.bin")
+    && refValues.includes("/pre.css") && !refValues.includes("/multi-canonical")
+    && !refValues.includes("/nav") && !refValues.includes("/canonical") && !refValues.includes("/assets/"),
+  refValues.join(","), "unit");
+
+// 确定性伪随机组合：真实标签必须识别，任意上下文里的伪标签必须不识别。
+let rngState = 0x2f6e2b1;
+const rand = () => ((rngState = (rngState * 1103515245 + 12345) >>> 0) / 0x100000000);
+const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+const rawtextTags = ["script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"];
+const rcdataTags = ["textarea", "title"];
+let fuzzBad = 0;
+for (let n = 0; n < 300; n++) {
+  const href = pick(["/a", "b.html", "/p/q", "#frag", "/x?q=1"]);
+  const quote = pick(["\"", "'", ""]);
+  const real = `<link rel="canonical" href=${quote}${href}${quote}>`;
+  const fake = `<link rel="canonical" href="/fake-${n}">`;
+  const ctx = pick([
+    "comment", "template", "attr-value",
+    ...rawtextTags.map((t) => `raw:${t}`),
+    ...rcdataTags.map((t) => `rc:${t}`),
+  ]);
+  let htmlText;
+  if (ctx === "comment") htmlText = `<!-- ${fake} -->${real}`;
+  else if (ctx === "template") htmlText = `<template>${fake}</template>${real}`;
+  else if (ctx === "attr-value") htmlText = `<div data-html="${fake}"></div>${real}`;
+  else if (ctx.startsWith("raw:")) { const t = ctx.slice(4); htmlText = `<${t}>${fake}</${t}>${real}`; }
+  else { const t = ctx.slice(3); htmlText = `<${t}>${fake}</${t}>${real}`; }
+  const links = canonElements(htmlText);
+  if (links.length !== 1 || getAttribute(links[0], "href").value !== href) fuzzBad++;
+}
+assert("HTML tokenizer：300 组随机上下文组合只识别真实标签", fuzzBad === 0, `bad=${fuzzBad}`, "adversarial");
+
+// 畸形/超大输入必须线性结束、不抛异常（简化的 DoS 回归）
+const malformedBig = "</>".repeat(5000) + "<div></div>".repeat(1000) + "<link rel='canonical' href='/a'>";
+const startedAt = Date.now();
+const malformedResult = parseHtml(malformedBig);
+assert("HTML tokenizer：大量畸形/重复片段后仍能解析出真实标签且不超时",
+  malformedResult.elements.some((el) => el.name === "link" && relTokens(el).includes("canonical")) && Date.now() - startedAt < 10000,
+  `ms=${Date.now() - startedAt}`, "adversarial");
+
 // ---------------------------------------------------------------- 技能结构
 // check-skill 自身的回归：BOM / YAML 块标量 / fenced code 示例不能误报；
 // 代码块之外的失效路径仍然必须报告。
@@ -1552,7 +2387,32 @@ assert("结构检查：frontmatter / 路径 / 无绝对路径", skillCheck.statu
 
 // ---------------------------------------------------------------- 汇总
 const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} 通过`);
+const layers = {};
+for (const r of results) layers[r.layer] = (layers[r.layer] || 0) + 1;
+const layerLine = `分层覆盖：${Object.entries(layers).map(([k, v]) => `${k}=${v}`).join("，")}`;
+const passed = results.length - failed.length;
+
+// 自动化维护 tests/last-run.txt：报告不再依赖人工复制终端输出，也不会出现
+// 「文档说这是最近一次结果、文件却停留在旧版本」的漂移。
+const lastRunText = [
+  `# 本文件由 node tests/run-tests.mjs 自动生成，请勿手工编辑`,
+  `# ${new Date().toISOString()} / node ${process.version} / ${process.platform}`,
+  ...results.map((r) => {
+    const detail = String(r.detail ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+    return `${r.ok ? "通过" : "失败"}  ${r.name}${detail ? ` — ${detail}` : ""}`.trimEnd();
+  }),
+  "",
+  layerLine,
+  `${passed}/${results.length} 通过`,
+].join("\n");
+try {
+  fs.writeFileSync(path.join(here, "last-run.txt"), `${lastRunText}\n`, "utf8");
+} catch {
+  // 写报告失败不能影响测试结论本身。
+}
+
+console.log(`\n${layerLine}`);
+console.log(`\n${passed}/${results.length} 通过`);
 if (failed.length) {
   console.log("失败项：");
   failed.forEach((f) => console.log(`  - ${f.name} ${f.detail}`));

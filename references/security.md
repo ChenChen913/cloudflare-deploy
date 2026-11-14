@@ -83,7 +83,10 @@ Workers 部署通常 `contents: read` 就够。
 - 主站、资源与 `--backup` 共用 `MAX_REDIRECTS=5`：最多跟随 5 次同源重定向并额外请求一次最终地址；最终地址仍返回 3xx（第 6 次重定向）才判超限，且不请求它的目标。跨源恰好发生在边界时仍按跨源分类、不跟随。
 - Location 缺失或无法解析、重定向循环 / 超过跳数，各自单独分类并判失败，详见 `references/verification.md` 的 `redirectOutcome`。
 - 备用站是否跳到主站只靠解析 `hops[].location` 判断，不需要为了识别去请求主站。
-- 首页里 `src` / `href` 引用的资源也会先解析再按 origin 过滤：跨源、非 HTTP(S)、畸形地址只记进 `ignored`，不发请求。包括 `\127.0.0.1:port/...` 这种会被 URL 解析成协议相对地址的伪装写法。
+- 首页里的子资源引用（`src` / `srcset` / `poster` / `<object data>` / `<link href>`；导航链接、canonical、`<base>` 不算）会先解析再按 origin 过滤：跨源、畸形地址只记进 `ignored`，不发请求。包括 `\127.0.0.1:port/...` 这种会被 URL 解析成协议相对地址的伪装写法。
+- HTML 识别统一走 `scripts/html-scan.mjs`（显式状态机，零依赖），不再用标签正则：注释、RAWTEXT（script/style/xmp/iframe/noembed/noframes）、RCDATA（title/textarea）、template、属性值和畸形标签里的伪标签不会被当成真实元素。改解析规则只改这个模块并补回归测试。
+- 登录态判定统一走 `scripts/wrangler-auth.mjs`，且是 fail-closed：`whoami` 退出码 0 但输出为空 / `loggedIn:false` / 没有邮箱或 Account ID 等正向证据时判 unknown，不会让 `canDeploy` 或 `probe` ready。
+- 只有最终 200 的首页才做内容检查；4xx/5xx 错误页的 title/canonical/资源不作为站点证据。
 
 这条边界防止被验收的站点用 3xx 把脚本导向本机回环地址、内网服务或云厂商元数据端点。**跨源目标返回 200 也不是原始站点的通过证据**；要确认跨源跳转是否符合预期，人工用浏览器另行访问。
 

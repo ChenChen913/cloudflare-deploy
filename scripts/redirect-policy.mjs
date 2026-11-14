@@ -77,6 +77,12 @@ export function classifyRedirect(fromUrl, location, startOrigin = null) {
     return blank("invalid-location", `Location 无法解析：${raw}`);
   }
 
+  // 带 userinfo 的 URL 会被 fetch 拒绝（URL includes credentials），
+  // 不能当成可跟随的同源重定向，也不能暴露成网络错误。
+  if (next.username || next.password) {
+    return blank("invalid-location", `Location 含 userinfo（user:pass@），拒绝跟随：${raw}`);
+  }
+
   const protocolChanged = from.protocol !== next.protocol;
   const originChanged = next.origin !== allowed;
   const nextUrl = next.toString();

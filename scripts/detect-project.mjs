@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { stripJsComments, stripHashComments, parseJsonc, tomlField, tomlHasKey, jsTopLevelValue } from "./config-scan.mjs";
 
 const SCHEMA_VERSION = 2;
 const argv = process.argv.slice(2);
@@ -69,12 +70,15 @@ function git(args) {
   return (r.stdout || "").trim() || null;
 }
 
-function walkFiles(dir, maxDepth = 3, acc = [], depth = 0) {
+const BUILD_NOISE = ["node_modules", ".git", "dist", "build", "_site", "public", ".next", ".output", "vendor"];
+// HTML 入口发现不能跳过 public/：纯静态站可能只有 public/index.html（Workers assets）。
+const HTML_NOISE = BUILD_NOISE.filter((name) => name !== "public");
+function walkFiles(dir, maxDepth = 3, acc = [], depth = 0, skipNames = BUILD_NOISE) {
   if (depth > maxDepth) return acc;
   for (const ent of listDir(dir)) {
-    if (["node_modules", ".git", "dist", "build", "_site", "public", ".next", ".output", "vendor"].includes(ent.name)) continue;
+    if (skipNames.includes(ent.name)) continue;
     const full = path.join(dir, ent.name);
-    if (ent.isDirectory()) walkFiles(full, maxDepth, acc, depth + 1);
+    if (ent.isDirectory()) walkFiles(full, maxDepth, acc, depth + 1, skipNames);
     else acc.push(full);
   }
   return acc;
@@ -86,18 +90,20 @@ const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
 const scripts = pkg.scripts || {};
 const hasDep = (name) => Object.prototype.hasOwnProperty.call(deps, name);
 
-const configText = (names) => {
+// 配置文件按语言剥离注释后再做字段提取：注释掉的 base/outDir/adapter 不能生效。
+const configTextRaw = (names) => {
   for (const n of names) {
     const s = read(path.join(root, n));
     if (s) return s;
   }
   return "";
 };
-
+const configText = (names) => stripJsComments(configTextRaw(names));
 const viteConfig = configText(["vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.mts"]);
 const nextConfig = configText(["next.config.js", "next.config.mjs", "next.config.ts"]);
 const astroConfig = configText(["astro.config.mjs", "astro.config.ts", "astro.config.js"]);
 const svelteConfig = configText(["svelte.config.js"]);
+const nuxtConfig = configText(["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]);
 
 const hasIndexHtml = exists(path.join(root, "index.html"));
 const jekyllConfig = exists(path.join(root, "_config.yml"));
@@ -112,7 +118,16 @@ let kind = "unknown";
 let frameworkSource = "没有匹配到已知框架";
 
 if (hasDep("next")) { framework = "nextjs"; kind = /output\s*:\s*["']export["']/.test(nextConfig) ? "static" : "ssr"; frameworkSource = "package.json 依赖 next"; }
-else if (hasDep("nuxt") || hasDep("nuxt3")) { framework = "nuxt"; kind = "ssr"; frameworkSource = "package.json 依赖 nuxt"; }
+else if (hasDep("nuxt") || hasDep("nuxt3")) {
+  framework = "nuxt";
+  // `ssr: false` 只在配置对象顶层生效（routeRules 里的 ssr:false 是按路由 CSR）；
+  // build 用 nuxt/nuxi generate 或 nitro preset=static 也是静态产物。
+  const nuxtSsr = jsTopLevelValue(nuxtConfig, "ssr");
+  const nuxtGenerate = /\b(?:nuxt|nuxi)\s+generate\b/.test(scripts.build || "")
+    || /preset\s*:\s*["']static["']/.test(nuxtConfig);
+  kind = nuxtSsr === "false" || nuxtGenerate ? "static" : "ssr";
+  frameworkSource = "package.json 依赖 nuxt";
+}
 else if (hasDep("@sveltejs/kit")) { framework = "sveltekit"; kind = /adapter-static/.test(svelteConfig) || hasDep("@sveltejs/adapter-static") ? "static" : "ssr"; frameworkSource = "package.json 依赖 @sveltejs/kit"; }
 else if (hasDep("astro")) { framework = "astro"; kind = /adapter/.test(astroConfig) ? "ssr" : "static"; frameworkSource = "package.json 依赖 astro"; }
 else if (hasDep("@remix-run/react") || hasDep("@remix-run/node")) { framework = "remix"; kind = "ssr"; frameworkSource = "package.json 依赖 @remix-run"; }
@@ -132,7 +147,7 @@ else if (hasHugo) { framework = "hugo"; kind = "static"; frameworkSource = "hugo
 else if (hasMkDocs) { framework = "mkdocs"; kind = "static"; frameworkSource = "mkdocs.yml"; }
 else if (hasIndexHtml) { framework = "static-html"; kind = "static"; frameworkSource = "根目录 index.html（无框架依赖）"; }
 
-const htmlIndexes = walkFiles(root, 3).filter((f) => /[\\/]index\.html$/i.test(f));
+const htmlIndexes = walkFiles(root, 3, [], 0, HTML_NOISE).filter((f) => /[\\/]index\.html$/i.test(f));
 let htmlRoot = null;
 if (framework === "unknown" && htmlIndexes.length === 1) {
   framework = "static-html";
@@ -205,7 +220,8 @@ const ghWorkflowDir = path.join(root, ".github", "workflows");
 const ghWorkflows = listDir(ghWorkflowDir)
   .filter((e) => e.isFile() && /\.ya?ml$/i.test(e.name))
   .map((e) => {
-    const text = read(path.join(ghWorkflowDir, e.name)) || "";
+    // YAML 注释里的 action 不能算数。
+    const text = stripHashComments(read(path.join(ghWorkflowDir, e.name)) || "");
     return {
       file: `.github/workflows/${e.name}`,
       pages: /deploy-pages|upload-pages-artifact|actions\/configure-pages/.test(text),
@@ -225,21 +241,37 @@ const gitDirty = git(["status", "--porcelain"]);
 const repoName = gitRemote ? gitRemote.replace(/\.git$/, "").split(/[/:]/).pop() : null;
 
 const wranglerFile = firstExisting(["wrangler.jsonc", "wrangler.json", "wrangler.toml"]);
-const wranglerText = wranglerFile ? read(path.join(root, wranglerFile)) || "" : "";
-// wrangler.toml 写 `name = "x"`，wrangler.json/jsonc 写 `"name": "x"`；
-// 同一个字段两种语法都要能读出来，JSONC 里的注释不影响按字段取值。
+const wranglerRaw = wranglerFile ? read(path.join(root, wranglerFile)) || "" : "";
+const wranglerIsToml = wranglerFile ? /\.toml$/i.test(wranglerFile) : false;
+// 先剥离注释：注释掉的 `# main = "x"` / `// "directory": "./legacy"` 不能生效。
+// TOML 用 # 注释，JSONC 用 // 和 /* */；JSON 由 parseJsonc 结构化读取。
+const wranglerText = wranglerIsToml ? stripHashComments(wranglerRaw) : stripJsComments(wranglerRaw);
+const wranglerJson = wranglerFile && !wranglerIsToml ? parseJsonc(wranglerRaw) : null;
+// 无法结构化解析（JSONC 语法错误 / 未知写法）时的兜底：在已剥离注释的文本里按字段取。
 const wranglerField = (key) => {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const m = wranglerText.match(new RegExp(`(?:^|[\\s,{"'])["']?${esc}["']?\\s*[:=]\\s*["']([^"']+)["']`, "m"));
   return m ? m[1] : null;
 };
+const wranglerJsonString = (key) => {
+  const v = wranglerJson && typeof wranglerJson === "object" ? wranglerJson[key] : null;
+  return typeof v === "string" ? v : null;
+};
+const assetsDirectory = (() => {
+  const nested = wranglerJson && typeof wranglerJson.assets === "object" && wranglerJson.assets
+    ? wranglerJson.assets.directory
+    : null;
+  if (typeof nested === "string") return nested;
+  if (wranglerIsToml) return tomlField(wranglerRaw, "directory", "assets");
+  return wranglerField("directory");
+})();
 const wrangler = wranglerFile ? {
   file: wranglerFile,
-  name: wranglerField("name"),
-  pagesBuildOutputDir: wranglerField("pages_build_output_dir"),
-  assetsDirectory: wranglerField("directory"),
-  compatibilityDate: wranglerField("compatibility_date"),
-  hasMain: Boolean(wranglerField("main")),
+  name: wranglerJsonString("name") ?? (wranglerIsToml ? tomlField(wranglerRaw, "name") : wranglerField("name")),
+  pagesBuildOutputDir: wranglerJsonString("pages_build_output_dir") ?? (wranglerIsToml ? tomlField(wranglerRaw, "pages_build_output_dir") : wranglerField("pages_build_output_dir")),
+  assetsDirectory,
+  compatibilityDate: wranglerJsonString("compatibility_date") ?? (wranglerIsToml ? tomlField(wranglerRaw, "compatibility_date") : wranglerField("compatibility_date")),
+  hasMain: Boolean(wranglerJsonString("main")) || (wranglerIsToml ? tomlHasKey(wranglerRaw, "main") : Boolean(wranglerField("main"))),
   bindings: {
     d1: /d1_databases/.test(wranglerText),
     kv: /kv_namespaces/.test(wranglerText),
@@ -288,7 +320,7 @@ const envExample = listDir(root)
   .map((e) => e.name);
 const envKeys = envExample.length
   ? (read(path.join(root, envExample[0])) || "").split(/\r?\n/)
-      .map((l) => l.match(/^\s*([A-Z0-9_]+)\s*=/)?.[1])
+      .map((l) => l.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/)?.[1])
       .filter(Boolean)
   : [];
 
@@ -314,7 +346,23 @@ if (monorepo) {
 }
 
 const startScript = scripts.start || "";
-const serverEntry = pkg.main || startScript.match(/\b(?:node|tsx|ts-node|bun)\s+([^\s&|]+)/)?.[1] || null;
+// 从启动命令里取真实入口：跳过 node/tsx 及其参数（含带值的 -r/--require 等）。
+function extractNodeEntry(command) {
+  const tokens = String(command || "").trim().split(/\s+/).filter(Boolean);
+  const runner = tokens.findIndex((t) => /^(?:node|tsx|ts-node|bun)$/.test(t));
+  if (runner < 0) return null;
+  const takesValue = new Set(["-r", "--require", "--loader", "--experimental-loader", "--import", "--env-file", "-c", "--config"]);
+  for (let i = runner + 1; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.startsWith("-")) {
+      if (takesValue.has(token)) i++;
+      continue;
+    }
+    return token;
+  }
+  return null;
+}
+const serverEntry = pkg.main || extractNodeEntry(startScript) || null;
 
 const risks = [];
 if (!buildCommand && !resolvedOutputDir && kind !== "api" && kind !== "fullstack") risks.push("没有检测到构建脚本；请手动生成输出目录，或补一个 build 脚本。");

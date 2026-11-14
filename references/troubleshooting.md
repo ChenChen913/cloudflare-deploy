@@ -50,7 +50,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|s
 - 产物根目录有 `index.html`（SSR 除外）；
 - 多页站有顶层 `404.html`；
 - `_headers` / `_redirects` 在根目录；
-- index 引用的资源都存在，且大小写与产物里的文件名完全一致（Cloudflare 区分大小写，Windows 本地文件系统不区分）；`..` 逃逸或绝对路径引用直接判坏；
+- index 引用的子资源都存在：只取真实元素上的 `src` / `srcset` / `poster` / `<object data>` / `<link href>`（导航链接、canonical、`<base>` 不算）；大小写必须与产物文件名一致（Cloudflare 区分大小写，Windows 本地文件系统不区分）；目录式 URL（`/about/`、`/about`）按 `about/index.html` 查找；`..` 逃逸、绝对路径和 `%2F` 编码引用判坏；超过 40 条引用时只查前 40 条并在 detail 里写明；
 - 文件数和单文件大小；
 - 产物里出现 `CNAME` 会被警告；`.env` / `.git` 脚本不检查，需人工确认它们没有被打进产物。
 
@@ -95,6 +95,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|s
 4. `OPTIONS` 是否返回 200/204，且方法/头列表正确？
 5. 错误响应是否也带 CORS 头？
 6. 上游 API 是否又加了一套 CORS 头？
+
+`OPTIONS` 返回 200/204 **不等于** CORS 通过。预检涉及实际方法/请求头时显式传 `--cors-method` / `--cors-headers`；没传的检查列进 `notChecked`，预检最多 `warn`。`--cors-url` 返回 3xx 或 4xx/5xx 时不能判通过（脚本不跟随 CORS URL 的重定向）。只有 `Authorization` 是 non-wildcard header；`Range` 可以被 `Allow-Headers: *` 覆盖。
 
 `curl` 不执行 CORS 判定，最终用浏览器确认。
 

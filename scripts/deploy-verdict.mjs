@@ -30,7 +30,8 @@ export async function verifyDeployedUrl(url, fetchImpl = fetch, opts = {}) {
 
   for (let i = 1; i <= attempts; i++) {
     try {
-      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeout) });
+      // redirect: "manual"：部署 URL 若跳转到别处，不能拿别的站点的 "ok" 当部署证据。
+      const res = await fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(timeout) });
       const text = await res.text();
       const bodyOk = String(text).trim() === expectedText;
       last = {
@@ -40,7 +41,9 @@ export async function verifyDeployedUrl(url, fetchImpl = fetch, opts = {}) {
         bodyOk,
         reason: res.status === 200
           ? (bodyOk ? "返回 200 且内容匹配" : "返回 200 但内容不匹配")
-          : `返回 ${res.status}`,
+          : res.status >= 300 && res.status < 400
+            ? `返回 ${res.status}（重定向未跟随；部署 URL 应直接返回 200）`
+            : `返回 ${res.status}`,
       };
       if (last.served) return last;
     } catch (e) {
@@ -74,6 +77,7 @@ export function evaluateDeployProbe(input = {}) {
     deployOk = false,
     deployErr = "",
     deployOut = "",
+    deployError = null,
     url = null,
     http = null,
     cleanupOk = true,
@@ -89,7 +93,7 @@ export function evaluateDeployProbe(input = {}) {
     deploy = {
       worker, url, verified: false, http,
       id: "deploy", status: "fail",
-      detail: `部署失败：${tail || "wrangler deploy 返回非零退出码"}`,
+      detail: `部署失败：${tail || (deployError ? `执行错误 ${deployError}` : "wrangler deploy 返回非零退出码")}`,
     };
   } else if (!url) {
     deploy = {
@@ -111,13 +115,14 @@ export function evaluateDeployProbe(input = {}) {
     };
   }
 
-  // 部署失败时没有创建临时 Worker，清理不适用；不能写成「未能删除」。
+  // 部署失败时没有确认创建临时 Worker，清理不适用；不能写成「未能删除」，
+  // 也不能断言一定没有创建（超时/被杀时可能已创建），要提示人工核对。
   const cleanup = cleanupSkipped
     ? {
       worker,
       id: "deploy-cleanup",
       status: "skip",
-      detail: `部署命令失败，没有创建临时 Worker ${worker}，无需清理`,
+      detail: `部署结果未确认成功，未执行清理；如实际已创建临时 Worker ${worker}，请到控制台核对并手动删除`,
     }
     : {
       worker,

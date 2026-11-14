@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "./deploy-verdict.mjs";
+import { classifyWranglerWhoami } from "./wrangler-auth.mjs";
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
@@ -98,16 +99,16 @@ let authSource = null;
 let whoamiAccountId = null;
 {
   const r = call(["whoami"], { timeout: 20000 });
-  const text = [r.out, r.err].filter(Boolean).join("\n");
-  const looksLoggedIn = /logged in|associated with|account id/i.test(text)
-    && !/not (?:logged|authenticated)|please (?:run|use) .*login/i.test(text);
-  if (!r.ok || !looksLoggedIn) {
-    const tail = (r.err || r.out).split(/\r?\n/).filter(Boolean).slice(-1)[0] || "";
-    add("auth", "fail", `未登录或 wrangler 读不到登录态。执行 npx wrangler login；CI/无头环境用 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID${tail ? `（${tail.slice(0, 120)}）` : ""}`);
+  // 与 check-env 共用同一套判定：退出码 0 但输出为空 / loggedIn:false / 不可识别的
+  // 本地化输出，都不能当成已登录（否则会 fail-open 到部署）。
+  const who = classifyWranglerWhoami({ ok: r.ok, stdout: r.out, stderr: r.err, error: r.error });
+  if (who.state !== "logged-in") {
+    const label = who.state === "logged-out" ? "未登录" : who.state === "error" ? "wrangler whoami 执行失败" : "无法确认登录态";
+    add("auth", "fail", `${label}：${who.reason}。执行 npx wrangler login；CI/无头环境用 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID`);
   } else {
     authOk = true;
-    email = (text.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i) || [])[0] || null;
-    whoamiAccountId = (text.match(/\b[0-9a-f]{32}\b/i) || [])[0] || null;
+    email = who.email;
+    whoamiAccountId = who.accountId;
     authSource = process.env.CLOUDFLARE_API_TOKEN ? "API Token（环境变量）" : "OAuth / 本地登录态";
     // 官方 --json 是可选增强：能解析就补账号名，解析失败不影响结论。
     const j = call(["whoami", "--json"], { timeout: 10000 });
@@ -118,7 +119,7 @@ let whoamiAccountId = null;
         email = email || parsed?.email || parsed?.user?.email || null;
       } catch { /* 纯文本已经足够 */ }
     }
-    add("auth", "pass", `已登录：${account?.name || email || "(账号名未读出)"}，来源 ${authSource}`, { email, authSource, accountName: account?.name || null });
+    add("auth", "pass", `${who.reason}${account?.name ? `；账号 ${account.name}` : ""}，来源 ${authSource}`, { email, authSource, accountName: account?.name || null, authState: who.state });
   }
 }
 
@@ -166,7 +167,7 @@ if (doDeploy) {
     // 部署失败时没有创建临时 Worker，不应该去 delete，更不能把「删除失败」报成清理问题。
     const del = dep.ok ? call(["delete", name], { cwd: dir, timeout: 60000, input: "y\n" }) : null;
     const verdict = evaluateDeployProbe({
-      deployOk: dep.ok, deployOut: dep.out, deployErr: dep.err,
+      deployOk: dep.ok, deployOut: dep.out, deployErr: dep.err, deployError: dep.error,
       url, http, cleanupOk: dep.ok ? Boolean(del?.ok) : true, cleanupSkipped: !dep.ok, worker: name,
     });
     checks.push(verdict.deploy, verdict.cleanup);
