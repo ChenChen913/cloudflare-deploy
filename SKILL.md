@@ -202,7 +202,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 | `spa` | BrowserRouter / history 路由的客户端 SPA | 200 + app shell | 适用，不要求 `404.html` |
 | `ssr` | 服务端渲染 / 全栈 | 通常 404；200 要确认不是 catch-all | **不适用**，脚本只报 `skip` |
 
-`detect-project.mjs` 会从源码识别 HashRouter / BrowserRouter / `createWebHashHistory` / `createWebHistory`：HashRouter 建议 `static`，history 路由建议 `spa`；未识别时会给出风险项。**不要手动把 HashRouter 套成 `spa`**：HashRouter 的未知路径本来就应该 404，套 `spa` 会误判并需要不必要的 fallback。`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 history 路由 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
+`detect-project.mjs` 会从源码识别 HashRouter / BrowserRouter / `createWebHashHistory` / `createWebHistory`：HashRouter 建议 `static`，history 路由建议 `spa`；**没有任何路由证据时 `suggestedMode=unknown`，要求人工确认，不默认推荐 spa**。`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 history 路由 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
 产物检查的补充规则：资源存在性按产物里的**真实文件名大小写敏感**匹配（Cloudflare 区分大小写，Windows 本地不区分；顶层 `index.html` / `404.html` / `_headers` 也按大小写严格判断）；`..` 逃逸判坏；以 `/` 开头的引用按产物根相对路径解析（存在即通过，不是逃逸），相对引用受 `<base href>` 影响；目录式 URL（`/about/`、`/about`）按 `about/index.html` 查找；产物里的 symlink/junction 会跟随并计入。 `check-build` 只核对显式参数 / 环境变量 / 项目依赖里的套餐证据，账号套餐和 Pages 项目设置仍需人工确认。
 

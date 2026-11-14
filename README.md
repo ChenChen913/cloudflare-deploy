@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：738/738 通过（`node tests/run-tests.mjs`）。
+- 本地测试：739/739 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -64,6 +64,9 @@ cloudflare-deploy/
 │   ├── deployment-report.md
 │   ├── wrangler.workers.jsonc
 │   └── wrangler.pages.toml
+├── deployment-notes/
+│   ├── hangla-2026-11-14.md  # 真实项目部署记录（Cloudflare Pages Direct Upload）
+│   └── assets/hangla-home.png # 部署后的实际页面截图
 └── tests/
 │   ├── run-tests.mjs
 │   ├── check-skill.mjs      # 结构自检：frontmatter、引用路径、绝对路径
@@ -74,6 +77,16 @@ cloudflare-deploy/
 │   ├── last-run.txt         # 最近一次测试输出（由测试自动生成）
 │   └── results.md
 ```
+
+## 真实部署记录
+
+`deployment-notes/` 只存放**真实项目部署记录**，与自动化测试记录、技能文档分开：
+
+- **真实部署记录**：[hangla 部署记录](deployment-notes/hangla-2026-11-14.md)（Cloudflare Pages Direct Upload；含实际 URL、验收结果、问题与后续完善）。
+- **自动化测试记录**：[tests/last-run.txt](tests/last-run.txt) 和 [tests/results.md](tests/results.md)（由本地测试生成/维护，不代表线上部署）。
+- **技能文档**：[SKILL.md](SKILL.md)、[references/](references/)（流程、模板和检查规则，部分规则引用 Cloudflare 官方文档，但本身不是部署验证）。
+
+目前只有 **hangla 的 Pages Direct Upload** 经过真实部署和 HTTP/浏览器冒烟；Git 集成、Workers、自定义域名/DNS、其他套餐/项目类型尚未在本仓库的记录中验证。不要把一次部署记录当成对所有 Cloudflare 部署方式的验证。
 
 ## 前提条件
 
@@ -135,7 +148,7 @@ node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--targ
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json [--retries 1]
 ```
 
-`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。`detect-project` 会识别 HashRouter（建议 static + 404.html）与 BrowserRouter/history 路由（spa + 显式 fallback）；不要给 HashRouter 套 spa。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/重置可重试。detail 会区分网络失败和 HTTP 断言失败。
+`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。`detect-project` 会识别 HashRouter（建议 static + 404.html）与 BrowserRouter/history 路由（spa + 显式 fallback）；**没有任何路由证据时返回 `unknown`，要求人工确认，不默认推荐 spa**。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`）……，HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/重置可重试。detail 会区分网络失败和 HTTP 断言失败。
 
 `check-build.mjs` 默认按 Free **20,000** 文件检查。Paid **100,000** 的启用条件按部署目标分流：`--target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`（Pages 专属变量）；`--target workers` 要完整版本 **Wrangler >= 4.34.0**（官方 Workers Limits），不需要 Pages 变量。版本按点分数字比较（`4.9.0 < 4.34.0`），`4.x` 等非法版本视为未确认；不传 `--target`、证据不足都退回 20,000 并给 `warn`，结果里写明目标、生效上限与原因。
 
@@ -172,12 +185,12 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 738 项，分层覆盖（core 294 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs        # 739 项，分层覆盖（core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 node tests/browser-diff.mjs     # 可选：用本机 Chrome/Edge 做真实解析器差分（Node 22+；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1）
 ```
 
-测试会创建 29 个合成项目（Vite SPA、Vite+HashRouter、Vite+BrowserRouter、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon、wrangler.jsonc、以及「注释噪声 / 只有 public/index.html / Nuxt ssr:false 与 generate / routeRules / node 启动参数」等配置识别夹具），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 12 个构建产物夹具（含伪资源引用、目录式 URL、`%2F`、srcset 逗号、跨源 base、超 40 条引用、大小写/符号链接），并用 16 台本地 HTTP 服务器 + 1 台本地 HTTPS 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、瞬时网络错误重试（与 HTTP 失败/超时区分）、独立 CORS 域、重复 canonical、SEO 决策提示、HTML 上下文隔离（注释/RAWTEXT/RCDATA/template/属性值/SVG/MathML/foreignObject）、`<base href>` 与重定向后的最终 URL、304 与少见 3xx、跨源资源引用不请求、500 错误页门控、301 假备用站、`--api` 的 JSON 结构与期望值比较。HTTPS 服务器用仓库自带的自签回环证书（`tests/fixtures/loopback-tls.mjs`，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启，不需要 openssl 或第三方包），让 canonical 协议矩阵能真的以 `https://` 站点执行。
+测试会创建 30 个合成项目（Vite SPA、Vite+HashRouter、Vite+BrowserRouter、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon、wrangler.jsonc、以及「注释噪声 / 只有 public/index.html / Nuxt ssr:false 与 generate / routeRules / node 启动参数」等配置识别夹具），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 12 个构建产物夹具（含伪资源引用、目录式 URL、`%2F`、srcset 逗号、跨源 base、超 40 条引用、大小写/符号链接），并用 16 台本地 HTTP 服务器 + 1 台本地 HTTPS 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、瞬时网络错误重试（与 HTTP 失败/超时区分）、独立 CORS 域、重复 canonical、SEO 决策提示、HTML 上下文隔离（注释/RAWTEXT/RCDATA/template/属性值/SVG/MathML/foreignObject）、`<base href>` 与重定向后的最终 URL、304 与少见 3xx、跨源资源引用不请求、500 错误页门控、301 假备用站、`--api` 的 JSON 结构与期望值比较。HTTPS 服务器用仓库自带的自签回环证书（`tests/fixtures/loopback-tls.mjs`，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启，不需要 openssl 或第三方包），让 canonical 协议矩阵能真的以 `https://` 站点执行。
 
 专项回归包括：HTML tokenizer 单元 / 对抗 / 随机组合（注释、bogus comment、CDATA、DOCTYPE、RAWTEXT/RCDATA/plaintext/template、属性值含 `>`、不完整标签、重复属性、字符引用、`<base href>`、可见文本）；**HTML5 状态机专项**：script data 的 escaped/double-escaped/`-->` 回 data/EOF、DOCTYPE 标识符里的 `>` 与 abrupt 结束、SVG/MathML 命名空间栈（嵌套 svg、foreignObject/desc/title、MathML 文本集成点、mglyph、breakout、CDATA、template 隔离、退出恢复、无状态泄漏）、`srcset` 的逗号/data URI/尾随逗号/畸形/重复 descriptor，以及四类问题的组合与 300 组确定性状态组合；**浏览器差分**：`tests/fixtures/html5-oracle.json` 记录 Chrome/Edge 真实 DOM facts 的 115 个用例（HTML 命名空间 canonical/title/script/img/base），默认套件直接对照，`browser-diff.mjs` 可在有浏览器时重新录制/校验；**CLI 与网络边界**：HashRouter/BrowserRouter 模式识别、`verify-deployment` 连接类瞬时错误重试（HTTP/超时不重试）、SEO canonical/meta 缺失 warn、Pages 缺 404 官方默认回退；canonical 上下文隔离矩阵（注释 / script / style / textarea / title / iframe / xmp / noembed / noframes / plaintext / template / 属性值 / 不完整标签 / 真实+伪标签组合）；元数据隔离（伪 title/meta 不算）；资源引用规则与伪引用（src/srcset/poster/object data/link href，导航链接与 canonical 排除，`<base href>`、跨源不请求、`ignored` 汇总）；套餐按目标分流与完整版本比较；CORS 预检矩阵；CORS 简单请求；主站重定向矩阵；资源重定向与汇总一致性；跳数边界；canonical 协议 / href 形态 / rel token 矩阵；`<base href>` 与重定向最终 URL 解析；3xx 状态分类矩阵；配置注释噪声；登录判定 fail-closed；SPA 回退 fail-closed 与 `/index.html` 5xx；check-build 大小写 / `..` / `%2F` / 目录式 URL / 40 条上限 / symlink 主模块守卫 / `<base>` 与 srcset；CLI 参数与模式矩阵；`--expect-json` 结构用例。跨源目标用另一台本地 HTTP 服务器记录收到的请求路径，用来证明脚本**没有跟随**，不访问真实内网地址或云厂商元数据地址。本地假 wrangler 覆盖登录态异常、`--deploy` 的无 URL / 清理失败 / 部署失败 / 跳转响应；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
 

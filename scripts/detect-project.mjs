@@ -423,7 +423,7 @@ if (dynamicConfig && (!viteBase || !viteOut)) risks.push("Vite 配置是动态�
 if (spaRouting === "hash") risks.push(`检测到 HashRouter/默认 hash 路由${routerDeps.length ? `（${routerDeps.join("、")}）` : ""}：部署验收建议用 --mode static 并提供 404.html；未知路径 404 对 hash 路由是正常行为。`);
 if (spaRouting === "history") risks.push(`检测到 history 路由（BrowserRouter/createBrowserRouter/createWebHistory）：Pages 需要 _redirects /* /index.html 200（或 Workers not_found_handling），否则刷新深链会 404；验收用 --mode spa。`);
 if (spaRouting === "mixed") risks.push("同时检测到 hash 与 history 路由特征；先确认实际 Router，再选择 static（hash）或带 fallback 的 spa（history），不要凭默认值部署。");
-if (spaRouting === "unknown" && kind === "spa") risks.push("未识别出客户端路由类型；若使用 HashRouter 用 --mode static，使用 BrowserRouter/history 用 --mode spa 并配置回退。");
+if (spaRouting === "unknown" && kind === "spa") risks.push("未识别出客户端路由类型，验收模式为 unknown：HashRouter 用 --mode static + 404.html，BrowserRouter/history 用 --mode spa + fallback；不要默认 spa。");
 if (spaRouting && kind !== "spa") risks.push(`检测到客户端路由依赖但项目类型按 ${kind} 识别（常见于 Vue CLI/Angular/webpack 等未被框架识别的构建）；请人工确认这是 SPA，并按 ${spaRouting} 选择验收模式。`);
 
 // 目标：只给候选。最终由 DNS、部署方式和未来后端需求决定。
@@ -486,7 +486,9 @@ const suggestedMode = (() => {
   if (spaRouting === "mixed") return "unknown";
   if (spaRouting === "hash") return "static";
   if (spaRouting === "history") return "spa";
-  if (kind === "spa") return "spa";
+  // kind=spa 只说明“构建产物像 SPA”，不证明路由类型；没有 hash/history 证据时
+  // 不能默认推荐 spa（否则 BrowserRouter 与 HashRouter 的验收结论会相反）。
+  if (kind === "spa") return "unknown";
   if (kind === "static") return SSG_FRAMEWORKS.has(framework) || framework === "nextjs" ? "ssg" : "static";
   return "unknown";
 })();
@@ -595,7 +597,9 @@ const result = {
     "先跑 scripts/probe.mjs：确认账号、权限、网络能通；blocked 就停下来，不要先改项目。",
     "执行任何部署命令前，再跑 scripts/check-env.mjs（它会用退出码表达可构建/可部署）。",
     "按 target.candidates 和 decideBy 里的问题确认 Pages 还是 Workers；SSR/全栈先读 references/runtime-compat.md。",
-    `本地构建后，用 scripts/check-build.mjs --mode ${suggestedMode === "unknown" ? "<static|spa|ssg|ssr>" : suggestedMode} 检查输出目录。`,
+    suggestedMode === "unknown"
+      ? "路由/验收模式未确认：先人工确认是 HashRouter（static + 404.html）还是 BrowserRouter/history（spa + fallback），不要默认选 spa；确认后再跑 check-build --mode <...>。"
+      : `本地构建后，用 scripts/check-build.mjs --mode ${suggestedMode} 检查输出目录。`,
     "按选定的目标读 references/deployment-workflows.md。",
   ],
 };
@@ -610,7 +614,8 @@ if (human) {
   console.log(`  包管理器   ${p.packageManager || "n/a"}${p.lockfiles.length > 1 ? `（${p.lockfiles.length} 个锁文件，需确认）` : ""}${p.nodeEngine ? `, node ${p.nodeEngine}` : ""}`);
   console.log(`  构建       ${p.buildCommand || "n/a"}`);
   console.log(`  输出目录   ${p.outputDir || "n/a"}（${result.evidence.outputDir.confidence}）`);
-  console.log(`  验收模式   ${p.suggestedMode}${p.spaRouting ? `（路由：${p.spaRouting}）` : ""}`);
+  console.log(`  验收模式   ${p.suggestedMode}${p.spaRouting ? `（路由：${p.spaRouting}）` : ""}${p.suggestedMode === "unknown" ? " — 需人工确认，不要默认 spa" : ""}`);
+  if (p.suggestedMode === "unknown") console.log("    待确认   路由/项目类型未确认：HashRouter 用 static + 404.html，BrowserRouter/history 用 spa + fallback；确认后再选 --mode。");
   console.log(`  目标       ${tLabel}`);
   t.basis.forEach((b) => console.log(`    依据     ${b}`));
   if (t.decideBy.length) console.log(`    待确认   ${t.decideBy.join("；")}`);

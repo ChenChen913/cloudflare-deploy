@@ -140,7 +140,7 @@ json("router-string-only/package.json", {
   dependencies: { react: "^19.0.0" }, devDependencies: { vite: "^6.0.0" },
 });
 w("router-string-only/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
-w("router-string-only/src/main.tsx", `const label = "HashRouter is only a string"; export default label;\n`);
+w("router-string-only/src/main.tsx", `// HashRouter is mentioned only in a comment\nconst label = "HashRouter is only a string"; export default label;\n`);
 json("router-mixed/package.json", {
   name: "router-mixed", scripts: { build: "vite build" },
   dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
@@ -160,6 +160,12 @@ json("router-bundle-leak/package.json", {
 w("router-bundle-leak/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
 w("router-bundle-leak/src/main.tsx", `import { HashRouter } from "react-router";\nexport const App = () => <HashRouter><div>real</div></HashRouter>;\n`);
 w("router-bundle-leak/dist-web/assets/app-old.js", `import { BrowserRouter } from "react-router";\nsetInterval(() => {}, 1000);\nconsole.log("old bundle only");\n`);
+json("router-both/package.json", {
+  name: "router-both", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-both/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+w("router-both/src/main.tsx", `import { HashRouter, BrowserRouter } from "react-router";\nexport const A = () => <HashRouter><div>a</div></HashRouter>;\nexport const B = () => <BrowserRouter><div>b</div></BrowserRouter>;\n`);
 
 json("jekyll/package.json", { name: "jekyll-fixture" });
 w("jekyll/_config.yml", `title: Fixture\nurl: https://www.example.com\n`);
@@ -283,6 +289,7 @@ const routerStringOnly = detect(path.join(work, "router-string-only"));
 const routerMixed = detect(path.join(work, "router-mixed"));
 const routerVue3History = detect(path.join(work, "router-vue3-history"));
 const routerBundleLeak = detect(path.join(work, "router-bundle-leak"));
+const routerBoth = detect(path.join(work, "router-both"));
 assert("路由识别不依赖 kind=spa：Vue/webpack 风格 history 项目仍建议 spa",
   (routerHistoryTool.project.kind === "static" || routerHistoryTool.project.kind === "unknown")
     && routerHistoryTool.project.spaRouting === "history" && routerHistoryTool.project.suggestedMode === "spa",
@@ -290,10 +297,13 @@ assert("路由识别不依赖 kind=spa：Vue/webpack 风格 history 项目仍建
 assert("Vue Router 3 默认 hash：无显式 history 时按 hash/static 建议",
   routerVue3Hash.project.spaRouting === "hash" && routerVue3Hash.project.suggestedMode === "static",
   JSON.stringify({ routing: routerVue3Hash.project.spaRouting, mode: routerVue3Hash.project.suggestedMode }));
-assert("路由识别覆盖深层源码，且字符串字面量不误报",
+assert("路由识别覆盖深层源码，且字符串/注释不误报",
   routerDeepHash.project.spaRouting === "hash" && routerDeepHash.project.suggestedMode === "static"
-    && routerStringOnly.project.spaRouting === "unknown" && routerStringOnly.project.suggestedMode === "spa",
+    && routerStringOnly.project.spaRouting === "unknown" && routerStringOnly.project.suggestedMode === "unknown",
   JSON.stringify({ deep: routerDeepHash.project.spaRouting, string: routerStringOnly.project.spaRouting, mode: routerStringOnly.project.suggestedMode }));
+assert("同时检测到真实 HashRouter 与 BrowserRouter → mixed/unknown",
+  routerBoth.project.spaRouting === "mixed" && routerBoth.project.suggestedMode === "unknown",
+  JSON.stringify({ routing: routerBoth.project.spaRouting, mode: routerBoth.project.suggestedMode }));
 assert("mixed 字符串噪声不改变真实 HashRouter 判定",
   routerMixed.project.spaRouting === "hash" && routerMixed.project.suggestedMode === "static",
   JSON.stringify({ routing: routerMixed.project.spaRouting, mode: routerMixed.project.suggestedMode, risks: routerMixed.risks }));
@@ -334,8 +344,9 @@ const orm = detect(path.join(work, "orm"));
 assert("ORM：运行时依赖只标注待核对", orm.risks.some((r) => /运行时依赖需要核对/.test(r) && /prisma|drizzle/i.test(r)), orm.risks.join(" | "));
 assert("ORM：Neon HTTP 交互式事务风险", orm.risks.some((r) => /交互式事务/.test(r)), orm.risks.join(" | "));
 assert("ORM：不把待核对说成不可行", !orm.risks.some((r) => /无法部署|不支持部署/.test(r)));
-assert("验收模式：Vite→spa / Jekyll→ssg / Next→ssr / ORM→ssr",
-  vite.project.suggestedMode === "spa" && jekyll.project.suggestedMode === "ssg" && next.project.suggestedMode === "ssr" && orm.project.suggestedMode === "ssr",
+assert("验收模式：Vite→unknown（无路由证据）/ Jekyll→ssg / Next→ssr / ORM→ssr",
+  vite.project.suggestedMode === "unknown" && jekyll.project.suggestedMode === "ssg" && next.project.suggestedMode === "ssr" && orm.project.suggestedMode === "ssr"
+    && vite.risks.some((r) => /不要默认 spa/.test(r)) && vite.nextSteps.some((s) => /人工确认/.test(s)),
   `${vite.project.suggestedMode}/${jekyll.project.suggestedMode}/${next.project.suggestedMode}/${orm.project.suggestedMode}`);
 assert("重依赖：原生 SQLite 单独提示", heavy.risks.some((r) => /原生 SQLite/.test(r)), heavy.risks.join(" | "));
 

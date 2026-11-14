@@ -17,7 +17,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 738 项，分层覆盖 core 294 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 739 项，分层覆盖 core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -36,7 +36,7 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     738/738 通过（分层：core 294 / adversarial 276 / boundary 43 / combination 5 / unit 120）
+node tests/run-tests.mjs     739/739 通过（分层：core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120）
 node tests/check-skill.mjs   通过（SKILL.md 335 行，引用路径 32 个，无绝对路径）
 node tests/browser-diff.mjs  115/115 一致（可选开发期：本机 Chrome 157 与本机 Edge 157 分别跑过；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1，180s 超时退出码 3）
 quick_validate.py            Skill is valid!（本机一次性结果；脚本在仓库外，见上文可复现性说明）
@@ -48,7 +48,7 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 
 | # | 合成项目 | 识别结果（实际） | 目标输出 | 验证点 |
 |---|---|---|---|---|
-| 1 | Vite + React SPA，`base: /repo/`，已有 Pages workflow | `vite/spa`，`dist`，`base=/repo/` | `candidates=[pages,workers]`，`suggested=null` | 不再凭框架直接定 Pages；输出目录标 `confirmed` |
+| 1 | Vite + React SPA，`base: /repo/`，已有 Pages workflow | `vite/spa`，`dist`，`base=/repo/`；无路由证据时 `spaRouting=unknown` | `candidates=[pages,workers]`，`suggested=null`，`suggestedMode=unknown` | 不再凭框架直接定 Pages，也不默认推荐 spa；要求人工确认路由 |
 | 2 | Jekyll 博客，`CNAME=www.example.com` | `jekyll/static`，`_site` | 两者皆可 | 双构建场景仍给候选 |
 | 3 | Vite + Supabase，`.env.example` | `vite/spa`，键名识别，无 CF 后端 | 两者皆可 | 不假设要迁后端 |
 | 4 | Hono + `wrangler.toml`（`main` + `assets` + D1） | `hono/api`，`./public` | `workers`，`confidence=high` | 依据写进 `target.basis` |
@@ -73,10 +73,11 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 | 23 | Vue/webpack 风格 history（HTML 在 public/，无根 index） | `static`，`spaRouting=history` | `suggestedMode=spa` | 路由识别不能只看 kind=spa |
 | 24 | Vue Router 3 默认 hash | `static-html`，`spaRouting=hash` | `suggestedMode=static` | 无显式 history 时按 Vue Router 3 默认 hash |
 | 25 | HashRouter 在深层 `src/pages/...` | `spaRouting=hash` | `suggestedMode=static` | 路由扫描深度覆盖嵌套源码 |
-| 26 | 字符串里只出现 "HashRouter" | `spaRouting=unknown` | `suggestedMode=spa`（保留旧默认 + 风险提示） | 字符串字面量不误报 |
+| 26 | 字符串/注释里只出现 "HashRouter" | `spaRouting=unknown` | `suggestedMode=unknown`（要求人工确认） | 字符串字面量和注释不产生确定性推荐 |
 | 27 | 真实 HashRouter + 字符串里的 BrowserRouter | `spaRouting=hash` | `suggestedMode=static` | 字符串噪声不推翻真实路由 |
 | 28 | Vue Router 3 显式 `mode:"history"` | `spaRouting=history` | `suggestedMode=spa` | 显式 history 不被 Vue3 默认 hash 覆盖 |
 | 29 | 源码 HashRouter + `dist-web/` 里陈旧 BrowserRouter/长驻代码 | `spaRouting=hash` | `suggestedMode=static` | 构建产物目录不进入源码路由/长驻扫描 |
+| 30 | 同时存在真实 HashRouter 与 BrowserRouter | `spaRouting=mixed` | `suggestedMode=unknown` | 证据冲突时不给确定性模式，要求人工确认 |
 
 ### 构建产物
 
@@ -316,7 +317,7 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 58. **集成点 HTML 结束规则/外域 template/隐式 p 关闭（独立审查发现并修复）。** (a) `applyHtmlEndRule` 之前边扫边弹，遇到 special 元素时已破坏 HTML 子栈，导致 `</strong>`、`</span>` 等错误结束标签把未闭合 HTML 子元素弹掉，`</foreignObject>` 被误当外域命中；改为非破坏性查找，只有命中同名 HTML 元素才截断栈，special 不匹配直接忽略。(b) 外域元素 `<template>` 的 `</template>` 误触发 HTML template 隔离栈恢复；删除 matched 分支里的 template 处理，HTML template 只由专门分支关闭。(c) 新增 `textVisibleNow()`，避免外域/不渲染集成点里的 `<` 进入可见文本。(d) 用最小 `P_CLOSING_START_TAGS` 近似浏览器隐式关闭 `<p>`，修复 `<p><div>` 后 `</foreignObject>` 被吞导致的 canonical/资源误报（仍不做完整树构建）。I1-I7 oracle（Chrome+Edge）锁定。
 59. **外域结束标签回退的 scope 边界与「被浏览器丢弃的开始标签」（独立审查发现并修复）。** (a) `popHtmlAncestor` 用 `lastIndexOf` 跨过 table/object/marquee/applet/select/caption/td 等 scope 边界找同名 HTML 祖先，导致 `<div><table><svg></div><link ...>` 把浏览器中的 SVG link 误判为 HTML canonical；改为复用非破坏性 HTML 结束规则，碰 special/scope 边界即停止。(b) 浏览器在 body 上下文会丢弃的 `tr/td/th/thead/tbody/tfoot/caption/colgroup/html/head/body/frame/basefont/bgsound` 曾被压进 HTML 祖先栈，挡住 `</foreignObject>`，产生假 canonical/资源；现统一不追踪。(c) select 插入模式做最小近似：嵌套 select 关闭旧 select 并忽略 token，input/keygen/textarea 关闭 select 后继续处理，其余标签在 select 内大多忽略。(d) 可见文本修正：隐藏集成点内 xmp/textarea/plaintext 不计入，foreignObject 内 CDATA 计入。J1-J6 oracle（Chrome+Edge）锁定。仍不做完整 table/select/格式化元素建树。
 60. **probe.mjs 的 `--timeout` 只做 `Number()` 转换，缺少严格校验。** 空值/非数字会变成 `NaN`，负数/0/小数会进入 `setTimeout`/`AbortSignal.timeout`，超范围值会被 Node 截断或抛 `RangeError`；参数错误还可能先发起网络请求，被误读成网络连接失败。现在在 argv 解析后、任何 fetch/wrangler 调用前校验：只接受 1..2147483647 的有限正整数；非法值输出中文用法错误并以退出码 2 结束，不输出半截 JSON。默认 15000 和合法值行为不变。测试覆盖不传 `--timeout`、合法正整数、`abc`、`-1`、`0`、`1.5`、`2147483648`、缺值、空字符串；用 fake wrangler 的调用日志确认非法参数没有进入 wrangler/部署阶段，并断言耗时短、stderr 不含网络失败措辞。
-61. **按真实部署记录补齐的可用性与证据缺口。** (a) `detect-project` 新增 `spaRouting`（hash/history/unknown/mixed），HashRouter 建议 `static` + 404.html，history 路由建议 `spa` + 显式 fallback；避免 hash SPA 被误套 spa 后 404 结论相反。(b) `verify-deployment` 对连接类瞬时错误默认重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS、单次超时不重试；失败项带 `attempts`/`errorKind`，detail 区分网络失败与 HTTP 断言失败。(c) 首页没有 canonical/meta robots/X-Robots-Tag 时新增 `seo` warn，不改退出码；报告模板要求 Cloudflare 与 GitHub Pages 并存时明确 self-canonical 或 noindex。(d) Pages 缺顶层 404.html 的说明补充官方文档依据，并明确“实际回退通常 200、官方未写状态码、缺失静态资源也会回退 HTML”。(e) 文档补充：`canBuild=true` 不验证项目 build、TS 祖先 @types 污染、Wrangler Source commit 取 cwd、Pages 项目名不等于 `*.pages.dev`、浏览器冒烟必须单独做。测试新增 HashRouter/BrowserRouter/Vue/深层/字符串/mixed 路由识别、重试 7 例、SEO 2 例，共 738 项。
+61. **按真实部署记录补齐的可用性与证据缺口。** (a) `detect-project` 新增 `spaRouting`（hash/history/unknown/mixed），HashRouter 建议 `static` + 404.html，history 路由建议 `spa` + 显式 fallback；**没有路由证据时 `suggestedMode=unknown`，nextSteps/human/risk 都要求人工确认，不默认 spa**；mixed 同样返回 unknown。避免 hash SPA 被误套 spa 后 404 结论相反。(b) `verify-deployment` 对连接类瞬时错误默认重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误、脚本自身单次超时不重试；失败项带 `attempts`/`errorKind`，detail 区分网络失败与 HTTP 断言失败。(c) 首页没有 canonical/meta robots/X-Robots-Tag 时新增 `seo` warn，不改退出码；报告模板要求 Cloudflare 与 GitHub Pages 并存时明确 self-canonical 或 noindex。(d) Pages 缺顶层 404.html 的说明补充官方文档依据，并明确“实际回退通常 200、官方未写状态码、缺失静态资源也会回退 HTML”。(e) 文档补充：`canBuild=true` 不验证项目 build、TS 祖先 @types 污染、Wrangler Source commit 取 cwd、Pages 项目名不等于 `*.pages.dev`、浏览器冒烟必须单独做。测试新增 HashRouter/BrowserRouter/Vue/深层/字符串/mixed 路由识别、重试 7 例、SEO 2 例，共 739 项。
 
 ## CLI / JSON 兼容性
 
