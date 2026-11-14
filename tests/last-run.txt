@@ -1,0 +1,25 @@
+通过  Vite：框架/类型 — vite/spa
+通过  Vite：输出目录 + base — dist, /repo/
+通过  Vite：识别 GitHub Pages
+通过  Vite：推荐 Pages — pages
+通过  Jekyll：框架/静态 — jekyll/static
+通过  Jekyll：_site + CNAME — _site, www.example.com
+通过  Jekyll：构建命令 — bundle exec jekyll build
+通过  Supabase：SPA + 外部后端
+通过  Supabase：环境变量键名 — VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY
+通过  Supabase：不假设 Cloudflare 后端 — pages
+通过  Hono：API + Workers — hono/workers
+通过  Hono：D1 绑定 + 资源目录
+通过  重依赖：标记为 assess — assess
+通过  重依赖：原生依赖风险 — 以下原生/重依赖可能无法在 Workers 上运行： sharp, puppeteer, better-sqlite3. | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
+通过  重依赖：fs + 长驻进程风险
+通过  Next：SSR -> Workers — ssr/workers
+通过  Next：静态资源风险
+通过  产物：通过但有警告 — 警告=1
+通过  产物：发现坏资源
+通过  产物：缺 404 被标记 — Pages 会当成 SPA
+通过  验收：正常路径通过 — 失败=0
+通过  验收：canonical + 404 + 资源
+通过  验收：拒绝 301 备用站 — 备用站跳到主站
+
+23/23 通过

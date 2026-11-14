@@ -1,0 +1,7 @@
+# Pages 项目配置。只有用 Wrangler 部署 Pages、或想记录输出目录时，
+# 才复制到仓库根目录并改名为 wrangler.toml。
+# Direct Upload 仍然需要：npx wrangler pages deploy <目录> --project-name <项目名>
+
+name = "替换成项目名"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-11-14"
