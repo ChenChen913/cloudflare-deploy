@@ -110,7 +110,7 @@ node "<技能目录>/scripts/probe.mjs"
 - 退出码 `0` = ready；`1` = limited（先读 warn，判断缺口是否影响本次目标）；`2` = blocked（**硬停**）。
 - blocked 时不要改配置、装适配器或跑构建。给出具体下一步（`npx wrangler login`，或 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`）；**不要让用户在聊天里粘贴 Token**。
 - `npx wrangler deploy --temporary` 只在未登录时可用，用的是临时账号，**不能验证用户的账号、权限或套餐**，且会过期；它只能证明网络可达。
-- `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。没有账号时不要声称已验证部署链路。
+- `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。**部署命令成功不等于线上验证成功**：必须解析到 URL 并真实请求通过才判 `pass`；没 URL 或 URL 不可访问只会得到 `warn` / `fail`，清理失败也会单独记 `warn`。没有账号时不要声称已验证部署链路。
 
 接着用 10 分钟做**可行性判定**（只查文档，不写代码）：框架有没有适配器且版本匹配？ORM / 驱动能否跑在 workerd（WASM、原生模块、Node API）？体积和套餐够不够？产出「可行 / 不可行 + 依据」。三问、已知不可行组合、现行额度与成本表见 `references/runtime-compat.md`。
 
@@ -187,7 +187,7 @@ node "<技能目录>/scripts/check-env.mjs"
 用项目自己的构建命令，然后检查产物：
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg|ssr>"
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg|ssr>" [--plan free|paid]
 ```
 
 **先定站点模式，再构建检查，最后用同一个模式验收。** 中间换模式，前面的结论就作废：
@@ -201,7 +201,9 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 
 `--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
-部署前修掉阻断项（输出目录不存在、文件数 > 20,000、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。构建失败按第 0 步的止损线处理，不要原样重试。
+**文件数按套餐判定**：默认 Free **20,000**；只有显式 `--plan paid`，且同时确认 Wrangler v4 与 `PAGES_WRANGLER_MAJOR_VERSION=4`，才按 Paid **100,000** 检查。证据不足不会放宽——自动退回 20,000 并给 `warn`，检查结果里写明生效上限和原因。可用 `--wrangler-version 4` / `--pages-wrangler-major 4` 显式提供，或从 CI 环境变量与项目 `package.json` 读取；控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。详见 `references/platform-selection.md`。
+
+部署前修掉阻断项（输出目录不存在、文件数超过**当前生效上限**、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。构建失败按第 0 步的止损线处理，不要原样重试。
 
 ### 5. 部署
 
@@ -229,7 +231,7 @@ npx wrangler deploy
 node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**，对应检查会列进 `notChecked`。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
 
 `--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
 
@@ -237,9 +239,9 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
 - `ssr`：未知路径通常 404；返回 200 只给警告，须人工确认是自定义 404 还是 catch-all。额外检查首页服务端渲染的可见文本长度与单次 TTFB——**单次采样不是性能结论**。
 
-脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS、备用站独立性，以及 `--api` 接口的状态 / JSON / 期望内容。
+脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。
 
-**HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。
+**HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON 且（给了 `--expect-json` 时）符合期望的 JSON 子集；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。CORS 预检 `notChecked` 里的项同样要写成「未验证」，不要写成「已通过」。
 
 同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
@@ -298,7 +300,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 模板：`templates/deployment-plan.md`、`templates/deployment-report.md`、`templates/wrangler.workers.jsonc`、`templates/wrangler.pages.toml`。
 
-脚本：`scripts/probe.mjs`（链路探针）、`detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
+脚本：`scripts/probe.mjs`（链路探针）、`deploy-verdict.mjs`（探针 `--deploy` 的可测判定逻辑）、`detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
 
 ## 八、输出要求
 

@@ -60,7 +60,7 @@
 {{npm run build}}
 
 # 产物检查
-node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{static|ssg|spa|ssr}}"
+node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{static|ssg|spa|ssr}}" [--plan free|paid]
 
 # 部署（先预览）
 {{npx wrangler pages deploy ... | npx wrangler deploy}}
@@ -84,6 +84,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 - [ ] SPA 深链 + 刷新（如果是 SPA）
 - [ ] `_headers` / `_redirects` 生效（如果用了）
 - [ ] API / CORS / 登录（如果涉及）
+- [ ] CORS 预检：ACAO、Allow-Methods、Allow-Headers、凭据（只按显式提供的 `--cors-*` 断言，未检查项写「未验证」）
+- [ ] 文件数在当前套餐生效上限内（Free 20,000 / Paid 100,000 + 证据），单文件 ≤ 25 MiB
 - [ ] 数据库读写（如果涉及，且已获批准）
 - [ ] 备用站 200 且不跳主站（如果保留）
 - [ ] canonical / noindex 正确（如果公开）

@@ -23,6 +23,8 @@ npx wrangler whoami
 
 输出会显示账号邮箱和账号 ID。未登录时以非零状态退出。
 
+`whoami --json` 是官方文档化的 flag（Wrangler → General commands：`--json`，官方原文：“Return user information as JSON. Exits with a non-zero status if not authenticated.”）；`wrangler auth token --json` 同样是官方命令。本技能的 `probe.mjs` 仍以**纯文本 whoami** 做基本登录判定：不依赖 JSON 字段结构，跨 Wrangler 版本更稳；`--json` 只作可选增强，旧版本不支持或调用失败都不影响「已登录」结论。官方页面：https://developers.cloudflare.com/workers/wrangler/commands/general/
+
 ## 2. 登录方式：三选一
 
 | 场景 | 命令 | 说明 |

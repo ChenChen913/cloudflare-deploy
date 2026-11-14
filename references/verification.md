@@ -65,9 +65,23 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
   --api /api/items --json
 ```
 
-`--api` 可重复传；每个接口检查 2xx、`Content-Type` 是否为 JSON，以及（给了 `--expect-json` 时）响应里是否含期望片段。没给 `--api` 却给了 `--expect-json` 会报 `warn`。
+`--api` 可重复传；每个接口检查 2xx、`Content-Type` 是否为 JSON，以及（给了 `--expect-json` 时）把预期值和响应体都解析成 JSON 做**子集比较**——字段顺序与格式化空格不影响结论，字段缺失、值不匹配、无效 JSON、非 JSON 响应都会给出具体原因。旧版的「字符串包含」判断已废弃；现在 `--expect-json` 必须是一段合法 JSON。没给 `--api` 却给了 `--expect-json` 会报 `warn`。
 
 `--mode ssr` 下：未知路径 404 判通过，返回 200 只给 `warn`（要确认是自定义 404 还是 catch-all）；另外检查首页服务端渲染的可见文本长度（空壳会 `warn`）和单次 TTFB。**单次 TTFB 不是性能结论**，冷启动会污染它。
+
+CORS 预检要把「实际请求」说清楚，只填你确实会用的项：
+
+```bash
+node "<技能目录>/scripts/verify-deployment.mjs" \
+  --url "https://site.example.com" --mode "static" \
+  --origin "https://app.example.com" \
+  --cors-url "https://api.example.com/items" \
+  --cors-method POST \
+  --cors-headers "content-type,authorization" \
+  --cors-credentials --json
+```
+
+`OPTIONS` 返回 200/204 **不等于** CORS 通过。脚本始终检查 `ACAO` 是否匹配请求 Origin；`Allow-Methods`、`Allow-Headers`、`Allow-Credentials` 只在你显式提供对应参数时才断言。没提供的检查会写进结果的 `notChecked`，报告里必须写「未验证」，不能合并成「CORS 正常」。
 
 **HTTP 验收不是全栈验收。** 这条命令只证明页面和指定接口能返回；数据库写入、登录会话、第三方回调、真实 Secrets、冷启动仍要人工或专项验证，没测就在报告里写「未验证」。
 
@@ -185,6 +199,8 @@ curl -s -o /dev/null -D - -X OPTIONS \
 - 带 Cookie 时 `ACAO` 不能是 `*`，且需要 `Access-Control-Allow-Credentials: true`。
 - 出现多个 `ACAO` 值（逗号连接）时浏览器判为无效。
 - 缺 `Vary: Origin` 时，CDN 可能把给 A 站的响应缓存给 B 站。
+- 预检还要看 `Access-Control-Allow-Methods` 是否含实际请求方法、`Access-Control-Allow-Headers` 是否含实际请求头；`OPTIONS` 的 2xx 只是必要条件。
+- 用 `verify-deployment.mjs` 时，「实际方法 / 请求头 / 凭据」必须由 `--cors-method` / `--cors-headers` / `--cors-credentials` 显式提供。没提供就只检查 ACAO 和状态码，结果里的 `notChecked` 会写明哪些没执行——不要替用户推断。
 
 ### DNS
 

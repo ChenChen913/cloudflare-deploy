@@ -13,6 +13,8 @@ import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolvePlan, evaluateFileCount } from "../scripts/check-build.mjs";
+import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -231,6 +233,47 @@ const ssrBuild = spawnSync(process.execPath, [path.join(root, "scripts/check-bui
 const ssrBuildJ = JSON.parse(ssrBuild.stdout);
 assert("产物：ssr 不需要 --dir 且明确跳过", ssrBuild.status === 0 && ssrBuildJ.mode === "ssr" && ssrBuildJ.checks.some((c) => c.id === "mode-ssr" && c.status === "skip"), `exit=${ssrBuild.status}`);
 
+// ---------------------------------------------------------------- 套餐 / 文件数上限
+// 用纯函数测边界，不真造 20,001 个文件（本机写 2 万个小文件要 15s+，删也要 17s）。
+const freePlan = resolvePlan("free");
+assert("套餐：默认按 Free 20,000", freePlan.planInfo.limit === 20000 && freePlan.planInfo.effective === "free" && /默认 Free/.test(freePlan.limitReason));
+const paidNoEvidence = resolvePlan("paid", { wranglerMajor: null, pagesMajor: "" });
+assert("套餐：声明 paid 但无证据不放宽", paidNoEvidence.planInfo.limit === 20000 && paidNoEvidence.planInfo.missing.length === 2);
+const paidV3 = resolvePlan("paid", { wranglerMajor: 3, pagesMajor: "4" });
+assert("套餐：Wrangler v3 不放宽", paidV3.planInfo.effective === "free" && paidV3.planInfo.missing.some((s) => /Wrangler/.test(s)));
+const paidNoEnv = resolvePlan("paid", { wranglerMajor: 4, pagesMajor: "" });
+assert("套餐：缺 PAGES_WRANGLER_MAJOR_VERSION=4 不放宽", paidNoEnv.planInfo.effective === "free" && paidNoEnv.planInfo.missing.some((s) => /PAGES_WRANGLER/.test(s)));
+const paidOk = resolvePlan("paid", { wranglerMajor: 4, pagesMajor: "4" });
+assert("套餐：证据齐全才按 100,000", paidOk.planInfo.limit === 100000 && paidOk.planInfo.effective === "paid" && paidOk.planInfo.basis.length === 2);
+assert("套餐：非法值返回 null", resolvePlan("enterprise") === null);
+const overFree = evaluateFileCount(20001, freePlan.planInfo, freePlan.limitReason);
+assert("文件数：20,001 在 Free 判失败并写明上限与原因", overFree.status === "fail" && /20,000/.test(overFree.detail) && /默认 Free/.test(overFree.reason), overFree.detail);
+const underPaid = evaluateFileCount(20001, paidOk.planInfo, paidOk.limitReason);
+assert("文件数：20,001 在证据齐全的 Paid 判通过", underPaid.status === "pass" && underPaid.limit === 100000);
+const overPaid = evaluateFileCount(100001, paidOk.planInfo, paidOk.limitReason);
+assert("文件数：100,001 在 Paid 也判失败", overPaid.status === "fail" && /100,000/.test(overPaid.detail));
+
+const cb = (args, dir = art, env = {}) => {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, ...args, "--json"], {
+    encoding: "utf8", env: { ...process.env, PAGES_WRANGLER_MAJOR_VERSION: "", CF_DEPLOY_WRANGLER_VERSION: "", ...env },
+  });
+  return { code: r.status, json: JSON.parse(r.stdout || "{}") };
+};
+const cbDefault = cb([]);
+assert("构建 CLI：默认 free 且上限写进结果", cbDefault.json.plan?.effective === "free" && cbDefault.json.plan?.limit === 20000 && cbDefault.json.summary?.fileLimit === 20000 && /20,000/.test(cbDefault.json.checks.find((c) => c.id === "file-count").detail));
+const cbPaidNo = cb(["--plan", "paid"]);
+assert("构建 CLI：声明 paid 但证据不足仍按 20,000", cbPaidNo.json.plan?.effective === "free" && cbPaidNo.json.checks.some((c) => c.id === "plan" && c.status === "warn") && cbPaidNo.json.checks.find((c) => c.id === "file-count").limit === 20000, JSON.stringify(cbPaidNo.json.plan));
+const cbPaidOk = cb(["--plan", "paid", "--wrangler-version", "4", "--pages-wrangler-major", "4"]);
+assert("构建 CLI：显式证据齐全按 100,000", cbPaidOk.json.plan?.effective === "paid" && cbPaidOk.json.plan?.limit === 100000 && cbPaidOk.json.checks.some((c) => c.id === "plan" && c.status === "pass"));
+const cbBadPlan = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", art, "--plan", "enterprise"], { encoding: "utf8" });
+assert("构建 CLI：非法套餐退出码 2", cbBadPlan.status === 2);
+w("wrangler4/package.json", JSON.stringify({ name: "wrangler4", devDependencies: { wrangler: "^4.3.0" } }));
+w("wrangler4/dist/index.html", `<html><body>ok</body></html>`);
+const cbAuto = cb(["--plan", "paid", "--pages-wrangler-major", "4"], path.join(work, "wrangler4", "dist"));
+assert("构建 CLI：从项目 package.json 读到 Wrangler v4", cbAuto.json.plan?.effective === "paid" && cbAuto.json.plan?.basis.some((s) => /Wrangler v4/.test(s)), JSON.stringify(cbAuto.json.plan));
+const cbEnv = cb(["--plan", "paid"], art, { PAGES_WRANGLER_MAJOR_VERSION: "4", CF_DEPLOY_WRANGLER_VERSION: "4.1.0" });
+assert("构建 CLI：CI 环境变量也能作为证据", cbEnv.json.plan?.effective === "paid", JSON.stringify(cbEnv.json.plan));
+
 // ---------------------------------------------------------------- 验收（真实 HTTP）
 let staticBase = "";
 const staticServer = http.createServer((req, res) => {
@@ -311,6 +354,11 @@ const ssrServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
   if (p === "/api/health") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"ok":true}`); return; }
   if (p === "/api/broken") { res.writeHead(200, { "content-type": "text/plain" }); res.end("not json"); return; }
+  if (p === "/api/reordered") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{ "version": "1.0", "ok": true, "nested": { "b": [1, 2], "a": 1 } }`); return; }
+  if (p === "/api/missing") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"version":"1.0"}`); return; }
+  if (p === "/api/wrongtype") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"ok":"true"}`); return; }
+  if (p === "/api/array") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"items":[{"id":1},{"id":2}],"ok":true}`); return; }
+  if (p === "/api/badjson") { res.writeHead(200, { "content-type": "application/json" }); res.end(`{"ok":`); return; }
   if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
   if (p === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", server: "local-ssr" });
@@ -318,6 +366,29 @@ const ssrServer = http.createServer((req, res) => {
     return;
   }
   res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
+});
+
+// CORS 矩阵：按路径返回不同的预检响应，覆盖允许/拒绝 Origin、缺方法、缺头、凭据错误。
+const corsMatrixServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  const h = {
+    "access-control-allow-origin": req.headers.origin || "",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type,authorization",
+    "access-control-allow-credentials": "true",
+    vary: "Origin",
+  };
+  if (p === "/deny") h["access-control-allow-origin"] = "https://other.example";
+  if (p === "/missing-method") h["access-control-allow-methods"] = "GET,OPTIONS";
+  if (p === "/no-method") delete h["access-control-allow-methods"];
+  if (p === "/missing-header") h["access-control-allow-headers"] = "content-type";
+  if (p === "/no-header") delete h["access-control-allow-headers"];
+  if (p === "/no-cred") delete h["access-control-allow-credentials"];
+  if (p === "/wildcard-cred") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
+  if (p === "/no-acao") delete h["access-control-allow-origin"];
+  if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
+  res.writeHead(200, { "content-type": "text/html", ...h });
+  res.end(`<!doctype html><html><head><title>cors</title></head><body>ok</body></html>`);
 });
 
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
@@ -337,7 +408,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -348,6 +419,7 @@ const badCorsUrl = `http://127.0.0.1:${badCorsServer.address().port}`;
 const dupUrl = `http://127.0.0.1:${dupCanonicalServer.address().port}`;
 const backupUrl = `http://127.0.0.1:${backupServer.address().port}/`;
 const ssrUrl = `http://127.0.0.1:${ssrServer.address().port}`;
+const corsMatrixUrl = `http://127.0.0.1:${corsMatrixServer.address().port}`;
 
 const v1 = await runVerify(["--url", staticBase, "--mode", "static", "--json"]);
 const v1j = JSON.parse(v1.out);
@@ -395,6 +467,37 @@ const v6b = await runVerify(["--url", badCorsUrl, "--mode", "static", "--origin"
 const v6bJ = JSON.parse(v6b.out);
 assert("验收：ACAO 与请求来源不匹配判失败", v6b.code === 1 && v6bJ.checks.some((c) => c.id === "cors" && c.status === "fail"), "浏览器会拒绝");
 
+// ---------------------------------------------------------------- CORS 预检矩阵
+const corsCase = async (p, extra = []) => {
+  const r = await runVerify([
+    "--url", staticBase, "--mode", "static", "--origin", "https://app.example.com",
+    "--cors-url", `${corsMatrixUrl}${p}`, ...extra, "--json",
+  ]);
+  const j = JSON.parse(r.out);
+  return { code: r.code, pre: j.checks.find((c) => c.id === "cors-preflight"), result: j };
+};
+const full = ["--cors-method", "POST", "--cors-headers", "content-type,authorization", "--cors-credentials"];
+const cOk = await corsCase("/ok", full);
+assert("预检：允许 Origin + 方法/头/凭据齐全判通过", cOk.pre?.status === "pass" && cOk.pre.notChecked.length === 0 && cOk.pre.checked.includes("Allow-Methods"), JSON.stringify(cOk.pre?.issues));
+const cDeny = await corsCase("/deny", full);
+assert("预检：拒绝 Origin 判失败", cDeny.pre?.status === "fail" && cDeny.pre.issues.some((s) => /不匹配/.test(s)), JSON.stringify(cDeny.pre?.issues));
+const cMethod1 = await corsCase("/missing-method", ["--cors-method", "POST"]);
+assert("预检：Allow-Methods 缺实际方法判失败", cMethod1.pre?.status === "fail" && cMethod1.pre.issues.some((s) => /不含实际请求方法/.test(s)), JSON.stringify(cMethod1.pre?.issues));
+const cMethod2 = await corsCase("/no-method", ["--cors-method", "POST"]);
+assert("预检：缺 Allow-Methods 头判失败", cMethod2.pre?.status === "fail" && cMethod2.pre.issues.some((s) => /缺少 Access-Control-Allow-Methods/.test(s)));
+const cHeader1 = await corsCase("/missing-header", ["--cors-headers", "content-type,authorization"]);
+assert("预检：Allow-Headers 缺实际请求头判失败", cHeader1.pre?.status === "fail" && cHeader1.pre.issues.some((s) => /不含实际请求头/.test(s)), JSON.stringify(cHeader1.pre?.issues));
+const cHeader2 = await corsCase("/no-header", ["--cors-headers", "content-type,authorization"]);
+assert("预检：缺 Allow-Headers 头判失败", cHeader2.pre?.status === "fail" && cHeader2.pre.issues.some((s) => /缺少 Access-Control-Allow-Headers/.test(s)));
+const cCred1 = await corsCase("/no-cred", ["--cors-credentials"]);
+assert("预检：带凭据但缺 ACAC 判失败", cCred1.pre?.status === "fail" && cCred1.pre.issues.some((s) => /Allow-Credentials/.test(s)));
+const cCred2 = await corsCase("/wildcard-cred", ["--cors-credentials"]);
+assert("预检：带凭据但 ACAO=* 判失败", cCred2.pre?.status === "fail" && cCred2.pre.issues.some((s) => /不能是 \*/.test(s)));
+const cNoAcao = await corsCase("/no-acao");
+assert("预检：204 但无 ACAO 不算通过", cNoAcao.pre?.status === "fail" && cNoAcao.pre?.httpStatus === 204, JSON.stringify(cNoAcao.pre?.issues));
+const cDefault = await corsCase("/ok");
+assert("预检：未提供的检查明确列入 notChecked", cDefault.pre?.status === "pass" && cDefault.pre.notChecked.length === 3 && /未执行/.test(cDefault.pre.detail), JSON.stringify(cDefault.pre?.notChecked));
+
 const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
 assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((c) => c.id === "canonical" && c.status === "fail"));
@@ -423,11 +526,33 @@ const vApiOrphan = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--expect-
 const vApiOrphanJ = JSON.parse(vApiOrphan.out);
 assert("验收：--expect-json 缺 --api 报警告", vApiOrphanJ.checks.some((c) => c.id === "api" && c.status === "warn"));
 
+// ---------------------------------------------------------------- --expect-json 结构化比较
+const apiCheck = (j) => j.checks.find((c) => c.id === "api");
+const vjOrder = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/reordered", "--expect-json", '{"ok":true,"nested":{"b":[1,2],"a":1}}', "--json"]);
+const jOrder = apiCheck(JSON.parse(vjOrder.out));
+assert("JSON 比较：字段顺序与空白不影响结果", jOrder.status === "pass" && jOrder.expectedFound === true && jOrder.jsonComparison?.match === true, JSON.stringify(jOrder.jsonComparison));
+const vjMissing = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/missing", "--expect-json", '{"ok":true}', "--json"]);
+const jMissing = apiCheck(JSON.parse(vjMissing.out));
+assert("JSON 比较：字段缺失给出明确路径", jMissing.status === "fail" && /字段 \$\.ok 缺失/.test(jMissing.detail), jMissing.detail);
+const vjType = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/wrongtype", "--expect-json", '{"ok":true}', "--json"]);
+const jType = apiCheck(JSON.parse(vjType.out));
+assert("JSON 比较：值类型不同判失败", jType.status === "fail" && /期望 true/.test(jType.detail), jType.detail);
+const vjArray = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/array", "--expect-json", '{"items":[{"id":1},{"id":2}]}', "--json"]);
+assert("JSON 比较：嵌套数组作为子集匹配", apiCheck(JSON.parse(vjArray.out)).status === "pass");
+const vjArrayBad = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/array", "--expect-json", '{"items":[{"id":9}]}', "--json"]);
+assert("JSON 比较：数组长度/元素不符判失败", apiCheck(JSON.parse(vjArrayBad.out)).status === "fail");
+const vjBadExpect = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", "not-json", "--json"]);
+const jBadExpect = apiCheck(JSON.parse(vjBadExpect.out));
+assert("JSON 比较：预期值不是合法 JSON 明确报错", jBadExpect.status === "fail" && /不是合法 JSON/.test(jBadExpect.expectedJsonError || ""), jBadExpect.detail);
+const vjBadBody = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/badjson", "--expect-json", '{"ok":true}', "--json"]);
+const jBadBody = apiCheck(JSON.parse(vjBadBody.out));
+assert("JSON 比较：响应体不是合法 JSON 明确报错", jBadBody.status === "fail" && /响应体不是合法 JSON/.test(jBadBody.detail), jBadBody.detail);
+
 const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");
@@ -444,6 +569,17 @@ const fakeWrangler = [
   '  console.log("| probe | abcdef0123456789abcdef0123456789 |");',
   '  process.exit(0);',
   "}",
+  'if (a[0] === "deploy") {',
+  '  if (process.env.CF_FAKE_DEPLOY_FAIL) { console.error("fake deploy failed"); process.exit(1); }',
+  '  if (process.env.CF_FAKE_DEPLOY_URL) { console.log("Published " + process.env.CF_FAKE_DEPLOY_URL); }',
+  '  else { console.log("Deployed successfully (no URL in this output)"); }',
+  '  process.exit(0);',
+  "}",
+  'if (a[0] === "delete") {',
+  '  if (process.env.CF_FAKE_DELETE_FAIL) { console.error("fake delete failed"); process.exit(1); }',
+  '  console.log("Successfully deleted");',
+  "  process.exit(0);",
+  "}",
   "process.exit(1);",
 ].join("\n");
 fs.writeFileSync(path.join(probeBin, "fake-wrangler.mjs"), fakeWrangler);
@@ -453,8 +589,8 @@ if (process.platform === "win32") {
   fs.writeFileSync(path.join(probeBin, "wrangler"), `#!/usr/bin/env node\n${fakeWrangler}`);
   fs.chmodSync(path.join(probeBin, "wrangler"), 0o755);
 }
-const runProbe = (extraEnv = {}) => {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts/probe.mjs"), "--json", "--timeout", "3000"], {
+const runProbe = (extraEnv = {}, extraArgs = []) => {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/probe.mjs"), "--json", "--timeout", "3000", ...extraArgs], {
     encoding: "utf8", cwd: probeDir, timeout: 40000,
     env: { ...process.env, CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "", ...extraEnv },
   });
@@ -464,12 +600,48 @@ const runProbe = (extraEnv = {}) => {
 };
 const pOk = runProbe();
 const pAuth = pOk.json?.checks?.find((c) => c.id === "auth");
-assert("探针：whoami --json 不被支持时不误判未登录", pAuth?.status === "pass", pAuth ? JSON.stringify(pAuth) : `out=${pOk.out.slice(0, 200)} err=${pOk.err.slice(0, 200)}`);
+assert("探针：whoami --json 调用失败时不误判未登录", pAuth?.status === "pass", pAuth ? JSON.stringify(pAuth) : `out=${pOk.out.slice(0, 200)} err=${pOk.err.slice(0, 200)}`);
 assert("探针：从纯文本提取 Account ID", pOk.json?.checks?.some((c) => c.id === "account-id" && c.status === "pass" && c.accountId === "abcdef0123456789abcdef0123456789"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "account-id")));
 assert("探针：wrangler 版本探测通过", pOk.json?.checks?.some((c) => c.id === "wrangler" && c.status === "pass"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "wrangler")));
 assert("探针：OAuth 登录态如实跳过 Token 权限检查", pOk.json?.checks?.some((c) => c.id === "api-read" && c.status === "skip"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "api-read")));
 const pNo = runProbe({ CF_FAKE_NOT_LOGGED: "1" });
 assert("探针：文本明确未登录时判 blocked", pNo.json?.checks?.some((c) => c.id === "auth" && c.status === "fail") && pNo.json?.status === "blocked" && pNo.code === 2, `status=${pNo.json?.status} code=${pNo.code}`);
+
+// ---------------------------------------------------------------- 部署探针判定（纯逻辑 + 本地假 wrangler 端到端）
+assert("部署探针：能从输出解析 workers.dev URL", parseDeployUrl("Published https://cf-probe-abc.my-account.workers.dev (1.2s)") === "https://cf-probe-abc.my-account.workers.dev");
+assert("部署探针：输出里没有 URL 返回 null", parseDeployUrl("Deployed successfully") === null);
+const fetchOk = async () => ({ status: 200, text: async () => "ok" });
+const fetch503 = async () => ({ status: 503, text: async () => "" });
+const fetchWrongBody = async () => ({ status: 200, text: async () => "not ok" });
+const fetchThrow = async () => { throw new Error("ECONNREFUSED"); };
+const httpServed = await verifyDeployedUrl("https://x.workers.dev", fetchOk, { attempts: 2, delayMs: 0 });
+assert("部署探针：200 + 内容匹配才算通过", httpServed.served === true && httpServed.attempts === 1);
+const httpNotServed = await verifyDeployedUrl("https://x.workers.dev", fetch503, { attempts: 2, delayMs: 0 });
+assert("部署探针：非 200 重试后仍不算通过", httpNotServed.served === false && httpNotServed.attempts === 2);
+const httpWrongBody = await verifyDeployedUrl("https://x.workers.dev", fetchWrongBody, { attempts: 1, delayMs: 0 });
+assert("部署探针：200 但内容不匹配不算通过", httpWrongBody.served === false && /内容不匹配/.test(httpWrongBody.reason));
+const httpUnreachable = await verifyDeployedUrl("https://x.workers.dev", fetchThrow, { attempts: 1, delayMs: 0 });
+assert("部署探针：URL 不可访问不算通过", httpUnreachable.served === false && /ECONNREFUSED/.test(httpUnreachable.reason));
+
+const dFail = evaluateDeployProbe({ deployOk: false, deployErr: "error: auth", worker: "w1", cleanupOk: true });
+assert("部署探针：部署命令失败判 fail", dFail.deploy.status === "fail" && dFail.deploy.verified === false);
+const dNoUrl = evaluateDeployProbe({ deployOk: true, deployOut: "deployed", url: null, http: null, worker: "w1", cleanupOk: true });
+assert("部署探针：成功但没 URL 绝不判 pass", dNoUrl.deploy.status !== "pass" && dNoUrl.deploy.verified === false, dNoUrl.deploy.status);
+const dUnreachable = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", http: httpUnreachable, worker: "w1", cleanupOk: true });
+assert("部署探针：URL 不可访问判 fail", dUnreachable.deploy.status === "fail" && dUnreachable.deploy.verified === false);
+const dOk = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", http: httpServed, worker: "w1", cleanupOk: true });
+assert("部署探针：拿到 URL 且 HTTP 通过才判 pass", dOk.deploy.status === "pass" && dOk.deploy.verified === true);
+const dCleanupFail = evaluateDeployProbe({ deployOk: true, url: "https://x.workers.dev", http: httpServed, worker: "w1", cleanupOk: false });
+assert("部署探针：清理失败单独记 warn，不影响 deploy", dCleanupFail.cleanup.status === "warn" && dCleanupFail.deploy.status === "pass");
+
+const pDeployNoUrl = runProbe({ CF_FAKE_DELETE_FAIL: "1" }, ["--deploy"]);
+const pDepCheck = pDeployNoUrl.json?.checks?.find((c) => c.id === "deploy");
+const pCleanup = pDeployNoUrl.json?.checks?.find((c) => c.id === "deploy-cleanup");
+assert("探针端到端：--deploy 成功但无 URL 不判 pass", pDepCheck?.status === "warn" && pDepCheck.verified === false, JSON.stringify(pDepCheck));
+assert("探针端到端：清理失败单独记录", pCleanup?.status === "warn", JSON.stringify(pCleanup));
+assert("探针端到端：nextSteps 提示未完成线上验证", pDeployNoUrl.json?.nextSteps?.some((s) => /没有完成线上验证/.test(s)), JSON.stringify(pDeployNoUrl.json?.nextSteps));
+const pDeployFail = runProbe({ CF_FAKE_DEPLOY_FAIL: "1" }, ["--deploy"]);
+assert("探针端到端：部署命令失败判 fail", pDeployFail.json?.checks?.find((c) => c.id === "deploy")?.status === "fail");
 
 // ---------------------------------------------------------------- 预检退出码
 const envRun = spawnSync(process.execPath, [path.join(root, "scripts/check-env.mjs"), "--json"], { encoding: "utf8", timeout: 40000 });

@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "./deploy-verdict.mjs";
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
@@ -82,8 +83,10 @@ let wranglerOk = false;
 }
 
 // 3. 登录态与账号。
-// `wrangler whoami` 的纯文本输出才是稳定契约；`--json` 只是部分版本的便利选项，
-// 不是官方承诺的能力。不能因为某个版本不认 --json 就把「已登录」误判成「未登录」。
+// `wrangler whoami --json` 是官方写明的能力（Wrangler General commands：
+// "--json ... Return user information as JSON. Exits with a non-zero status if not authenticated."）。
+// 本探针仍用纯文本 whoami 做基本判定：不依赖 JSON 字段结构，跨 Wrangler 版本更稳；
+// --json 只作可选增强，旧版本不支持或调用失败都不影响「已登录」结论。
 let authOk = false;
 let account = null;
 let email = null;
@@ -102,7 +105,7 @@ let whoamiAccountId = null;
     email = (text.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i) || [])[0] || null;
     whoamiAccountId = (text.match(/\b[0-9a-f]{32}\b/i) || [])[0] || null;
     authSource = process.env.CLOUDFLARE_API_TOKEN ? "API Token（环境变量）" : "OAuth / 本地登录态";
-    // 可选增强：能解析 JSON 就补上账号名，解析失败不影响结论。
+    // 官方 --json 是可选增强：能解析就补账号名，解析失败不影响结论。
     const j = call(["whoami", "--json"], { timeout: 10000 });
     if (j.ok) {
       try {
@@ -122,7 +125,8 @@ if (authOk) {
 }
 
 // 5. Token 读权限：只有能直接拿到 API Token 时才查。
-// OAuth 登录态不暴露可复用的 Token；不要靠非官方子命令去猜，也不要把「跳过」说成「权限没问题」。
+// `wrangler auth token --json` 同样是官方命令，但 OAuth 登录态下再取 Token 是额外调用；
+// 这里只认显式环境变量 CLOUDFLARE_API_TOKEN，取不到就如实 skip，不把「跳过」说成「权限没问题」。
 if (authOk && accountId) {
   const token = process.env.CLOUDFLARE_API_TOKEN || null;
   if (!token) {
@@ -142,42 +146,25 @@ if (authOk && accountId) {
   }
 }
 
-// 6. 可选：真实部署探针。
+// 6. 可选：真实部署探针。判定逻辑在 deploy-verdict.mjs，可单独测试。
 if (doDeploy) {
   if (!authOk || !wranglerOk) {
-    add("deploy", "fail", "缺少登录态或 Wrangler，跳过部署探针");
+    add("deploy", "fail", "缺少登录态或 Wrangler，跳过部署探针", { verified: false });
   } else {
     const name = `cf-deploy-probe-${Math.random().toString(36).slice(2, 8)}`;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-deploy-probe-"));
     fs.writeFileSync(path.join(dir, "wrangler.toml"), `name = "${name}"\nmain = "index.js"\ncompatibility_date = "${today}"\n`);
     fs.writeFileSync(path.join(dir, "index.js"), `export default { fetch() { return new Response("ok"); } };\n`);
     const dep = call(["deploy"], { cwd: dir, timeout: 180000 });
-    const url = (dep.out.match(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/i) || [])[0] || null;
-    let served = false;
-    if (url) {
-      for (let i = 0; i < 5 && !served; i++) {
-        try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-          served = res.status === 200 && (await res.text()).includes("ok");
-        } catch { /* 路由生效可能有延迟 */ }
-        if (!served) await new Promise((r) => setTimeout(r, 2000));
-      }
-    }
-    add(
-      "deploy",
-      dep.ok && (!url || served) ? "pass" : "fail",
-      dep.ok
-        ? `临时 Worker ${name} 部署成功${url ? `，${served ? "URL 可访问" : "但 URL 未返回预期内容"}` : "（未解析到 URL，跳过访问检查）"}`
-        : `部署失败：${(dep.err || dep.out).split(/\r?\n/).slice(-2).join(" ")}`,
-      { worker: name, url }
-    );
+    const url = parseDeployUrl(dep.out);
+    // 只有拿到 URL 才发真实请求；部署命令成功本身不算线上验证。
+    const http = url && dep.ok ? await verifyDeployedUrl(url, fetch) : null;
     const del = call(["delete", name], { cwd: dir, timeout: 60000, input: "y\n" });
-    add(
-      "deploy-cleanup",
-      del.ok ? "pass" : "warn",
-      del.ok ? `已删除临时 Worker ${name}` : `未能删除 ${name}，请到控制台手动删除（不要留着占资源）`,
-      { worker: name }
-    );
+    const verdict = evaluateDeployProbe({
+      deployOk: dep.ok, deployOut: dep.out, deployErr: dep.err,
+      url, http, cleanupOk: del.ok, worker: name,
+    });
+    checks.push(verdict.deploy, verdict.cleanup);
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 目录留给系统清理 */ }
   }
 }
@@ -185,17 +172,22 @@ if (doDeploy) {
 const blocked = checks.some((c) => c.status === "fail");
 const limited = !blocked && checks.some((c) => c.status === "warn");
 const status = blocked ? "blocked" : limited ? "limited" : "ready";
+const deployCheck = checks.find((c) => c.id === "deploy") || null;
+const nextSteps = blocked
+  ? ["npx wrangler login（或设置 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID）", "没有账号时可用 npx wrangler deploy --temporary 验证网络，但它用的是临时账号，不能验证你的账号、权限或套餐，且会过期"]
+  : limited
+    ? ["补齐上面 warn 的项；部署前再跑一次本探针"]
+    : ["可以开始识别项目并部署到预览地址"];
+if (deployCheck && deployCheck.verified === false) {
+  nextSteps.push("部署探针没有完成线上验证；到控制台确认临时 Worker 地址并手动请求，不要把它记成已验证");
+}
 const result = {
   schemaVersion: 1,
   status,
   deployProbe: doDeploy,
   checkedAt: new Date().toISOString(),
   checks,
-  nextSteps: blocked
-    ? ["npx wrangler login（或设置 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID）", "没有账号时可用 npx wrangler deploy --temporary 验证网络，但它用的是临时账号，不能验证你的账号、权限或套餐，且会过期"]
-    : limited
-      ? ["补齐上面 warn 的项；部署前再跑一次本探针"]
-      : ["可以开始识别项目并部署到预览地址"],
+  nextSteps,
 };
 
 if (json) console.log(JSON.stringify(result, null, 2));
@@ -205,7 +197,7 @@ else {
     console.log(`[${mark}] ${c.id}: ${c.detail}`);
   }
   console.log(`\n链路状态=${status}`);
-  result.nextSteps.forEach((s) => console.log(`  - ${s}`));
+  nextSteps.forEach((s) => console.log(`  - ${s}`));
 }
 
 process.exitCode = blocked ? 2 : limited ? 1 : 0;

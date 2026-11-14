@@ -11,8 +11,8 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 ## Status
 
 - Skill format validated (`quick_validate.py`): valid. Repository check `node tests/check-skill.mjs` also passes.
-- Local tests: 77/77 passing (`node tests/run-tests.mjs`).
-- Real Cloudflare deployment: **not run** here. No Cloudflare account/token, and Wrangler is not installed in this environment. See `tests/results.md` for what was and was not verified.
+- Local tests: 124/124 passing (`node tests/run-tests.mjs`).
+- Real Cloudflare deployment: **not run in this automated test environment** (no account/token, Wrangler not installed). Migration and live observations from a separate real project are recorded in `references/migration-guide.md` (tagged "measured"), but that is historical evidence, not verification performed by these local tests. Local automation is not the same as account-level deployment verification. See `tests/results.md` for exactly what was and was not verified.
 
 ## What it does
 
@@ -21,9 +21,9 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 1. **Detects** the framework, build command, output directory, base path, SPA/SSR/API type, GitHub Pages setup, existing Wrangler config, bindings, env keys, PWA, workspaces, lockfiles, and risk signals — tagging each key field `confirmed` / `inferred` / `unknown`.
 2. **Proposes** Pages or Workers as candidates with a confidence level; DNS, deployment style, and future backend needs decide, not the framework name.
 3. **Plans** the change, with explicit confirmation gates for DNS, custom domains, production secrets, databases, deletions, and irreversible config.
-4. **Builds and checks** the artifact against Cloudflare limits for the declared site mode (`static` / `ssg` / `spa`); `ssr` explicitly reports "not applicable" instead of pretending to have checked it.
+4. **Builds and checks** the artifact against the site mode and plan limit (Free 20,000 files by default; 100,000 on `--plan paid` with Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`); `ssr` explicitly reports "not applicable" instead of pretending to have checked it.
 5. **Deploys** to `pages.dev` / `workers.dev` or a preview branch.
-6. **Verifies** root status, mode-appropriate 404/fallback behavior, assets, headers, canonical/noindex, CORS, backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON.
+6. **Verifies** root status, mode-appropriate 404/fallback behavior, assets, headers, canonical/noindex, CORS (including preflight ACAO / Allow-Methods / Allow-Headers / credentials), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON structure.
 7. **Reports** every check as pass/fail/warn/unverified. It does not claim a test that was not run.
 
 ## Structure
@@ -49,6 +49,7 @@ cloudflare-deploy/
 │   └── migration-guide.md    # phases + Jekyll case study with real data
 ├── scripts/
 │   ├── probe.mjs             # Step 0: link probe
+│   ├── deploy-verdict.mjs    # testable verdict logic for probe --deploy
 │   ├── detect-project.mjs
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -121,11 +122,13 @@ Dependency-free, read-only Node 18+ ESM (Node 22+ is still recommended for actua
 node scripts/probe.mjs                         # Step 0: 0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs                     # 0 deployable / 1 not deployable / 2 not buildable
-node scripts/check-build.mjs --dir dist --mode static   # or ssg / spa; ssr reports skip
+node scripts/check-build.mjs --dir dist --mode static [--plan free|paid]   # or ssg / spa; ssr reports skip
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json
 ```
 
 `--mode` decides the 404 verdict: `static`/`ssg` require a 404 for unknown paths; `spa` requires the app shell; `ssr` normally expects 404 and only warns on 200. Build check and verification must use the same value.
+
+`check-build.mjs` defaults to the Free **20,000** file limit. Only `--plan paid` plus evidence of Wrangler v4 and `PAGES_WRANGLER_MAJOR_VERSION=4` raises it to **100,000**; missing evidence falls back to 20,000 with a `warn`. CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; everything else is listed in `notChecked`. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
 
 HTTP baseline for SSR / full-stack:
 
@@ -135,7 +138,7 @@ node scripts/verify-deployment.mjs \
   --api /api/health --expect-json '{"ok":true}' --json
 ```
 
-This only verifies the HTTP layer. Database writes, login sessions, third-party callbacks, and cold starts still need dedicated checks.
+`--expect-json` must be valid JSON and is compared as a **subset** of the response (key order and whitespace are irrelevant; missing fields, value mismatches, and invalid JSON produce explicit reasons). This only verifies the HTTP layer. Database writes, login sessions, third-party callbacks, and cold starts still need dedicated checks.
 
 Backup site plus CORS on a separate API host:
 
@@ -146,17 +149,21 @@ node scripts/verify-deployment.mjs \
   --backup https://owner.github.io/repo/ \
   --origin https://app.example.com \
   --cors-url https://api.example.com/items \
+  --cors-method POST \
+  --cors-headers "content-type,authorization" \
   --json
 ```
 
 ## Tests
 
 ```bash
-node tests/run-tests.mjs        # 77 checks: detection, artifacts, real HTTP, link probe
+node tests/run-tests.mjs        # 124 checks: detection, plan/artifact limits, real HTTP, CORS preflight, JSON structure, link probe
 node tests/check-skill.mjs      # structure check, no external tooling
 ```
 
-The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON/content assertions. A local fake wrangler also verifies the link probe does not misreport "not logged in" when `whoami --json` is unsupported.
+The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons.
+
+Three additional regression groups cover: pure-function boundaries for plan escalation and file-count limits (without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method, missing header, bad credentials, 204 without ACAO, no inference for absent inputs), and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
 
 These tests prove the scripts work. They do not prove account permissions, DNS, TLS, or platform behavior.
 
@@ -177,4 +184,4 @@ These tests prove the scripts work. They do not prove account permissions, DNS, 
 - Cannot connect Git integration / Workers Builds through the CLI; that is a dashboard/API step.
 - DNS, custom domains, production secrets, database migration, and deletions require explicit confirmation.
 - For SSR / full-stack, script coverage stops at the HTTP layer; `check-build.mjs` does not apply.
-- No real deployment was performed in this build environment.
+- All automated tests run against local synthetic fixtures; no real Cloudflare deployment was performed here. The real-project case study lives in `references/migration-guide.md` and is a different thing.

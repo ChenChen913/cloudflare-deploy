@@ -6,6 +6,7 @@
  *   node scripts/verify-deployment.mjs --url https://site.example.com \
  *     [--mode static|spa|ssg|ssr] [--backup https://owner.github.io/repo/] \
  *     [--origin https://app.example.com] [--cors-url https://api.example.com/items] \
+ *     [--cors-method POST] [--cors-headers "content-type,authorization"] [--cors-credentials] \
  *     [--api /api/health --expect-json '{"ok":true}'] \
  *     [--expect-404 /__missing__] [--assets-limit 20] [--json]
  *
@@ -13,6 +14,11 @@
  *   static / ssg  未知路径应当 404
  *   spa           未知路径应当回退到 app shell（200 + HTML）
  *   ssr           未知路径通常 404；额外检查服务端渲染内容、TTFB 和 --api 接口
+ *
+ * --expect-json 的语义：把预期值解析为 JSON，要求它「是响应 JSON 的子集」，
+ * 与字段顺序、缩进空白无关。旧版的字符串包含判断已废弃（无法判断结构）。
+ * CORS 预检只对用户显式提供的 --cors-method / --cors-headers / --cors-credentials
+ * 做断言；没提供的检查会列进 notChecked，绝不替用户推断实际请求方法或请求头。
  *
  * 只读：只发 GET/HEAD/OPTIONS。不会跟随跨主机重定向而不报告。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
@@ -35,9 +41,48 @@ const MODES = ["static", "spa", "ssg", "ssr"];
 const mode = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
 const apiPaths = argv.reduce((acc, a, i) => (a === "--api" && argv[i + 1] && !argv[i + 1].startsWith("--") ? [...acc, argv[i + 1]] : acc), []);
 const expectJson = getArg("--expect-json");
+const corsMethod = getArg("--cors-method");
+const corsHeadersArg = getArg("--cors-headers");
+const corsCredentials = argv.includes("--cors-credentials");
+
+// --expect-json：预期值是响应的「子集」，对象按字段递归比较（不看键顺序），
+// 数组按长度与下标比较，标量严格相等。任何不匹配都返回字段路径与原因。
+function parseExpectedJson(raw) {
+  try { return { ok: true, value: JSON.parse(raw) }; }
+  catch (e) { return { ok: false, error: `--expect-json 不是合法 JSON：${e.message}` }; }
+}
+function compareJson(expected, actual, at = "$") {
+  if (expected === null || typeof expected !== "object") {
+    return expected === actual
+      ? { match: true, reason: `${at} 匹配` }
+      : { match: false, reason: `${at} 期望 ${JSON.stringify(expected)}，实际 ${JSON.stringify(actual)}` };
+  }
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual)) return { match: false, reason: `${at} 期望数组，实际 ${actual === null ? "null" : Array.isArray(actual) ? "数组" : typeof actual}` };
+    if (expected.length !== actual.length) return { match: false, reason: `${at} 数组长度期望 ${expected.length}，实际 ${actual.length}` };
+    for (let i = 0; i < expected.length; i++) {
+      const r = compareJson(expected[i], actual[i], `${at}[${i}]`);
+      if (!r.match) return r;
+    }
+    return { match: true, reason: `${at} 数组匹配` };
+  }
+  if (actual === null || typeof actual !== "object" || Array.isArray(actual)) {
+    return { match: false, reason: `${at} 期望对象，实际 ${actual === null ? "null" : Array.isArray(actual) ? "数组" : typeof actual}` };
+  }
+  for (const key of Object.keys(expected)) {
+    if (!Object.prototype.hasOwnProperty.call(actual, key)) return { match: false, reason: `字段 ${at}.${key} 缺失` };
+    const r = compareJson(expected[key], actual[key], `${at}.${key}`);
+    if (!r.match) return r;
+  }
+  return { match: true, reason: `${at} 的 ${Object.keys(expected).length} 个字段全部匹配` };
+}
+
+// CORS 头是按逗号分隔的 token 列表，大小写不敏感，也允许 `*`。
+const splitTokens = (v) => String(v || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+const hasToken = (headerValue, token) => splitTokens(headerValue).includes("*") || splitTokens(headerValue).includes(String(token).trim().toLowerCase());
 
 if (!base) {
-  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--api /api/health --expect-json '{\"ok\":true}'] [--json]");
+  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--json]");
   process.exit(2);
 }
 if (!MODES.includes(mode)) {
@@ -277,13 +322,14 @@ if (html) {
 }
 
 // ---------------------------------------------------------------- API（可选）
+const expected = expectJson ? parseExpectedJson(expectJson) : null;
 if (apiPaths.length) {
   for (const p of apiPaths) {
     const u = resolve(p);
     const started = Date.now();
     const r = await req(u, { method: "GET", headers: { "user-agent": UA } });
     if (!r.res) {
-      add("api", "fail", `GET ${p} 请求失败：${r.error}`, { path: p });
+      add("api", "fail", `GET ${p} 请求失败：${r.error}`, { path: p, expectedFound: expected ? false : null });
       continue;
     }
     const status = r.res.status;
@@ -291,17 +337,43 @@ if (apiPaths.length) {
     const isJson = /application\/(?:[\w.+-]*\+)?json/i.test(ct);
     let body = "";
     try { body = await r.res.text(); } catch { body = ""; }
-    const contains = expectJson ? body.includes(expectJson) : null;
-    const ok = status >= 200 && status < 300 && isJson && contains !== false;
+
+    const reasons = [];
+    if (!(status >= 200 && status < 300)) reasons.push(`状态码 ${status} 不是 2xx`);
+    if (!isJson) reasons.push(`Content-Type 不是 JSON（${ct || "无"}）`);
+
+    let comparison = null;
+    let expectedFound = expected ? false : null;
+    let expectedJsonError = null;
+    if (expected) {
+      if (!expected.ok) {
+        expectedJsonError = expected.error;
+        reasons.push(expected.error);
+      } else if (isJson) {
+        let actual = null;
+        let bodyError = null;
+        try { actual = JSON.parse(body); } catch (e) { bodyError = e.message; }
+        if (bodyError) {
+          reasons.push(`响应体不是合法 JSON：${bodyError}`);
+        } else {
+          comparison = compareJson(expected.value, actual);
+          expectedFound = comparison.match;
+          if (!comparison.match) reasons.push(`期望 JSON 不匹配：${comparison.reason}`);
+        }
+      }
+    }
     add(
       "api",
-      ok ? "pass" : "fail",
-      `GET ${p} -> ${status}${isJson ? " JSON" : ` ${ct || "(无 content-type)"}`}${contains === false ? "，响应里没有期望的内容" : ""}（${Date.now() - started}ms）`,
-      { path: p, status, isJson, expectedFound: contains }
+      reasons.length ? "fail" : "pass",
+      `GET ${p} -> ${status}${isJson ? " JSON" : ` ${ct || "(无 content-type)"}`}`
+        + (comparison?.match ? "，期望 JSON 子集匹配" : "")
+        + (reasons.length ? `；${reasons.join("；")}` : "")
+        + `（${Date.now() - started}ms）`,
+      { path: p, status, isJson, expectedFound, expectedJsonError, jsonComparison: comparison }
     );
   }
 } else if (expectJson) {
-  add("api", "warn", "--expect-json 需要配合 --api 使用");
+  add("api", "warn", "--expect-json 需要配合 --api 使用", { expectedFound: null });
 }
 
 // ---------------------------------------------------------------- 响应头
@@ -358,22 +430,72 @@ if (origin) {
     if (acao && !vary.toLowerCase().includes("origin")) {
       add("cors-vary", "warn", "缺少 Vary: Origin；CDN 可能把给 A 站的响应缓存给 B 站");
     }
+    // 没显式给实际方法/请求头时，用默认值发「探针」，但不对 Allow-* 做断言。
+    // 不能因为预检返回 200/204 就说 CORS 通过。
+    const probeMethod = corsMethod || "POST";
+    const probeHeaders = corsHeadersArg || "content-type,authorization";
     const pre = await req(corsUrl, {
       method: "OPTIONS",
-      headers: { "user-agent": UA, origin, "access-control-request-method": "POST", "access-control-request-headers": "content-type,authorization" },
+      headers: {
+        "user-agent": UA, origin,
+        "access-control-request-method": probeMethod,
+        "access-control-request-headers": probeHeaders,
+      },
     });
-    if (pre.res) {
-      const preAcao = pre.res.headers.get("access-control-allow-origin");
-      const preMethods = pre.res.headers.get("access-control-allow-methods") || "";
-      const ok = [200, 204].includes(pre.res.status) && Boolean(preAcao);
-      add(
-        "cors-preflight",
-        ok ? "pass" : "warn",
-        `OPTIONS -> ${pre.res.status}；ACAO=${preAcao || "无"}${preMethods ? `；Allow-Methods=${preMethods}` : ""}`,
-        { status: pre.res.status, acao: preAcao, methods: preMethods }
-      );
+    const notChecked = [];
+    if (!corsMethod) notChecked.push("Allow-Methods（未提供 --cors-method，预检仅用默认探针 POST）");
+    if (!corsHeadersArg) notChecked.push("Allow-Headers（未提供 --cors-headers，预检仅用默认探针 content-type,authorization）");
+    if (!corsCredentials) notChecked.push("Allow-Credentials（未提供 --cors-credentials，未假设使用 Cookie/凭据）");
+
+    if (!pre.res) {
+      add("cors-preflight", "warn", `预检请求失败：${pre.error}`, {
+        url: corsUrl, origin, requestMethod: corsMethod, requestHeaders: corsHeadersArg,
+        credentials: corsCredentials, probeMethod, probeHeaders, notChecked, issues: [pre.error],
+      });
     } else {
-      add("cors-preflight", "warn", `预检请求失败：${pre.error}`);
+      const preAcao = pre.res.headers.get("access-control-allow-origin");
+      const allowMethods = pre.res.headers.get("access-control-allow-methods") || "";
+      const allowHeaders = pre.res.headers.get("access-control-allow-headers") || "";
+      const allowCred = pre.res.headers.get("access-control-allow-credentials");
+      const issues = [];
+      const checked = ["ACAO", "HTTP 状态"];
+
+      // ACAO：始终检查，不依赖额外输入。
+      if (!preAcao) issues.push("缺少 Access-Control-Allow-Origin");
+      else if (preAcao.includes(",")) issues.push(`ACAO 有多个值：${preAcao}`);
+      else if (preAcao !== "*" && preAcao !== origin) issues.push(`ACAO=${preAcao} 与请求 Origin（${origin}）不匹配`);
+
+      // 2xx 是必要条件，不是充分条件。
+      if (!(pre.res.status >= 200 && pre.res.status < 300)) issues.push(`OPTIONS 返回 ${pre.res.status}，不是 2xx`);
+
+      if (corsMethod) {
+        checked.push("Allow-Methods");
+        if (!allowMethods) issues.push("缺少 Access-Control-Allow-Methods");
+        else if (!hasToken(allowMethods, corsMethod)) issues.push(`Allow-Methods=${allowMethods} 不含实际请求方法 ${corsMethod}`);
+      }
+      if (corsHeadersArg) {
+        checked.push("Allow-Headers");
+        const wanted = splitTokens(corsHeadersArg);
+        if (!allowHeaders) issues.push("缺少 Access-Control-Allow-Headers");
+        else for (const h of wanted) {
+          if (!hasToken(allowHeaders, h)) issues.push(`Allow-Headers=${allowHeaders} 不含实际请求头 ${h}`);
+        }
+      }
+      if (corsCredentials) {
+        checked.push("Allow-Credentials");
+        if (preAcao === "*") issues.push("带凭据时 ACAO 不能是 *，必须精确匹配 Origin");
+        if (String(allowCred || "").toLowerCase() !== "true") issues.push(`带凭据需要 Access-Control-Allow-Credentials: true，实际 ${allowCred || "无"}`);
+      }
+
+      const detail = `OPTIONS -> ${pre.res.status}；ACAO=${preAcao || "无"}；Allow-Methods=${allowMethods || "无"}；Allow-Headers=${allowHeaders || "无"}${allowCred ? `；ACAC=${allowCred}` : ""}`
+        + (issues.length ? `；失败：${issues.join("；")}` : `；已提供的断言全部通过（${checked.join("、")}）`)
+        + (notChecked.length ? `；未执行：${notChecked.join("；")}` : "");
+      add("cors-preflight", issues.length ? "fail" : "pass", detail, {
+        url: corsUrl, origin,
+        httpStatus: pre.res.status, acao: preAcao, methods: allowMethods, headers: allowHeaders,
+        allowCredentials: allowCred, requestMethod: corsMethod, requestHeaders: corsHeadersArg,
+        credentials: corsCredentials, probeMethod, probeHeaders, checked, notChecked, issues,
+      });
     }
   }
 }
@@ -398,7 +520,15 @@ const summary = {
   fail: checks.filter((c) => c.status === "fail").length,
   skip: checks.filter((c) => c.status === "skip").length,
 };
-const result = { schemaVersion: 2, url: base, mode, backup, origin, corsUrl: origin ? resolve(getArg("--cors-url", base)) : null, api: apiPaths.length ? apiPaths : null, expectJson, checkedAt: new Date().toISOString(), summary, checks };
+const result = {
+  schemaVersion: 2, url: base, mode, backup, origin,
+  corsUrl: origin ? resolve(getArg("--cors-url", base)) : null,
+  corsOptions: origin ? { method: corsMethod, headers: corsHeadersArg, credentials: corsCredentials } : null,
+  api: apiPaths.length ? apiPaths : null,
+  expectJson,
+  expectJsonMode: expectJson ? "json-subset" : null,
+  checkedAt: new Date().toISOString(), summary, checks,
+};
 
 if (json) console.log(JSON.stringify(result, null, 2));
 else {
