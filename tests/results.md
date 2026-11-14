@@ -17,7 +17,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 714 项，分层覆盖 core 284 / adversarial 269 / boundary 38 / combination 5 / unit 118：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 717 项，分层覆盖 core 284 / adversarial 270 / boundary 40 / combination 5 / unit 118：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -36,8 +36,8 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     714/714 通过（分层：core 284 / adversarial 269 / boundary 38 / combination 5 / unit 118）
-node tests/check-skill.mjs   通过（SKILL.md 333 行，引用路径 31 个，无绝对路径）
+node tests/run-tests.mjs     717/717 通过（分层：core 284 / adversarial 270 / boundary 40 / combination 5 / unit 118）
+node tests/check-skill.mjs   通过（SKILL.md 334 行，引用路径 31 个，无绝对路径）
 node tests/browser-diff.mjs  115/115 一致（可选开发期：本机 Chrome 157 与本机 Edge 157 分别跑过；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1，180s 超时退出码 3）
 quick_validate.py            Skill is valid!（本机一次性结果；脚本在仓库外，见上文可复现性说明）
 ```
@@ -129,6 +129,7 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 | 首页资源引用 SSRF 防护（2 例） | 反斜杠伪装的跨源 URL（`\\127.0.0.1:port/ssrf-probe`）解析后不请求，跨源服务器零命中，`ignored` 说明原因；`javascript:` 链接不被当资源探测，退出码 0 |
 | 响应头与状态字段（3 例） | `title` / `content-type` / `cache-control` 进 JSON；安全头按数量判 `warn`；`404` / `spa-fallback` / `api` 检查都带真实 `httpStatus` |
 | CLI 参数校验（5 例） | 非法 `--api` / `--expect-404` URL、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--backup` → 退出码 2，无半截 JSON（不再崩溃或把 `--assets-limit abc` 当成 0 个资源） |
+| 探针 CLI `--timeout` 校验（7 类非法输入 + 默认/合法） | 不传时默认 15000 正常执行；合法正整数保持原行为；`abc`、`-1`、`0`、`1.5`、`2147483648`、缺值、空字符串均退出码 2、中文用法错误、无 JSON、无 wrangler/部署调用（fake wrangler 调用日志为空） |
 | 备用站 304 / 少见 3xx（2 例） | 304 判 `fail` + `not-modified` 且不写「重定向未完成验证」；300 判 `fail` + `unexpected-3xx`，均不判通过 |
 | SPA 回退 304 / 少见 3xx（2 例） | 304 / 300 判 `fail`，不写成重定向式回退，也不判通过 |
 | `--expect-json` 结构化比较（7 例） | 键顺序与空白不影响；字段缺失、类型不符、数组长度不符、嵌套数组子集、无效预期 JSON、非法响应 JSON 都给出明确原因 |
@@ -204,7 +205,7 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 - `wrangler.jsonc` / `wrangler.json` 的 JSON 键值能被识别（注释不影响），显式 assets 目录作为输出目录且证据为 `confirmed`；显式 Wrangler 配置优先于框架默认值。
 - 首页资源引用先解析再按 origin 过滤：只取真实子资源属性（`src` / `srcset` / `poster` / `<object data>` / `<link href>`；导航链接、canonical、`<base>` 不算），按 `<base href>` / 最终页面 URL 解析；反斜杠伪装的跨源 URL 实测零请求（跨源服务器没有命中），跨源/畸形只进 `ignored`，`javascript:` 等非 HTTP(S) 链接不再把正常站点判成 exit 1。
 - `/index.html` 只有同源且目标是站点根才判 `pass`；跨源、非 HTTP(S)、其他路径与缺 Location 都只告警，`convergesToRoot` / `redirectKind` 给出机器可读证据。
-- CLI 参数写错（非法 `--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` URL、非法 `--mode`、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--origin`、CORS 参数缺 `--origin`）以退出码 2 结束；`--url` 带 query 时保留路径；不再崩溃或把 `--assets-limit abc` 静默当成 0 个资源。
+- CLI 参数写错（非法 `--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` URL、非法 `--mode`、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--origin`、CORS 参数缺 `--origin`）以退出码 2 结束；`probe.mjs --timeout` 额外要求 1..2147483647 的有限正整数，非法值在发起任何网络探测或 `--deploy` 前退出 2；`--url` 带 query 时保留路径；不再崩溃或把 `--assets-limit abc` 静默当成 0 个资源。
 - `404` / `spa-fallback` / `api` 检查都带真实 `httpStatus`；响应头检查只在拿到最终 200 时执行，重定向响应的头不会冒充首页头；TTFB 取最终响应。
 - `check-build` 资源存在性按部署产物真实文件名大小写敏感匹配，拒绝 `..` 逃逸；`index.html` 是目录时输出 JSON 而不是崩溃。
 - Windows 项目路径含空格时，本地 `.cmd` wrangler 仍能执行，`whoami` 用实际解析到的本地 wrangler；部署失败时清理结论为 `skip`，不谎称删除失败。
@@ -303,6 +304,7 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 57. **EOF 不完整标签：本轮的改动是注释、文档与 oracle/回归锁定，不是策略变更。** `parseStartTag()` 在标签名/属性/引号中遇到 EOF 返回 null、主循环丢弃剩余输入；核对 WHATWG tokenizer：EOF-in-tag 只 emit EOF token，未完成开始标签不会 emit，tree builder 不插入元素、标签字符也不变成文本；`<`/`</` 后直接 EOF 才保留为文本；title/script 的 raw text 保留。该策略在上一版已实现并与浏览器 DOM 等价，本轮补齐 EF1-EF12 浏览器事实、手写 EOF 文本断言和注释/文档说明。**注意**：fixture 只存 canonical/title/script/img/base 四类事实；“`</`/`<` 保留为文本、title/script raw text 保留”由本地断言覆盖，未纳入 fixture。
 58. **集成点 HTML 结束规则/外域 template/隐式 p 关闭（独立审查发现并修复）。** (a) `applyHtmlEndRule` 之前边扫边弹，遇到 special 元素时已破坏 HTML 子栈，导致 `</strong>`、`</span>` 等错误结束标签把未闭合 HTML 子元素弹掉，`</foreignObject>` 被误当外域命中；改为非破坏性查找，只有命中同名 HTML 元素才截断栈，special 不匹配直接忽略。(b) 外域元素 `<template>` 的 `</template>` 误触发 HTML template 隔离栈恢复；删除 matched 分支里的 template 处理，HTML template 只由专门分支关闭。(c) 新增 `textVisibleNow()`，避免外域/不渲染集成点里的 `<` 进入可见文本。(d) 用最小 `P_CLOSING_START_TAGS` 近似浏览器隐式关闭 `<p>`，修复 `<p><div>` 后 `</foreignObject>` 被吞导致的 canonical/资源误报（仍不做完整树构建）。I1-I7 oracle（Chrome+Edge）锁定。
 59. **外域结束标签回退的 scope 边界与「被浏览器丢弃的开始标签」（独立审查发现并修复）。** (a) `popHtmlAncestor` 用 `lastIndexOf` 跨过 table/object/marquee/applet/select/caption/td 等 scope 边界找同名 HTML 祖先，导致 `<div><table><svg></div><link ...>` 把浏览器中的 SVG link 误判为 HTML canonical；改为复用非破坏性 HTML 结束规则，碰 special/scope 边界即停止。(b) 浏览器在 body 上下文会丢弃的 `tr/td/th/thead/tbody/tfoot/caption/colgroup/html/head/body/frame/basefont/bgsound` 曾被压进 HTML 祖先栈，挡住 `</foreignObject>`，产生假 canonical/资源；现统一不追踪。(c) select 插入模式做最小近似：嵌套 select 关闭旧 select 并忽略 token，input/keygen/textarea 关闭 select 后继续处理，其余标签在 select 内大多忽略。(d) 可见文本修正：隐藏集成点内 xmp/textarea/plaintext 不计入，foreignObject 内 CDATA 计入。J1-J6 oracle（Chrome+Edge）锁定。仍不做完整 table/select/格式化元素建树。
+60. **probe.mjs 的 `--timeout` 只做 `Number()` 转换，缺少严格校验。** 空值/非数字会变成 `NaN`，负数/0/小数会进入 `setTimeout`/`AbortSignal.timeout`，超范围值会被 Node 截断或抛 `RangeError`；参数错误还可能先发起网络请求，被误读成网络连接失败。现在在 argv 解析后、任何 fetch/wrangler 调用前校验：只接受 1..2147483647 的有限正整数；非法值输出中文用法错误并以退出码 2 结束，不输出半截 JSON。默认 15000 和合法值行为不变。测试覆盖不传 `--timeout`、合法正整数、`abc`、`-1`、`0`、`1.5`、`2147483648`、缺值、空字符串；用 fake wrangler 的调用日志确认非法参数没有进入 wrangler/部署阶段，并断言耗时短、stderr 不含网络失败措辞。
 
 ## CLI / JSON 兼容性
 

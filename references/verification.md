@@ -54,7 +54,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
   --json
 ```
 
-脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。参数写错时脚本以退出码 2 报用法错误，不会输出半截 JSON：`--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` 不是合法 URL、`--timeout` 非正数、`--assets-limit` 非正整数、`--origin` 非法、或给了 CORS 参数却没给 `--origin`。
+脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。参数写错时脚本以退出码 2 报用法错误，不会输出半截 JSON：`--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` 不是合法 URL、`--timeout` 非正数、`--assets-limit` 非正整数、`--origin` 非法、或给了 CORS 参数却没给 `--origin`。`probe.mjs --timeout` 额外要求有限正整数且不超过 2147483647（Node 定时器上限），非法值在发起任何网络探测或 `--deploy` 之前以退出码 2 结束。
 
 ### 2.1 SSR / 全栈的自动基线
 

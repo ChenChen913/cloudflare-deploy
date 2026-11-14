@@ -2070,6 +2070,8 @@ const probeDir = path.join(work, "probe-cwd");
 const probeBin = path.join(probeDir, "node_modules", ".bin");
 fs.mkdirSync(probeBin, { recursive: true });
 const fakeWrangler = [
+  'import fs from "node:fs";',
+  'if (process.env.PROBE_CALL_LOG) { try { fs.appendFileSync(process.env.PROBE_CALL_LOG, process.argv.slice(2).join(" ") + "\\n"); } catch { /* 测试辅助，失败不影响探针 */ } }',
   "const a = process.argv.slice(2);",
   'if (a.includes("--version")) { console.log("4.0.0-fake"); process.exit(0); }',
   'if (a[0] === "whoami" && a.includes("--json")) { console.error("Unknown argument: json"); process.exit(1); }',
@@ -2112,7 +2114,58 @@ const runProbe = (extraEnv = {}, extraArgs = []) => {
   try { parsed = JSON.parse(r.stdout); } catch { /* 交给断言报告原始输出 */ }
   return { code: r.status, json: parsed, out: r.stdout, err: r.stderr };
 };
+const spawnProbe = (args, extraEnv = {}) => spawnSync(process.execPath, [path.join(root, "scripts/probe.mjs"), ...args], {
+  encoding: "utf8", cwd: probeDir, timeout: 40000,
+  env: { ...process.env, CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "", ...extraEnv },
+});
+const pDefaultTimeout = spawnProbe(["--json"]);
+let pDefaultTimeoutJson = null;
+try { pDefaultTimeoutJson = JSON.parse(pDefaultTimeout.stdout); } catch { /* 断言里报告原始输出 */ }
+assert("探针 CLI：不传 --timeout 时使用默认 15000 并正常执行",
+  pDefaultTimeout.status !== null && pDefaultTimeoutJson !== null
+    && Array.isArray(pDefaultTimeoutJson.checks) && !/用法错误/.test(pDefaultTimeout.stderr || ""),
+  `code=${pDefaultTimeout.status} out=${(pDefaultTimeout.stdout || "").slice(0, 100)} err=${(pDefaultTimeout.stderr || "").slice(0, 100)}`, "boundary");
+
 const pOk = runProbe();
+assert("探针 CLI：合法 --timeout 正整数保持原有行为",
+  pOk.json !== null && Array.isArray(pOk.json.checks) && !/用法错误/.test(pOk.err || ""),
+  `code=${pOk.code} out=${(pOk.out || "").slice(0, 100)} err=${(pOk.err || "").slice(0, 100)}`, "boundary");
+
+// --timeout 必须是有限正整数且不超过 Node.js 定时器上限；非法参数必须在任何网络/
+// wrangler/部署调用之前以退出码 2 结束，而不是包装成网络失败。fake wrangler 的
+// PROBE_CALL_LOG 证明这些进程没有再走到 wrangler/部署阶段（校验代码在 fetch 之前）。
+{
+  const callLog = path.join(probeDir, "invalid-timeout-calls.log");
+  fs.rmSync(callLog, { force: true });
+  const invalidTimeoutCases = [
+    ["非数字 abc", ["--timeout", "abc"]],
+    ["负数 -1", ["--timeout", "-1"]],
+    ["零 0", ["--timeout", "0"]],
+    ["小数 1.5", ["--timeout", "1.5"]],
+    ["超出定时器上限", ["--timeout", "2147483648"]],
+    ["缺少值", ["--timeout"]],
+    ["空字符串", ["--timeout", ""]],
+  ];
+  let invalidBad = 0;
+  let invalidDetail = null;
+  for (const [name, args] of invalidTimeoutCases) {
+    const startedAt = Date.now();
+    const r = spawnProbe(["--json", "--deploy", ...args], { PROBE_CALL_LOG: callLog });
+    const elapsed = Date.now() - startedAt;
+    const ok = r.status === 2 && !String(r.stdout || "").trim()
+      && /用法错误/.test(r.stderr || "") && /--timeout/.test(r.stderr || "")
+      && !/无法访问|api\.cloudflare\.com|网络连接失败/.test(r.stderr || "")
+      && elapsed < 2000;
+    if (!ok) {
+      invalidBad++;
+      if (!invalidDetail) invalidDetail = { name, code: r.status, elapsed, out: String(r.stdout || "").slice(0, 80), err: String(r.stderr || "").slice(0, 160) };
+    }
+  }
+  const callLogText = fs.existsSync(callLog) ? fs.readFileSync(callLog, "utf8").trim() : "";
+  assert("探针 CLI：非法 --timeout 全部退出码 2 且不进入网络/部署阶段",
+    invalidBad === 0 && callLogText === "",
+    JSON.stringify({ invalidBad, invalidDetail, wranglerCalls: callLogText.slice(0, 200) }), "adversarial");
+}
 const pAuth = pOk.json?.checks?.find((c) => c.id === "auth");
 assert("探针：whoami --json 调用失败时不误判未登录", pAuth?.status === "pass", pAuth ? JSON.stringify(pAuth) : `out=${pOk.out.slice(0, 200)} err=${pOk.err.slice(0, 200)}`);
 assert("探针：从纯文本提取 Account ID", pOk.json?.checks?.some((c) => c.id === "account-id" && c.status === "pass" && c.accountId === "abcdef0123456789abcdef0123456789"), JSON.stringify(pOk.json?.checks?.find((c) => c.id === "account-id")));

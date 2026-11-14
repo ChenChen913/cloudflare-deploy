@@ -23,11 +23,29 @@ import { classifyWranglerWhoami } from "./wrangler-auth.mjs";
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
 const doDeploy = argv.includes("--deploy");
-const getArg = (name, fallback = null) => {
-  const i = argv.indexOf(name);
-  return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : fallback;
+// Node.js 定时器（setTimeout/AbortSignal.timeout）允许的最大毫秒数约为 2^31-1；
+// 超过该值会被 Node 截断/告警，必须在进入任何网络探测前拒绝。
+const MAX_TIMEOUT_MS = 2147483647;
+const parseTimeoutArg = () => {
+  const idx = argv.indexOf("--timeout");
+  if (idx === -1) return { ok: true, value: 15000 };
+  const raw = argv[idx + 1];
+  if (raw === undefined || raw === "" || raw.startsWith("--")) {
+    return { ok: false, reason: "缺少值" };
+  }
+  if (!/^[0-9]+$/.test(raw)) return { ok: false, reason: "必须是有限正整数" };
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) return { ok: false, reason: "必须大于 0 且是有限正整数" };
+  if (value > MAX_TIMEOUT_MS) return { ok: false, reason: `不能超过 Node.js 定时器上限 ${MAX_TIMEOUT_MS}` };
+  return { ok: true, value };
 };
-const timeout = Number(getArg("--timeout", "15000"));
+const timeoutArg = parseTimeoutArg();
+if (!timeoutArg.ok) {
+  // 参数错误必须在任何 fetch / wrangler 调用之前退出，不能包装成网络连接失败。
+  console.error(`用法错误：--timeout ${timeoutArg.reason}；应传 1..${MAX_TIMEOUT_MS} 的毫秒整数，例如 --timeout 15000。`);
+  process.exit(2);
+}
+const timeout = timeoutArg.value;
 const apiBase = "https://api.cloudflare.com/client/v4";
 
 const checks = [];

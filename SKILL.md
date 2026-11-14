@@ -109,6 +109,7 @@ node "<技能目录>/scripts/probe.mjs"
 
 - 退出码 `0` = ready；`1` = limited（先读 warn，判断缺口是否影响本次目标）；`2` = blocked（**硬停**）。
 - blocked 时不要改配置、装适配器或跑构建。给出具体下一步（`npx wrangler login`，或 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`）；**不要让用户在聊天里粘贴 Token**。
+- `probe.mjs --timeout` 只接受 1..2147483647 的有限正整数（毫秒）；空值、非数字、负数、0、小数、超范围值会在任何网络探测/`--deploy` 之前以退出码 2 报中文用法错误，不会包装成网络失败。
 - 登录态判定是 **fail-closed** 的（`check-env` 与 `probe` 共用 `scripts/wrangler-auth.mjs`）：`wrangler whoami` 退出码 0 但输出为空、只有 `loggedIn:false`、或没有邮箱 / Account ID / 明确登录文本时，判「无法确认」而不是已登录；`canDeploy` 不会为 true、`probe` 会 blocked。执行失败与未登录分开报告。
 - `npx wrangler deploy --temporary` 只在未登录时可用，用的是临时账号，**不能验证用户的账号、权限或套餐**，且会过期；它只能证明网络可达。
 - `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。**部署命令成功不等于线上验证成功**：必须解析到 URL 并真实请求通过才判 `pass`；没 URL 或 URL 不可访问只会得到 `warn` / `fail`，清理失败也会单独记 `warn`；部署本身失败时确认不了是否创建过 Worker，清理记为 `skip` 并提示到控制台核对，不要写成「删除失败」，也不要断言一定没创建。部署 URL 返回 3xx 不算线上验证通过（脚本不跟随）。没有账号时不要声称已验证部署链路。
