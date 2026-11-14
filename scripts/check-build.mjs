@@ -3,14 +3,18 @@
  * check-build.mjs — 部署前检查静态构建产物。
  *
  * 用法：
- *   node scripts/check-build.mjs --dir dist [--mode static|spa|ssg|ssr] [--plan free|paid] [--json]
- *   node scripts/check-build.mjs --dir dist --plan paid --wrangler-version 4 \
- *     --pages-wrangler-major 4 [--json]
+ *   node scripts/check-build.mjs --dir dist [--mode static|spa|ssg|ssr] [--plan free|paid] \
+ *     [--target pages|workers] [--wrangler-version 4.34.0] [--pages-wrangler-major 4] [--json]
  *
- * 套餐与文件数（Cloudflare Pages / Workers Static Assets，2026-11 官方 Limits）：
+ * 套餐与文件数（2026-11 官方 Limits；两个产品的 20,000 / 100,000 相同，启用条件不同）：
  *   Free  20,000 文件 —— 默认，不需要任何额外信息。
- *   Paid  最多 100,000 文件 —— 只有显式 --plan paid 才考虑；Pages 还必须在项目设置里
- *         设置 PAGES_WRANGLER_MAJOR_VERSION=4 并用 Wrangler v4 构建。
+ *   Paid  最多 100,000 文件 —— 只有显式 --plan paid 才考虑，且必须按部署目标核对：
+ *     --target pages   → Wrangler v4 构建 + Pages 项目设置 PAGES_WRANGLER_MAJOR_VERSION=4
+ *                        （官方 Pages Limits；该环境变量是 Pages 专属）
+ *     --target workers → Wrangler >= 4.34.0（官方 Workers Limits 原文 "you must use version
+ *                        4.34.0 or higher"）；不需要 Pages 的环境变量
+ *     目标未知         → 不放宽，仍按 Free 20,000（不知道该套用哪套条件）
+ *   版本按完整点分数字比较（4.9.0 < 4.34.0）；非法版本视为无法确认。
  *   证据不足时不放宽：仍按 Free 20,000 判定，并给 warn 说明缺什么。
  *   控制台里的账号套餐和 Pages 项目设置本地看不到，脚本只能核对显式参数/环境变量/项目依赖。
  *
@@ -38,23 +42,71 @@ const PLANS = {
   free: { limit: 20000, label: "Free" },
   paid: { limit: 100000, label: "Paid" },
 };
+const TARGETS = ["pages", "workers"];
+const WORKERS_MIN_VERSION = [4, 34, 0];
 const MODES = ["static", "spa", "ssg", "ssr"];
 const fmt = (n) => n.toLocaleString("en-US");
 
 /**
+ * 解析版本号：只接受「可选范围前缀 + 点分数字」。
+ * `4.x`、`abc`、`4.34.0-beta.1`、空串都视为「无法确认」，宁可退回 Free 也不猜。
+ * 导出以便测试直接覆盖非法版本与补丁版本边界。
+ */
+export function parseVersion(raw) {
+  const s = String(raw ?? "").trim();
+  const m = s.match(/^[v^~><=\s]*(\d+(?:\.\d+)*)\s*$/);
+  if (!m) return null;
+  const parts = m[1].split(".").map(Number);
+  return { raw: m[1], parts, major: parts[0] };
+}
+
+/** 完整版本比较，短版本按 0 补齐；避免把 4.9 当成比 4.34 新。 */
+export function compareVersions(a, b) {
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
  * 决定「本次实际用哪个上限」。导出以便单元测试直接测边界，不用真造两万个文件。
- * 只有 declaredPlan === "paid" 且两项证据齐全，才允许放宽到 100,000。
+ * 只有 declaredPlan === "paid" 且目标明确、对应证据齐全，才允许放宽到 100,000。
+ * opts: { target, wranglerVersion, wranglerMajor（旧字段，兼容）, pagesMajor }
  */
 export function resolvePlan(declaredPlan, opts = {}) {
   if (!PLANS[declaredPlan]) return null;
-  const wranglerMajor = opts.wranglerMajor ?? null;
+  const target = TARGETS.includes(opts.target) ? opts.target : null;
+  // 兼容只给主版本的旧调用：按 [major] 参与比较，因此不能证明 >= 4.34.0。
+  let version = null;
+  if (opts.wranglerVersion != null) version = parseVersion(opts.wranglerVersion);
+  else if (opts.wranglerMajor != null && Number.isFinite(Number(opts.wranglerMajor))) {
+    const major = Number(opts.wranglerMajor);
+    version = { raw: String(major), parts: [major], major };
+  }
   const pagesMajor = String(opts.pagesMajor ?? "").trim();
   const basis = [];
   const missing = [];
-  if (wranglerMajor !== null && wranglerMajor >= 4) basis.push(`Wrangler v${wranglerMajor}`);
-  else missing.push("Wrangler 主版本 >= 4 未确认（--wrangler-version 4，或项目 package.json 声明 wrangler@^4）");
-  if (pagesMajor === "4") basis.push("PAGES_WRANGLER_MAJOR_VERSION=4");
-  else missing.push("PAGES_WRANGLER_MAJOR_VERSION=4 未确认（Pages 项目设置/CI 环境变量；--pages-wrangler-major 4）");
+  let requirement = "";
+
+  if (declaredPlan !== "paid") {
+    requirement = "默认 Free 上限，不需要套餐证据";
+  } else if (target === "pages") {
+    requirement = "Pages 需要 Wrangler v4 + PAGES_WRANGLER_MAJOR_VERSION=4";
+    if (version && version.major >= 4) basis.push(`Wrangler ${version.raw}`);
+    else missing.push("Wrangler 主版本 >= 4 未确认或版本非法（--wrangler-version 4，或项目 package.json 声明 wrangler@^4）");
+    if (pagesMajor === "4") basis.push("PAGES_WRANGLER_MAJOR_VERSION=4");
+    else missing.push("PAGES_WRANGLER_MAJOR_VERSION=4 未确认（Pages 项目设置/CI 环境变量；--pages-wrangler-major 4）");
+  } else if (target === "workers") {
+    requirement = "Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）";
+    if (version && compareVersions(version.parts, WORKERS_MIN_VERSION) >= 0) basis.push(`Wrangler ${version.raw} >= 4.34.0`);
+    else missing.push("Wrangler >= 4.34.0 未确认或版本非法（官方 Workers Limits；--wrangler-version 4.34.0，或 package.json 声明 wrangler@^4.34.0）");
+  } else {
+    requirement = "部署目标未知：不擅自套用任何放宽条件";
+    missing.push("未提供 --target pages|workers，无法确认部署目标及其启用条件");
+  }
 
   const effective = declaredPlan === "paid" && missing.length === 0 ? "paid" : "free";
   const limit = PLANS[effective].limit;
@@ -62,12 +114,14 @@ export function resolvePlan(declaredPlan, opts = {}) {
     declared: declaredPlan,
     effective,
     limit,
+    target,
+    requirement,
     basis,
     missing,
     note: "本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认",
   };
   const limitReason = effective === "paid"
-    ? `Paid 上限 ${fmt(limit)} 已按证据启用（${basis.join(" + ")}）`
+    ? `Paid 上限 ${fmt(limit)} 已按证据启用（${requirement}：${basis.join(" + ")}）`
     : declaredPlan === "paid"
       ? `声明 paid 但证据不足（${missing.join("；")}），仍按 Free 上限 ${fmt(limit)} 判定`
       : `默认 Free 上限 ${fmt(limit)}（未声明 --plan paid）`;
@@ -91,15 +145,12 @@ export function evaluateFileCount(count, planInfo, limitReason) {
   };
 }
 
-// Wrangler 主版本的本地证据：显式参数 > 环境变量 > 从产物目录向上找 package.json。
+// Wrangler 完整版本的本地证据：显式参数 > 环境变量 > 从产物目录向上找 package.json。
 // 故意不调用 `wrangler --version`：本脚本是只读的产物检查，npx 可能联网下载，且产物目录
-// 通常不是项目根。拿不到版本就返回 null，由调用方决定是否放宽。
-function readWranglerMajor(dir) {
+// 通常不是项目根。返回原始字符串交给 parseVersion 解析，拿不到就由调用方退回 Free。
+function readWranglerVersion(dir) {
   const explicit = getArg("--wrangler-version") || process.env.CF_DEPLOY_WRANGLER_VERSION || null;
-  if (explicit) {
-    const m = String(explicit).match(/\d+/);
-    return m ? Number(m[0]) : null;
-  }
+  if (explicit) return String(explicit).trim();
   let d = dir || process.cwd();
   for (let i = 0; i < 4; i++) {
     const pj = path.join(d, "package.json");
@@ -107,10 +158,7 @@ function readWranglerMajor(dir) {
       try {
         const pkg = JSON.parse(fs.readFileSync(pj, "utf8"));
         const spec = pkg?.devDependencies?.wrangler || pkg?.dependencies?.wrangler || null;
-        if (spec) {
-          const m = String(spec).match(/\d+/);
-          if (m) return Number(m[0]);
-        }
+        if (spec) return String(spec).trim();
       } catch { /* 不是 JSON 就跳过 */ }
     }
     const parent = path.dirname(d);
@@ -135,6 +183,7 @@ function main() {
   const modeArg = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
   const dirArg = getArg("--dir");
   const declaredPlan = getArg("--plan", "free");
+  const targetArg = getArg("--target");
 
   if (!MODES.includes(modeArg)) {
     console.error(`未知模式：${modeArg}；只支持 ${MODES.join(" / ")}`);
@@ -144,15 +193,20 @@ function main() {
     console.error(`未知套餐：${declaredPlan}；只支持 ${Object.keys(PLANS).join(" / ")}`);
     return 2;
   }
+  if (targetArg && !TARGETS.includes(targetArg)) {
+    console.error(`未知部署目标：${targetArg}；只支持 ${TARGETS.join(" / ")}`);
+    return 2;
+  }
 
   const mode = modeArg;
   const dir = dirArg ? path.resolve(dirArg) : null;
   const checks = [];
   const push = (id, status, detail, extra = {}) => checks.push({ id, status, detail, ...extra });
 
-  // --plan paid 只有同时满足两个条件才生效；缺一就不放宽。
+  // 放宽条件按部署目标分流；目标未知或证据不足一律退回 Free。
   const { planInfo, limitReason } = resolvePlan(declaredPlan, {
-    wranglerMajor: readWranglerMajor(dir),
+    target: targetArg,
+    wranglerVersion: readWranglerVersion(dir),
     pagesMajor: getArg("--pages-wrangler-major", process.env.PAGES_WRANGLER_MAJOR_VERSION || ""),
   });
   const { effective: effectivePlan, limit } = planInfo;
@@ -172,7 +226,7 @@ function main() {
   }
 
   if (!dirArg) {
-    console.error("用法：node scripts/check-build.mjs --dir <输出目录> [--mode static|spa|ssg|ssr] [--plan free|paid] [--json]");
+    console.error("用法：node scripts/check-build.mjs --dir <输出目录> [--mode static|spa|ssg|ssr] [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0] [--pages-wrangler-major 4] [--json]");
     return 2;
   }
 
@@ -206,9 +260,9 @@ function main() {
       "plan",
       effectivePlan === "paid" ? "pass" : "warn",
       effectivePlan === "paid"
-        ? `按 Paid 上限 ${fmt(limit)} 检查：${planInfo.basis.join(" + ")}；账号套餐与 Pages 项目设置仍需人工确认`
-        : `声明 --plan paid 但条件不满足，仍按 Free ${fmt(limit)} 检查：${planInfo.missing.join("；")}`,
-      { declared: declaredPlan, effective: effectivePlan, limit, basis: planInfo.basis, missing: planInfo.missing }
+        ? `按 Paid 上限 ${fmt(limit)} 检查：${planInfo.requirement}；证据 ${planInfo.basis.join(" + ")}；账号套餐与 Pages 项目设置仍需人工确认`
+        : `声明 --plan paid 但条件不满足，仍按 Free ${fmt(limit)} 检查：${planInfo.requirement}；缺 ${planInfo.missing.join("；")}`,
+      { declared: declaredPlan, effective: effectivePlan, limit, target: planInfo.target, requirement: planInfo.requirement, basis: planInfo.basis, missing: planInfo.missing }
     );
   }
 
@@ -300,13 +354,14 @@ function main() {
       assetsChecked: checkedAssets,
       fileLimit: limit,
       effectivePlan,
+      target: planInfo.target,
       blocking,
       warnings: checks.filter((c) => c.status === "warn").length,
     },
     checks,
   };
 
-  emit(result, `模式=${mode}，${files.length} 个文件，${result.summary.totalMiB} MiB，套餐=${effectivePlan}（上限 ${fmt(limit)}），阻断项=${blocking}`);
+  emit(result, `模式=${mode}，${files.length} 个文件，${result.summary.totalMiB} MiB，目标=${planInfo.target || "未知"}，套餐=${effectivePlan}（上限 ${fmt(limit)}），阻断项=${blocking}`);
   return blocking ? 1 : 0;
 }
 

@@ -44,61 +44,104 @@
 通过  嵌套产物：资源路径能解析
 通过  产物：ssr 不需要 --dir 且明确跳过 — exit=0
 通过  套餐：默认按 Free 20,000
-通过  套餐：声明 paid 但无证据不放宽
-通过  套餐：Wrangler v3 不放宽
-通过  套餐：缺 PAGES_WRANGLER_MAJOR_VERSION=4 不放宽
-通过  套餐：证据齐全才按 100,000
+通过  套餐：Pages Paid 无证据不放宽 — ["Wrangler 主版本 >= 4 未确认或版本非法（--wrangler-version 4，或项目 package.json 声明 wrangler@^4）","PAGES_WRANGLER_MAJOR_VERSION=4 未确认（Pages 项目设置/CI 环境变量；--pages-wrangler-major 4）"]
+通过  套餐：Pages Wrangler v3 不放宽
+通过  套餐：Pages 缺 PAGES_WRANGLER_MAJOR_VERSION=4 不放宽
+通过  套餐：Pages Paid 条件齐全按 100,000
+通过  套餐：Pages 只看 Wrangler 主版本，4.3.0 也够
 通过  套餐：非法值返回 null
 通过  文件数：20,001 在 Free 判失败并写明上限与原因 — 20001 个文件，超出当前生效上限 20,000（free）；默认 Free 上限 20,000（未声明 --plan paid）
 通过  文件数：20,001 在证据齐全的 Paid 判通过
 通过  文件数：100,001 在 Paid 也判失败
+通过  版本：解析点分数字与范围前缀
+通过  版本：非法输入一律无法确认
+通过  版本：完整比较 4.9.0 < 4.34.0
+通过  版本：4.34 与 4.34.0 等价
+通过  版本：5.0 满足 >= 4.34.0
+通过  套餐：Workers Paid + Wrangler 4.34.0 按 100,000 — {"declared":"paid","effective":"paid","limit":100000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":["Wrangler 4.34.0 >= 4.34.0"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  套餐：Workers 不强制 Pages 环境变量
+通过  套餐：Workers Paid + Wrangler 4.33.0 不放宽 — {"declared":"paid","effective":"free","limit":20000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":[],"missing":["Wrangler >= 4.34.0 未确认或版本非法（官方 Workers Limits；--wrangler-version 4.34.0，或 package.json 声明 wrangler@^4.34.0）"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  套餐：Workers 4.9.0 也低于 4.34.0
+通过  套餐：Workers 只给主版本 4 不足以证明 >= 4.34.0
+通过  套餐：Workers 5.0.0 满足门槛
+通过  套餐：Workers Free 仍按 20,000
+通过  套餐：部署目标未知时证据再全也不放宽 — {"declared":"paid","effective":"free","limit":20000,"target":null,"requirement":"部署目标未知：不擅自套用任何放宽条件","basis":[],"missing":["未提供 --target pages|workers，无法确认部署目标及其启用条件"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  套餐：非法版本号不放宽并写明原因
 通过  构建 CLI：默认 free 且上限写进结果
-通过  构建 CLI：声明 paid 但证据不足仍按 20,000 — {"declared":"paid","effective":"free","limit":20000,"basis":[],"missing":["Wrangler 主版本 >= 4 未确认（--wrangler-version 4，或项目 package.json 声明 wrangler@^4）","PAGES_WRANGLER_MAJOR_VERSION=4 未确认（Pages 项目设置/CI 环境变量；--pages-wrangler-major 4）"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
-通过  构建 CLI：显式证据齐全按 100,000
+通过  构建 CLI：声明 paid 但证据不足仍按 20,000 — {"declared":"paid","effective":"free","limit":20000,"target":null,"requirement":"部署目标未知：不擅自套用任何放宽条件","basis":[],"missing":["未提供 --target pages|workers，无法确认部署目标及其启用条件"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：Pages 显式证据齐全按 100,000
 通过  构建 CLI：非法套餐退出码 2
-通过  构建 CLI：从项目 package.json 读到 Wrangler v4 — {"declared":"paid","effective":"paid","limit":100000,"basis":["Wrangler v4","PAGES_WRANGLER_MAJOR_VERSION=4"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
-通过  构建 CLI：CI 环境变量也能作为证据 — {"declared":"paid","effective":"paid","limit":100000,"basis":["Wrangler v4","PAGES_WRANGLER_MAJOR_VERSION=4"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：非法部署目标退出码 2
+通过  构建 CLI：从项目 package.json 读到 Wrangler v4 — {"declared":"paid","effective":"paid","limit":100000,"target":"pages","requirement":"Pages 需要 Wrangler v4 + PAGES_WRANGLER_MAJOR_VERSION=4","basis":["Wrangler 4.3.0","PAGES_WRANGLER_MAJOR_VERSION=4"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：CI 环境变量也能作为证据 — {"declared":"paid","effective":"paid","limit":100000,"target":"pages","requirement":"Pages 需要 Wrangler v4 + PAGES_WRANGLER_MAJOR_VERSION=4","basis":["Wrangler 4.1.0","PAGES_WRANGLER_MAJOR_VERSION=4"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：Workers 4.34.0 无需 Pages 变量即按 100,000 — {"declared":"paid","effective":"paid","limit":100000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":["Wrangler 4.34.0 >= 4.34.0"],"missing":[],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：Workers 4.33.0 即使给了 Pages 变量也不放宽 — {"declared":"paid","effective":"free","limit":20000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":[],"missing":["Wrangler >= 4.34.0 未确认或版本非法（官方 Workers Limits；--wrangler-version 4.34.0，或 package.json 声明 wrangler@^4.34.0）"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：Workers Free 仍按 20,000
+通过  构建 CLI：非法版本号不放宽 — {"declared":"paid","effective":"free","limit":20000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":[],"missing":["Wrangler >= 4.34.0 未确认或版本非法（官方 Workers Limits；--wrangler-version 4.34.0，或 package.json 声明 wrangler@^4.34.0）"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
+通过  构建 CLI：Pages 缺环境变量不放宽
+通过  构建 CLI：package.json 的 4.3.0 不满足 Workers 门槛 — {"declared":"paid","effective":"free","limit":20000,"target":"workers","requirement":"Workers Static Assets 需要 Wrangler >= 4.34.0（不需要 Pages 环境变量）","basis":[],"missing":["Wrangler >= 4.34.0 未确认或版本非法（官方 Workers Limits；--wrangler-version 4.34.0，或 package.json 声明 wrangler@^4.34.0）"],"note":"本地只核对显式参数、环境变量与项目依赖；账号套餐与 Pages 项目设置里的变量仍需人工确认"}
 通过  验收：静态站正常路径通过 — 失败=0
 通过  验收：canonical + 404 + 资源
 通过  验收：HEAD 405 时用 GET 兜底 — app.css 只支持 GET
 通过  验收：子路径站点查对地址 — exit=0
-通过  验收：未知路径留在 /repo/ 下 — /repo/ /repo/__cf_deploy_check_1794645806766/ /repo/assets/app.css /repo/index.html
+通过  验收：未知路径留在 /repo/ 下 — /repo/ /repo/__cf_deploy_check_1794647753240/ /repo/assets/app.css /repo/index.html
 通过  验收：相对资源按站点根解析
 通过  验收：资源上限写进报告 — checked=1/2
 通过  验收：静态站按 SPA 模式判为“深链 404”警告
 通过  验收：SPA 深链回退通过 — 200 + app shell
 通过  验收：把 SPA 当静态站会判 404 失败 — 这正是原逻辑的冲突点
-通过  验收：CORS 可指向独立子域 API — http://127.0.0.1:35014/api/data
+通过  验收：CORS 可指向独立子域 API — http://127.0.0.1:62884/api/data
 通过  验收：预检通过
 通过  验收：重复 ACAO 判失败 — 两个 ACAO 值
 通过  验收：ACAO 与请求来源不匹配判失败 — 浏览器会拒绝
 通过  预检：允许 Origin + 方法/头/凭据齐全判通过 — []
 通过  预检：拒绝 Origin 判失败 — ["ACAO=https://other.example 与请求 Origin（https://app.example.com）不匹配"]
-通过  预检：Allow-Methods 缺实际方法判失败 — ["Allow-Methods=GET,OPTIONS 不含实际请求方法 POST"]
+通过  预检：Allow-Methods 缺实际方法（DELETE）判失败 — ["Access-Control-Allow-Methods=GET,OPTIONS 不含实际请求方法 DELETE"]
 通过  预检：缺 Allow-Methods 头判失败
-通过  预检：Allow-Headers 缺实际请求头判失败 — ["Allow-Headers=content-type 不含实际请求头 authorization"]
+通过  预检：Allow-Headers 缺实际请求头判失败 — ["Access-Control-Allow-Headers=content-type 不含实际请求头 authorization"]
 通过  预检：缺 Allow-Headers 头判失败
 通过  预检：带凭据但缺 ACAC 判失败
 通过  预检：带凭据但 ACAO=* 判失败
 通过  预检：204 但无 ACAO 不算通过 — ["缺少 Access-Control-Allow-Origin"]
 通过  预检：未提供的检查明确列入 notChecked — ["Allow-Methods（未提供 --cors-method，预检仅用默认探针 POST）","Allow-Headers（未提供 --cors-headers，预检仅用默认探针 content-type,authorization）","Allow-Credentials（未提供 --cors-credentials，未假设使用 Cookie/凭据）"]
+通过  预检：无凭据 + Allow-Methods:* 允许非安全方法 — []
+通过  预检：带凭据 + Allow-Methods:* 不得当通配通过 — ["Access-Control-Allow-Methods=* 不含实际请求方法 DELETE（带凭据时 * 是字面方法名，不是通配符）"]
+通过  预检：无凭据 + Allow-Headers:* 覆盖普通请求头 — []
+通过  预检：Allow-Headers:* 不覆盖 Authorization（non-wildcard header） — ["Access-Control-Allow-Headers=* 不含实际请求头 authorization（Authorization/Range 是 CORS non-wildcard request-header，* 不覆盖）"]
+通过  预检：带凭据 + Allow-Headers:* 不作通配 — ["Access-Control-Allow-Headers=* 不含实际请求头 content-type（带凭据时 * 不作通配符）"]
+通过  预检：带凭据 + 显式允许方法与请求头通过 — []
+通过  预检：POST 是 CORS-safelisted，缺 Allow-Methods 仍通过 — []
+通过  预检：GET 是 CORS-safelisted，缺 Allow-Methods 仍通过 — []
+通过  预检：HEAD 是 CORS-safelisted，Allow-Methods 只列 GET,OPTIONS 仍通过 — []
+通过  预检：已知方法 put 按规范规范化为 PUT 后匹配 — []
+通过  预检：Allow-Methods 小写 delete 与 DELETE 不匹配 — ["Access-Control-Allow-Methods=delete 不含实际请求方法 DELETE"]
+通过  简单请求：带凭据 + ACAO=* 判失败 — {"url":"http://127.0.0.1:62890/acao-wildcard","acao":"*","acac":null,"vary":"Origin","origin":"https://app.example.com","credentials":true,"id":"cors","status":"fail","detail":"ACAO=* 与带凭据请求（--cors-credentials）组合无效，浏览器会拒绝"}
+通过  简单请求：无凭据 + ACAO=* 仍允许 — {"url":"http://127.0.0.1:62890/acao-wildcard","acao":"*","acac":null,"vary":"Origin","origin":"https://app.example.com","credentials":false,"id":"cors","status":"pass","detail":"GET /acao-wildcard → ACAO=*，Vary: Origin"}
 通过  验收：重复 canonical 判失败
 通过  验收：拒绝 301 备用站 — 备用站跳到主站
-通过  验收：ssr 未知路径 404 通过 — {"status":"pass","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794645810100/ -> 404（ssr 模式）"}
+通过  资源：直接 200 判通过且无重定向 — {"url":"/a/direct.css","method":"HEAD","status":200,"fallback":false,"redirected":false,"finalUrl":"http://127.0.0.1:62891/a/direct.css","finalStatus":200,"crossHost":false,"chain":[{"url":"http://127.0.0.1:62891/a/direct.css","status":200,"location":null}],"level":"pass","reason":null}
+通过  资源：301 同主机跟随到最终 200 判通过 — {"url":"/a/301.css","method":"HEAD","status":200,"fallback":false,"redirected":true,"finalUrl":"http://127.0.0.1:62891/a/final.css","finalStatus":200,"crossHost":false,"chain":[{"url":"http://127.0.0.1:62891/a/301.css","status":301,"location":"/a/final.css"},{"url":"http://127.0.0.1:62891/a/final.css","status":200,"location":null}],"level":"pass","reason":null}
+通过  资源：302 后最终 404 判失败 — [{"url":"/a/302.css","reason":"最终状态 404 不是 2xx","finalUrl":"http://127.0.0.1:62891/a/missing.css","finalStatus":404,"chain":[{"url":"http://127.0.0.1:62891/a/302.css","status":302,"location":"/a/missing.css"},{"url":"http://127.0.0.1:62891/a/missing.css","status":404,"location":null}],"status":404,"method":"HEAD"}]
+通过  资源：跨主机重定向不默默当正常，记录最终地址与链 — {"url":"/a/cross.css","method":"HEAD","status":302,"fallback":false,"redirected":false,"finalUrl":"http://127.0.0.1:62892/final.css","finalStatus":302,"crossHost":true,"chain":[{"url":"http://127.0.0.1:62891/a/cross.css","status":302,"location":"http://127.0.0.1:62892/final.css"}],"level":"warn","reason":"跨主机重定向到 http://127.0.0.1:62892/final.css（按策略不跟随，最终资源未验证）"}
+通过  资源：重定向循环有跳数上限且判失败 — [{"url":"/a/loop.css","reason":"重定向超过 5 跳，可能循环","finalUrl":"http://127.0.0.1:62891/a/loop.css","finalStatus":301,"chain":[{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"},{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"},{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"},{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"},{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"},{"url":"http://127.0.0.1:62891/a/loop.css","status":301,"location":"/a/loop.css"}],"status":301,"method":"HEAD"}]
+通过  资源：直接 404 判失败 — [{"url":"/a/404.css","reason":"最终状态 404 不是 2xx","finalUrl":"http://127.0.0.1:62891/a/404.css","finalStatus":404,"chain":[{"url":"http://127.0.0.1:62891/a/404.css","status":404,"location":null}],"status":404,"method":"HEAD"}]
+通过  资源：HEAD 405 改 GET 复核后仍判通过 — {"url":"/a/head405.css","method":"GET","status":200,"fallback":true,"redirected":false,"finalUrl":"http://127.0.0.1:62891/a/head405.css","finalStatus":200,"crossHost":false,"chain":[{"url":"http://127.0.0.1:62891/a/head405.css","status":200,"location":null}],"level":"pass","reason":null}
+通过  资源：3xx 缺 Location 判失败 — [{"url":"/a/noloc.css","reason":"308 重定向缺少 Location，无法确认最终资源","finalUrl":"http://127.0.0.1:62891/a/noloc.css","finalStatus":308,"chain":[{"url":"http://127.0.0.1:62891/a/noloc.css","status":308,"location":null}],"status":308,"method":"HEAD"}]
+通过  验收：ssr 未知路径 404 通过 — {"status":"pass","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794647759296/ -> 404（ssr 模式）"}
 通过  验收：ssr 服务端渲染内容有文本 — {"textLength":339,"id":"ssr-html","status":"pass","detail":"服务端输出的可见文本 339 字符"}
 通过  验收：ssr 记录单次 TTFB — 单次采样，不是性能结论
 通过  验收：--api 状态 + JSON + 期望内容 — [{"path":"/api/health","status":"pass","isJson":true,"expectedFound":true,"expectedJsonError":null,"jsonComparison":{"match":true,"reason":"$ 的 1 个字段全部匹配"},"id":"api","detail":"GET /api/health -> 200 JSON，期望 JSON 子集匹配（1ms）"}]
-通过  验收：--api 非 JSON 响应判失败 — {"path":"/api/broken","status":"fail","isJson":false,"expectedFound":null,"expectedJsonError":null,"jsonComparison":null,"id":"api","detail":"GET /api/broken -> 200 text/plain；Content-Type 不是 JSON（text/plain）（1ms）"}
+通过  验收：--api 非 JSON 响应判失败 — {"path":"/api/broken","status":"fail","isJson":false,"expectedFound":null,"expectedJsonError":null,"jsonComparison":null,"id":"api","detail":"GET /api/broken -> 200 text/plain；Content-Type 不是 JSON（text/plain）（2ms）"}
 通过  验收：--expect-json 不匹配判失败
 通过  验收：--expect-json 缺 --api 报警告
 通过  JSON 比较：字段顺序与空白不影响结果 — {"match":true,"reason":"$ 的 2 个字段全部匹配"}
-通过  JSON 比较：字段缺失给出明确路径 — GET /api/missing -> 200 JSON；期望 JSON 不匹配：字段 $.ok 缺失（2ms）
-通过  JSON 比较：值类型不同判失败 — GET /api/wrongtype -> 200 JSON；期望 JSON 不匹配：$.ok 期望 true，实际 "true"（1ms）
+通过  JSON 比较：字段缺失给出明确路径 — GET /api/missing -> 200 JSON；期望 JSON 不匹配：字段 $.ok 缺失（1ms）
+通过  JSON 比较：值类型不同判失败 — GET /api/wrongtype -> 200 JSON；期望 JSON 不匹配：$.ok 期望 true，实际 "true"（2ms）
 通过  JSON 比较：嵌套数组作为子集匹配
 通过  JSON 比较：数组长度/元素不符判失败
 通过  JSON 比较：预期值不是合法 JSON 明确报错 — GET /api/health -> 200 JSON；--expect-json 不是合法 JSON：Unexpected token 'o', "not-json" is not valid JSON（2ms）
 通过  JSON 比较：响应体不是合法 JSON 明确报错 — GET /api/badjson -> 200 JSON；响应体不是合法 JSON：Unexpected end of JSON input（2ms）
-通过  验收：ssr 下未知路径 200 只警告不判死 — {"status":"warn","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794645811932/ -> 200；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页"}
+通过  验收：ssr 下未知路径 200 只警告不判死 — {"status":"warn","mode":"ssr","id":"404","detail":"GET __cf_deploy_check_1794647760921/ -> 200；SSR 返回 200，确认这是自定义 404 而不是把所有未知路径都渲染成首页"}
 通过  探针：whoami --json 调用失败时不误判未登录 — {"email":"probe@example.com","authSource":"OAuth / 本地登录态","accountName":null,"id":"auth","status":"pass","detail":"已登录：probe@example.com，来源 OAuth / 本地登录态"}
 通过  探针：从纯文本提取 Account ID — {"accountId":"abcdef0123456789abcdef0123456789","id":"account-id","status":"pass","detail":"Account ID 已确定（abcdef…）"}
 通过  探针：wrangler 版本探测通过 — {"id":"wrangler","status":"pass","detail":"项目内 wrangler：4.0.0-fake"}
@@ -115,12 +158,12 @@
 通过  部署探针：URL 不可访问判 fail
 通过  部署探针：拿到 URL 且 HTTP 通过才判 pass
 通过  部署探针：清理失败单独记 warn，不影响 deploy
-通过  探针端到端：--deploy 成功但无 URL 不判 pass — {"worker":"cf-deploy-probe-vzn3nw","url":null,"verified":false,"http":null,"id":"deploy","status":"warn","detail":"部署命令成功，但没有解析到线上 URL；未发起 HTTP 请求，不能判定线上验证通过。到控制台确认临时 Worker 地址后手动复核"}
-通过  探针端到端：清理失败单独记录 — {"worker":"cf-deploy-probe-vzn3nw","id":"deploy-cleanup","status":"warn","detail":"未能删除 cf-deploy-probe-vzn3nw，请到控制台手动删除（不要留着占资源）"}
+通过  探针端到端：--deploy 成功但无 URL 不判 pass — {"worker":"cf-deploy-probe-4vwgkh","url":null,"verified":false,"http":null,"id":"deploy","status":"warn","detail":"部署命令成功，但没有解析到线上 URL；未发起 HTTP 请求，不能判定线上验证通过。到控制台确认临时 Worker 地址后手动复核"}
+通过  探针端到端：清理失败单独记录 — {"worker":"cf-deploy-probe-4vwgkh","id":"deploy-cleanup","status":"warn","detail":"未能删除 cf-deploy-probe-4vwgkh，请到控制台手动删除（不要留着占资源）"}
 通过  探针端到端：nextSteps 提示未完成线上验证 — ["补齐上面 warn 的项；部署前再跑一次本探针","部署探针没有完成线上验证；到控制台确认临时 Worker 地址并手动请求，不要把它记成已验证"]
 通过  探针端到端：部署命令失败判 fail
 通过  预检：退出码与可构建/可部署结论一致 — code=1 canBuild=true canDeploy=false
 通过  预检：--build-only 只按可构建判定 — code=0
 通过  结构检查：frontmatter / 路径 / 无绝对路径 — 结构检查：通过
 
-124/124 通过
+167/167 通过

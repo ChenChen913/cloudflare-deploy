@@ -20,7 +20,7 @@
 | `github.io` 跳到主站 | GitHub Pages 还挂着自定义域名 | 在 GitHub Pages 设置里移除 | `curl -sI https://owner.github.io/repo/` |
 | 备用站 404 | CNAME/项目路径不匹配，或没发布 | 检查 Pages 设置和已发布产物 | 直接访问 + `Server` 头 |
 | 部署后还是旧内容 | 自定义域名上的 Cache Rule 或 Service Worker | 清 URL 缓存、收窄规则；升 SW 版本 | 无痕 + `curl -sI` |
-| 上传失败 | 文件数超过当前套餐上限（默认 Free 20,000；付费 100,000 需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`）或单文件 > 25 MiB | 大文件放 R2、裁剪产物，或核对套餐证据后用 `check-build.mjs --plan paid` | `check-build.mjs` |
+| 上传失败 | 文件数超过当前套餐上限（默认 Free 20,000；Pages 付费需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 付费需 Wrangler >= 4.34.0）或单文件 > 25 MiB | 大文件放 R2、裁剪产物，或核对证据后用 `check-build.mjs --plan paid` 并显式传 `--target pages` 或 `--target workers` | `check-build.mjs` |
 | Pages 构建超时 | 20 分钟限制、工具链太重 | 本地/CI 构建后 Direct Upload | 构建日志 |
 | `wrangler deploy` 报名字不匹配 | 控制台 Worker 名 ≠ 配置里的 `name` | 两边改成一致 | 重新部署 |
 | D1 查询一段时间后失败 | 日读写额度，或单库 500 MB 上限 | 加索引、批量、升级；看 metrics | D1 错误 + metrics |

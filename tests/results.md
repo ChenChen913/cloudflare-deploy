@@ -15,7 +15,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 124 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、JSON 结构、链路探针
+node tests/run-tests.mjs     # 167 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、资源重定向、JSON 结构、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -32,8 +32,8 @@ python <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     124/124 通过
-node tests/check-skill.mjs   通过（SKILL.md 310 行，引用路径 25 个，无绝对路径）
+node tests/run-tests.mjs     167/167 通过
+node tests/check-skill.mjs   通过（SKILL.md 320 行，引用路径 25 个，无绝对路径）
 quick_validate.py            Skill is valid!
 ```
 
@@ -64,9 +64,10 @@ quick_validate.py            Skill is valid!
 | 无 `404.html` | `static` 警告；`spa` 通过；`--spa` 与 `--mode spa` 等价 |
 | 60+ 文件的嵌套产物 | 递归统计 62 个文件；`assets/css/site.css` 能解析 |
 | 无 `--dir` + `--mode ssr` | 退出码 0，明确报 `skip`；不假装检查过产物 |
-| 套餐边界（纯函数 + CLI） | 默认 Free 20,000；声明 `paid` 但无证据 / Wrangler v3 / 缺 `PAGES_WRANGLER_MAJOR_VERSION=4` 都不放宽；证据齐全才 100,000；20,001 个文件在 Free 判失败、在 Paid 判通过 |
-| 从 CI 环境变量 / 项目 `package.json` 取 Wrangler v4 | 证据可自动读到，无需显式参数 |
-| 非法 `--plan` 值 | 退出码 2 |
+| 套餐边界（纯函数 + CLI） | 默认 Free 20,000；Pages Paid 条件齐全按 100,000、缺 `PAGES_WRANGLER_MAJOR_VERSION=4` / Wrangler v3 不放宽；Workers Paid 在 4.34.0 按 100,000、4.33.0 / 4.9.0 / 只给主版本 `4` 不放宽；Workers Free 仍 20,000；目标未知不放宽；20,001 个文件在 Free 判失败、在 Paid 判通过 |
+| 版本号解析与完整比较 | `^4.34.0` 可解析；`4.x` / `abc` / 空串 / 预发布标签一律无法确认；`4.9.0 < 4.34.0`，`4.34 == 4.34.0`，`5.0 > 4.34.0` |
+| 从 CI 环境变量 / 项目 `package.json` 取 Wrangler 版本 | 证据可自动读到，无需显式参数；`^4.3.0` 满足 Pages 但不满足 Workers 的 4.34.0 门槛 |
+| 非法 `--plan` / `--target` 值、非法版本号 | 非法套餐/目标退出码 2；非法版本号退回 Free 20,000 并说明原因 |
 
 ### HTTP 验收（真实服务器，不是 mock）
 
@@ -91,6 +92,8 @@ quick_validate.py            Skill is valid!
 | `--expect-json` 未配 `--api` | → `warn` |
 | SPA 服务器 + `--mode ssr` | 未知路径 200 → 只 `warn`，不判失败 |
 | CORS 预检矩阵（10 例） | 允许 Origin + 方法/头/凭据齐全 → `pass`；拒绝 Origin、缺 Allow-Methods、缺实际方法、缺 Allow-Headers、缺实际请求头、缺 ACAC、`*` 配凭据、204 但无 ACAO → `fail`；未提供参数时 3 项列入 `notChecked` |
+| CORS 通配符 / 凭据 / 安全列表方法（12 例） | 无凭据 + `Allow-Methods: *` → `pass`；带凭据 + `*` → `fail`（`*` 是字面方法名）；无凭据 + `Allow-Headers: *` 覆盖 `content-type` 但不覆盖 `Authorization` → 后者 `fail`；带凭据显式方法与头 → `pass`；`GET/HEAD/POST` 缺 Allow-Methods 仍 `pass`；`put` 规范化为 `PUT` 后匹配；服务器回小写 `delete` 与 `DELETE` 不匹配 → `fail`；带凭据 + `ACAO: *` 的简单请求 → `fail`，无凭据 → `pass` |
+| 资源重定向矩阵（8 例） | 直接 200 → `pass`（chain 1 跳、`finalStatus=200`）；301 同主机跟随到 200 → `pass` 并记录 `redirects`；302 后 404 / 直接 404 / 缺 `Location` / 循环超过 5 跳 → `fail`；跨主机 → `warn` 且记录 `finalUrl` 与 `crossHost`；HEAD 405 → GET 复核仍 `pass` |
 | `--expect-json` 结构化比较（7 例） | 键顺序与空白不影响；字段缺失、类型不符、数组长度不符、嵌套数组子集、无效预期 JSON、非法响应 JSON 都给出明确原因 |
 
 ### 部署探针（纯逻辑 + 本地假 wrangler，不接触真实账号）
@@ -117,11 +120,12 @@ quick_validate.py            Skill is valid!
 - 每个关键字段带 `confirmed` / `inferred` / `unknown`，推测不会被写成事实。
 - 部署目标只给候选；只有现有 Wrangler 配置或硬阻断才会给出高置信度结论。
 - 构建检查和验收用同一个 `--mode`，404 结论不会互相矛盾。
-- 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical 和假备用站。
+- 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical、假备用站，以及资源 3xx 的最终状态。
 - `ssr` 模式不会把静态产物检查套到 SSR 项目上；未知路径返回 200 只警告，不误判为失败。
 - `--api` 能区分 JSON / 非 JSON / 期望内容不匹配；`--expect-json` 缺 `--api` 会警告。期望值按 JSON 子集比较，字段顺序与空白不影响结论。
-- 文件数上限按套餐判定：Paid 放宽需要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` 双重证据，证据不足自动退回 Free 20,000 并给 `warn`。
-- CORS 预检不把 `OPTIONS` 2xx 当通过；只断言用户显式提供的实际方法 / 请求头 / 凭据，其余写进 `notChecked`。
+- 文件数上限按「套餐 + 部署目标」判定：Pages 需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 需完整版本 Wrangler >= 4.34.0；目标未知、非法版本或证据不足一律退回 Free 20,000 并给 `warn`。
+- 资源 3xx 不再算通过：同主机最多跟随 5 跳并验最终 2xx，跨主机记录最终地址并 `warn`，循环 / 缺 `Location` / 最终 4xx/5xx 判 `fail`；报告保留 `probed[].chain` / `finalUrl` / `finalStatus`。
+- CORS 预检不把 `OPTIONS` 2xx 当通过；只断言用户显式提供的实际方法 / 请求头 / 凭据，其余写进 `notChecked`。按 Fetch 规范处理 `*` × 凭据、`Authorization` 非通配、`GET/HEAD/POST` 安全列表方法与方法名大小写。
 - 部署探针把「命令成功」和「线上验证成功」分开，清理失败单独告警。
 - 链路探针在 `whoami --json` 调用失败时仍判定为已登录（该 flag 是官方能力，纯文本判定只是跨版本更稳），能从纯文本提取 Account ID；明确未登录时返回 `blocked` + 退出码 2。
 - `check-env.mjs` 的退出码与 `canBuild` / `canDeploy` 一致，`--build-only` 只按可构建判定。
@@ -150,6 +154,9 @@ quick_validate.py            Skill is valid!
 6. 早前修复：`verify-deployment.mjs` 漏写 `async`；重依赖项目被误判成 Workers（改为 `assess`）；忽略 `wrangler` 的 `assets.directory`；源码扫描把 `tests/` 误当噪声目录。
 7. **`check-env.mjs` 新增的退出码逻辑引用了未定义的 `argv`。** 脚本会先输出 JSON，再抛 `ReferenceError`，因此任何情况都固定以 1 退出；第一次「退出码与结论一致」断言是碰巧通过（`canDeploy=false` 恰好也是 1）。改用 `process.argv`、补 `--build-only` 断言后锁住；同时把 `process.exit()` 换成 `process.exitCode`，避免 Windows 上偶发的 0xC0000409 崩溃码。
 8. **探针用 `includes("ok")` 校验响应体。** `"not ok".includes("ok")` 为 `true`，会把错误响应当成部署成功的线上证据。改成 `trim() === "ok"` 全等比较并加断言。另有一条 `nextSteps` 断言的正则与文案不符，属于测试写错，已修正断言而非改产品文案。
+9. **Paid 文件数放宽把 Pages 专属条件套到了 Workers。** 旧 `resolvePlan()` 一律要求 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，且只取主版本号（`4`），无法比较 `4.34.0`。官方 Workers Limits 要求的是 **Wrangler >= 4.34.0**、不需要 Pages 变量。改为按 `--target` 分流 + 点分数字完整比较，目标未知、非法版本、只给主版本都退回 Free。
+10. **CORS `hasToken()` 见 `*` 就判通过。** 带凭据时 `Allow-Methods: *` / `Allow-Headers: *` 是字面值，`Authorization` / `Range` 是 non-wildcard header（`*` 永不覆盖），`GET/HEAD/POST` 是 CORS-safelisted method。改为按凭据与方法规范分别判定，简单请求的 `ACAO` 也改用 `--cors-credentials` 判定。原有两个用 `POST` 断言「缺 Allow-Methods 判失败」的测试本身不符合规范，改用 `DELETE` 保留场景，并新增 safelisted 通过用例。
+11. **资源 3xx 被默默当成正常。** 旧的「请求失败或 `status >= 400` 才判坏」在 `redirect: "manual"` 下把 301/302/307/308 全算通过。改为独立跟随（同主机最多 5 跳）、验证最终 2xx，报告保留重定向链与最终状态；跨主机 `warn`、循环与最终 4xx/5xx `fail`。
 
 ## CLI / JSON 兼容性
 
@@ -161,3 +168,10 @@ quick_validate.py            Skill is valid!
 | `check-build.mjs` 新增 `plan` / `summary.fileLimit` / `summary.effectivePlan`；`verify-deployment.mjs` 新增 `corsOptions` / `expectJsonMode` / `jsonComparison` / `expectedJsonError` / `httpStatus` 等字段 | 只增字段，向后兼容 | 原字段名、类型与 `schemaVersion` 保持不变；`expectedFound`、`status`、`checks`、`summary` 均保留原语义 |
 | `probe.mjs --deploy` 的 `deploy` 检查新增 `verified` / `http` | 只增字段，向后兼容 | 让「部署成功但没做线上验证」可被机器识别 |
 | `check-build.mjs` 把输出 JSON 后的 `process.exit()` 换成 `process.exitCode` + 主模块守卫 | 内部实现 | 规避 Windows 上偶发的 0xC0000409；退出码语义不变。参数校验的早退路径仍用 `process.exit(2)`，在 Windows 连跑 5 次稳定返回 2 |
+| `--target pages` 或 `--target workers` | 新增可选参数 | 放宽条件按部署目标分流；非法值退出码 2 |
+| `--plan paid` 不带 `--target` 不再放宽到 100,000 | **行为变化（必须）** | Pages 与 Workers 的启用条件不同；无法确认目标时不能擅自套用其中一套。旧调用需补 `--target`，结果里的 `plan.missing` 会写明 |
+| `check-build.mjs` 的 `plan` 新增 `target` / `requirement`，`summary` 新增 `target`；`resolvePlan()` 支持 `wranglerVersion` 并保留 `wranglerMajor` | 只增字段，向后兼容 | `declared` / `effective` / `limit` / `basis` / `missing` / `note` 与 `schemaVersion` 不变；`basis` 文案从 `Wrangler v4` 改成实际解析到的版本字符串 |
+| `check-build.mjs` 新增导出 `parseVersion` / `compareVersions` | 只增导出 | 供测试直接覆盖边界；`main()` 有主模块守卫，import 不会触发真实检查 |
+| `verify-deployment.mjs` 的 `assets` 检查新增 `warnings` / `redirects`，`probed[]` 新增 `chain` / `finalUrl` / `finalStatus` / `crossHost` / `level` / `reason` | 只增字段，但状态语义变化 | 3xx 不再直接算通过：同主机最终 2xx 仍 `pass`、跨主机变 `warn`、最终 4xx/5xx 与循环变 `fail`。`checked` / `total` / `limited` / `broken` / `probed` 保留 |
+| `cors-preflight` 的允许判定按 Fetch 规范收紧 | **行为变化（必须）** | `GET/HEAD/POST` 缺 `Allow-Methods` 现在通过（CORS-safelisted）；带凭据的 `*` 现在失败；`Authorization` 不再被 `*` 覆盖；方法名大小写敏感。`issues` 里写明具体哪个响应头不符 |
+| `cors` 检查新增 `credentials` 字段 | 只增字段 | 带 `--cors-credentials` 时 `ACAO: *` 判 `fail`，不再只看服务器有没有回 ACAC |

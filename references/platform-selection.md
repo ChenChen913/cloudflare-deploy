@@ -72,9 +72,21 @@ Cloudflare 的 Pages 文档顶部现在写着：
 | Pages 构建次数 / 月 | 500，1 并发 | 5,000 / 5（Pro）、20,000 / 20（Business） |
 | Pages 构建超时 | 20 分钟 | 20 分钟 |
 
-Pages 付费档要启用 100,000 文件，需在项目设置里加 `PAGES_WRANGLER_MAJOR_VERSION=4`，并用 Wrangler v4 构建（官方 Pages Limits）。**这个环境变量是 Pages 专属**；Workers Static Assets 的付费档同样是每个 Worker 最多 100,000 个静态文件，但不需要 Pages 的这个设置。
+两个产品的数值相同，**启用条件不同**，不能混为一谈：
 
-`check-build.mjs` 默认按 Free 20,000 检查；只有显式 `--plan paid`，且同时确认 Wrangler v4 与 `PAGES_WRANGLER_MAJOR_VERSION=4` 的证据，才按 100,000 检查。证据不足会自动退回 20,000 并给 `warn`，结果里写明生效上限与原因。可用 `--wrangler-version 4` / `--pages-wrangler-major 4` 显式提供，也从 CI 环境变量与项目 `package.json` 读取；控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。
+| 部署目标 | 放宽到 100,000 的条件 | 依据 |
+|---|---|---|
+| **Pages** | 项目设置里加 `PAGES_WRANGLER_MAJOR_VERSION=4`，并用 Wrangler v4 构建 | 官方 Pages Limits。该环境变量是 **Pages 专属** |
+| **Workers + Static Assets** | Wrangler **>= 4.34.0**（完整版本号） | 官方 Workers Limits → Static Assets 注释：「To use the increased file count limits in Wrangler, you must use version 4.34.0 or higher」。**不需要** Pages 的环境变量 |
+| 目标未知 | 不放宽 | 不知道该套用哪套条件 |
+
+`check-build.mjs` 默认按 Free 20,000 检查；只有显式 `--plan paid` **且** `--target pages|workers` 指明目标、对应证据齐全，才按 100,000 检查：
+
+- `--target pages`：核对 Wrangler 主版本 >= 4 + `PAGES_WRANGLER_MAJOR_VERSION=4`。
+- `--target workers`：按点分数字比较 Wrangler >= 4.34.0（`4.9.0` 比 `4.34.0` 旧；只给主版本 `4` 不够；`4.x`、预发布标签等无法解析的版本一律视为未确认）。
+- 不传 `--target`：即使两样证据都给了也不放宽。
+
+证据不足会自动退回 20,000 并给 `warn`，结果里写明生效上限、目标、依据与原因。`--wrangler-version` / `--pages-wrangler-major` 可显式提供，也从 CI 环境变量与项目 `package.json` 读取；控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。
 
 ### Workers 运行时限制
 
@@ -134,7 +146,7 @@ Pages 的 Direct Upload 和 Workers 的 CLI 可以和现有 Git 流程共存，�
 - 需要持久化本地文件系统或长驻后台进程。
 - 数据库不能迁 D1/Hyperdrive，且外部数据库延迟不可接受。
 - 域名不能迁 NS，而目标是 Workers。
-- 站点文件数超过**当前套餐生效上限**（Free 20,000；付费档需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` 才是 100,000）或有单文件超过 25 MiB，且用户不接受 R2。
+- 站点文件数超过**当前套餐生效上限**（Free 20,000；Pages 付费需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 付费需 Wrangler >= 4.34.0，才是 100,000）或有单文件超过 25 MiB，且用户不接受 R2。
 - 用户只是“想用新的”，没有具体问题要解决。
 
 替代方案：保留原主机、用 Cloudflare 做代理/CDN、只迁静态前端。

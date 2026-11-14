@@ -187,7 +187,8 @@ node "<技能目录>/scripts/check-env.mjs"
 用项目自己的构建命令，然后检查产物：
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg|ssr>" [--plan free|paid]
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg|ssr>" \
+  [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0] [--pages-wrangler-major 4]
 ```
 
 **先定站点模式，再构建检查，最后用同一个模式验收。** 中间换模式，前面的结论就作废：
@@ -201,7 +202,15 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 
 `--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
-**文件数按套餐判定**：默认 Free **20,000**；只有显式 `--plan paid`，且同时确认 Wrangler v4 与 `PAGES_WRANGLER_MAJOR_VERSION=4`，才按 Paid **100,000** 检查。证据不足不会放宽——自动退回 20,000 并给 `warn`，检查结果里写明生效上限和原因。可用 `--wrangler-version 4` / `--pages-wrangler-major 4` 显式提供，或从 CI 环境变量与项目 `package.json` 读取；控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。详见 `references/platform-selection.md`。
+**文件数按套餐 + 部署目标判定**：默认 Free **20,000**。Paid **100,000** 只有显式 `--plan paid` 才考虑，且两套产品的启用条件不同，必须用 `--target` 指明：
+
+| `--target` | 放宽到 100,000 的条件 | 依据 |
+|---|---|---|
+| `pages` | Wrangler v4 构建 + Pages 项目设置 `PAGES_WRANGLER_MAJOR_VERSION=4` | 官方 Pages Limits；该环境变量是 Pages 专属 |
+| `workers` | **Wrangler >= 4.34.0**（完整版本比较），不需要 Pages 环境变量 | 官方 Workers Limits：「To use the increased file count limits in Wrangler, you must use version 4.34.0 or higher」 |
+| 不传 / 无法确认 | **不放宽**，仍按 20,000 | 不知道该套用哪套条件 |
+
+证据可来自 `--wrangler-version` / `--pages-wrangler-major`、CI 环境变量或项目 `package.json`；非法版本（`4.x`、预发布标签）和只给主版本 `4` 都**不能**证明 Workers 的 >= 4.34.0。证据不足自动退回 20,000 并给 `warn`，结果里写明生效上限、目标与原因。控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。详见 `references/platform-selection.md`。
 
 部署前修掉阻断项（输出目录不存在、文件数超过**当前生效上限**、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。构建失败按第 0 步的止损线处理，不要原样重试。
 
@@ -231,7 +240,7 @@ npx wrangler deploy
 node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**，对应检查会列进 `notChecked`。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**，对应检查会列进 `notChecked`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization`/`Range` 永远不被 `Allow-Headers: *` 覆盖；方法名大小写敏感（已知方法先规范化为大写）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
 
 `--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
 
@@ -239,11 +248,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
 - `ssr`：未知路径通常 404；返回 200 只给警告，须人工确认是自定义 404 还是 catch-all。额外检查首页服务端渲染的可见文本长度与单次 TTFB——**单次采样不是性能结论**。
 
-脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。
+脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败自动用 GET 复核；3xx 会按最多 5 跳跟随同主机重定向并验最终 2xx，跨主机只记录并标 `warn`）、响应头、`/index.html` 重定向、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。
 
 **HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON 且（给了 `--expect-json` 时）符合期望的 JSON 子集；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。CORS 预检 `notChecked` 里的项同样要写成「未验证」，不要写成「已通过」。
 
-同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
+同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。结果里的 `probed` 保留每个资源的原始地址、`chain` 重定向链和 `finalStatus`；重定向、循环、最终 4xx/5xx 都不会被当成正常。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
 再按项目类型执行 `references/verification.md` 里的检查。纯静态站不要跑数据库和登录测试。每次修复后重新请求验证；没有新响应，就不能说“已修复”。
 
@@ -262,7 +271,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **新站稳定前不要删 GitHub Pages。**
 - **`github.io` 301 到自定义域名，就不是备用站。** 必须直接请求确认。
 - **`noindex` 不影响访问。** 不要以“备用站要能用”为理由去掉它。
-- **Pages 静态资源默认 `Access-Control-Allow-Origin: *`。** 需要收紧时用 `_headers`；Functions 必须在代码里处理 CORS，包括 `OPTIONS`。
+- **Pages 静态资源默认 `Access-Control-Allow-Origin: *`。** 需要收紧时用 `_headers`；Functions 必须在代码里处理 CORS，包括 `OPTIONS`。带凭据时 `ACAO: *` 无效，`Allow-Methods` / `Allow-Headers` 的 `*` 也不是通配符，`Authorization` 必须显式列出。
+- **资源返回 3xx 不等于资源可用。** 验收用 `redirect: "manual"`，必须跟随到最终 2xx 才算通过；跨主机重定向要记录最终地址并人工确认，循环要判失败。
 - **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
 - **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。

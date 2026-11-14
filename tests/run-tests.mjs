@@ -13,7 +13,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolvePlan, evaluateFileCount } from "../scripts/check-build.mjs";
+import { resolvePlan, evaluateFileCount, parseVersion, compareVersions } from "../scripts/check-build.mjs";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -235,16 +235,18 @@ assert("产物：ssr 不需要 --dir 且明确跳过", ssrBuild.status === 0 && 
 
 // ---------------------------------------------------------------- 套餐 / 文件数上限
 // 用纯函数测边界，不真造 20,001 个文件（本机写 2 万个小文件要 15s+，删也要 17s）。
+// 语义变更：放宽条件按部署目标分流，旧用例保留场景但显式声明 --target pages。
 const freePlan = resolvePlan("free");
 assert("套餐：默认按 Free 20,000", freePlan.planInfo.limit === 20000 && freePlan.planInfo.effective === "free" && /默认 Free/.test(freePlan.limitReason));
-const paidNoEvidence = resolvePlan("paid", { wranglerMajor: null, pagesMajor: "" });
-assert("套餐：声明 paid 但无证据不放宽", paidNoEvidence.planInfo.limit === 20000 && paidNoEvidence.planInfo.missing.length === 2);
-const paidV3 = resolvePlan("paid", { wranglerMajor: 3, pagesMajor: "4" });
-assert("套餐：Wrangler v3 不放宽", paidV3.planInfo.effective === "free" && paidV3.planInfo.missing.some((s) => /Wrangler/.test(s)));
-const paidNoEnv = resolvePlan("paid", { wranglerMajor: 4, pagesMajor: "" });
-assert("套餐：缺 PAGES_WRANGLER_MAJOR_VERSION=4 不放宽", paidNoEnv.planInfo.effective === "free" && paidNoEnv.planInfo.missing.some((s) => /PAGES_WRANGLER/.test(s)));
-const paidOk = resolvePlan("paid", { wranglerMajor: 4, pagesMajor: "4" });
-assert("套餐：证据齐全才按 100,000", paidOk.planInfo.limit === 100000 && paidOk.planInfo.effective === "paid" && paidOk.planInfo.basis.length === 2);
+const paidNoEvidence = resolvePlan("paid", { target: "pages", wranglerVersion: null, pagesMajor: "" });
+assert("套餐：Pages Paid 无证据不放宽", paidNoEvidence.planInfo.limit === 20000 && paidNoEvidence.planInfo.missing.length === 2, JSON.stringify(paidNoEvidence.planInfo.missing));
+const paidV3 = resolvePlan("paid", { target: "pages", wranglerVersion: "3.99.0", pagesMajor: "4" });
+assert("套餐：Pages Wrangler v3 不放宽", paidV3.planInfo.effective === "free" && paidV3.planInfo.missing.some((s) => /Wrangler/.test(s)));
+const paidNoEnv = resolvePlan("paid", { target: "pages", wranglerVersion: "4.34.0", pagesMajor: "" });
+assert("套餐：Pages 缺 PAGES_WRANGLER_MAJOR_VERSION=4 不放宽", paidNoEnv.planInfo.effective === "free" && paidNoEnv.planInfo.missing.some((s) => /PAGES_WRANGLER/.test(s)));
+const paidOk = resolvePlan("paid", { target: "pages", wranglerVersion: "4.34.0", pagesMajor: "4" });
+assert("套餐：Pages Paid 条件齐全按 100,000", paidOk.planInfo.limit === 100000 && paidOk.planInfo.effective === "paid" && paidOk.planInfo.basis.length === 2 && paidOk.planInfo.target === "pages");
+assert("套餐：Pages 只看 Wrangler 主版本，4.3.0 也够", resolvePlan("paid", { target: "pages", wranglerVersion: "^4.3.0", pagesMajor: "4" }).planInfo.effective === "paid");
 assert("套餐：非法值返回 null", resolvePlan("enterprise") === null);
 const overFree = evaluateFileCount(20001, freePlan.planInfo, freePlan.limitReason);
 assert("文件数：20,001 在 Free 判失败并写明上限与原因", overFree.status === "fail" && /20,000/.test(overFree.detail) && /默认 Free/.test(overFree.reason), overFree.detail);
@@ -252,6 +254,31 @@ const underPaid = evaluateFileCount(20001, paidOk.planInfo, paidOk.limitReason);
 assert("文件数：20,001 在证据齐全的 Paid 判通过", underPaid.status === "pass" && underPaid.limit === 100000);
 const overPaid = evaluateFileCount(100001, paidOk.planInfo, paidOk.limitReason);
 assert("文件数：100,001 在 Paid 也判失败", overPaid.status === "fail" && /100,000/.test(overPaid.detail));
+
+// 版本号解析与完整比较（4.9.0 不能被字符串比较误判成比 4.34.0 新）
+assert("版本：解析点分数字与范围前缀", JSON.stringify(parseVersion("^4.34.0")?.parts) === "[4,34,0]" && parseVersion("4.34")?.parts.join(".") === "4.34");
+assert("版本：非法输入一律无法确认", ["4.x", "abc", "", "4.34.0-beta.1", "4.34.x"].every((v) => parseVersion(v) === null));
+assert("版本：完整比较 4.9.0 < 4.34.0", compareVersions([4, 9, 0], [4, 34, 0]) === -1);
+assert("版本：4.34 与 4.34.0 等价", compareVersions([4, 34], [4, 34, 0]) === 0);
+assert("版本：5.0 满足 >= 4.34.0", compareVersions([5], [4, 34, 0]) === 1);
+
+// Workers Static Assets：官方 4.34.0 门槛，不要求 Pages 环境变量
+const wOk = resolvePlan("paid", { target: "workers", wranglerVersion: "4.34.0", pagesMajor: "" });
+assert("套餐：Workers Paid + Wrangler 4.34.0 按 100,000", wOk.planInfo.limit === 100000 && wOk.planInfo.effective === "paid" && wOk.planInfo.target === "workers", JSON.stringify(wOk.planInfo));
+assert("套餐：Workers 不强制 Pages 环境变量", wOk.planInfo.missing.length === 0 && !wOk.planInfo.requirement.includes("PAGES_WRANGLER"));
+const wLow = resolvePlan("paid", { target: "workers", wranglerVersion: "4.33.0", pagesMajor: "4" });
+assert("套餐：Workers Paid + Wrangler 4.33.0 不放宽", wLow.planInfo.effective === "free" && wLow.planInfo.limit === 20000 && wLow.planInfo.missing.some((s) => /4\.34\.0/.test(s)), JSON.stringify(wLow.planInfo));
+assert("套餐：Workers 4.9.0 也低于 4.34.0", resolvePlan("paid", { target: "workers", wranglerVersion: "4.9.0" }).planInfo.effective === "free");
+assert("套餐：Workers 只给主版本 4 不足以证明 >= 4.34.0", resolvePlan("paid", { target: "workers", wranglerMajor: 4 }).planInfo.effective === "free");
+assert("套餐：Workers 5.0.0 满足门槛", resolvePlan("paid", { target: "workers", wranglerVersion: "5.0.0" }).planInfo.effective === "paid");
+const wFree = resolvePlan("free", { target: "workers", wranglerVersion: "4.40.0", pagesMajor: "4" });
+assert("套餐：Workers Free 仍按 20,000", wFree.planInfo.effective === "free" && wFree.planInfo.limit === 20000);
+const unknownTarget = resolvePlan("paid", { wranglerVersion: "4.40.0", pagesMajor: "4" });
+assert("套餐：部署目标未知时证据再全也不放宽", unknownTarget.planInfo.effective === "free" && unknownTarget.planInfo.target === null && unknownTarget.planInfo.missing.some((s) => /--target/.test(s)), JSON.stringify(unknownTarget.planInfo));
+assert("套餐：非法版本号不放宽并写明原因", ["4.x", "4.34.0-beta.1", "abc"].every((v) => {
+  const r = resolvePlan("paid", { target: "workers", wranglerVersion: v });
+  return r.planInfo.effective === "free" && r.planInfo.missing.some((s) => /非法|未确认/.test(s));
+}));
 
 const cb = (args, dir = art, env = {}) => {
   const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, ...args, "--json"], {
@@ -263,16 +290,30 @@ const cbDefault = cb([]);
 assert("构建 CLI：默认 free 且上限写进结果", cbDefault.json.plan?.effective === "free" && cbDefault.json.plan?.limit === 20000 && cbDefault.json.summary?.fileLimit === 20000 && /20,000/.test(cbDefault.json.checks.find((c) => c.id === "file-count").detail));
 const cbPaidNo = cb(["--plan", "paid"]);
 assert("构建 CLI：声明 paid 但证据不足仍按 20,000", cbPaidNo.json.plan?.effective === "free" && cbPaidNo.json.checks.some((c) => c.id === "plan" && c.status === "warn") && cbPaidNo.json.checks.find((c) => c.id === "file-count").limit === 20000, JSON.stringify(cbPaidNo.json.plan));
-const cbPaidOk = cb(["--plan", "paid", "--wrangler-version", "4", "--pages-wrangler-major", "4"]);
-assert("构建 CLI：显式证据齐全按 100,000", cbPaidOk.json.plan?.effective === "paid" && cbPaidOk.json.plan?.limit === 100000 && cbPaidOk.json.checks.some((c) => c.id === "plan" && c.status === "pass"));
+const cbPaidOk = cb(["--plan", "paid", "--target", "pages", "--wrangler-version", "4.34.0", "--pages-wrangler-major", "4"]);
+assert("构建 CLI：Pages 显式证据齐全按 100,000", cbPaidOk.json.plan?.effective === "paid" && cbPaidOk.json.plan?.limit === 100000 && cbPaidOk.json.checks.some((c) => c.id === "plan" && c.status === "pass"));
 const cbBadPlan = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", art, "--plan", "enterprise"], { encoding: "utf8" });
 assert("构建 CLI：非法套餐退出码 2", cbBadPlan.status === 2);
+const cbBadTarget = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", art, "--target", "mongo"], { encoding: "utf8" });
+assert("构建 CLI：非法部署目标退出码 2", cbBadTarget.status === 2);
 w("wrangler4/package.json", JSON.stringify({ name: "wrangler4", devDependencies: { wrangler: "^4.3.0" } }));
 w("wrangler4/dist/index.html", `<html><body>ok</body></html>`);
-const cbAuto = cb(["--plan", "paid", "--pages-wrangler-major", "4"], path.join(work, "wrangler4", "dist"));
-assert("构建 CLI：从项目 package.json 读到 Wrangler v4", cbAuto.json.plan?.effective === "paid" && cbAuto.json.plan?.basis.some((s) => /Wrangler v4/.test(s)), JSON.stringify(cbAuto.json.plan));
-const cbEnv = cb(["--plan", "paid"], art, { PAGES_WRANGLER_MAJOR_VERSION: "4", CF_DEPLOY_WRANGLER_VERSION: "4.1.0" });
+const cbAuto = cb(["--plan", "paid", "--target", "pages", "--pages-wrangler-major", "4"], path.join(work, "wrangler4", "dist"));
+assert("构建 CLI：从项目 package.json 读到 Wrangler v4", cbAuto.json.plan?.effective === "paid" && cbAuto.json.plan?.basis.some((s) => /Wrangler 4/.test(s)), JSON.stringify(cbAuto.json.plan));
+const cbEnv = cb(["--plan", "paid", "--target", "pages"], art, { PAGES_WRANGLER_MAJOR_VERSION: "4", CF_DEPLOY_WRANGLER_VERSION: "4.1.0" });
 assert("构建 CLI：CI 环境变量也能作为证据", cbEnv.json.plan?.effective === "paid", JSON.stringify(cbEnv.json.plan));
+const cbWorkersOk = cb(["--plan", "paid", "--target", "workers", "--wrangler-version", "4.34.0"]);
+assert("构建 CLI：Workers 4.34.0 无需 Pages 变量即按 100,000", cbWorkersOk.json.plan?.effective === "paid" && cbWorkersOk.json.summary?.fileLimit === 100000 && cbWorkersOk.json.summary?.target === "workers", JSON.stringify(cbWorkersOk.json.plan));
+const cbWorkersLow = cb(["--plan", "paid", "--target", "workers", "--wrangler-version", "4.33.0", "--pages-wrangler-major", "4"]);
+assert("构建 CLI：Workers 4.33.0 即使给了 Pages 变量也不放宽", cbWorkersLow.json.plan?.effective === "free" && cbWorkersLow.json.checks.some((c) => c.id === "plan" && c.status === "warn"), JSON.stringify(cbWorkersLow.json.plan));
+const cbWorkersFree = cb(["--plan", "free", "--target", "workers", "--wrangler-version", "4.40.0"]);
+assert("构建 CLI：Workers Free 仍按 20,000", cbWorkersFree.json.plan?.effective === "free" && cbWorkersFree.json.summary?.fileLimit === 20000);
+const cbBadVersion = cb(["--plan", "paid", "--target", "workers", "--wrangler-version", "4.x"]);
+assert("构建 CLI：非法版本号不放宽", cbBadVersion.json.plan?.effective === "free" && cbBadVersion.json.plan?.missing.some((s) => /非法/.test(s)), JSON.stringify(cbBadVersion.json.plan));
+const cbNoTarget = cb(["--plan", "paid", "--target", "pages", "--wrangler-version", "4.40.0"]);
+assert("构建 CLI：Pages 缺环境变量不放宽", cbNoTarget.json.plan?.effective === "free");
+const cbPagesSpec = cb(["--plan", "paid", "--target", "workers", "--pages-wrangler-major", "4"], path.join(work, "wrangler4", "dist"));
+assert("构建 CLI：package.json 的 4.3.0 不满足 Workers 门槛", cbPagesSpec.json.plan?.effective === "free", JSON.stringify(cbPagesSpec.json.plan));
 
 // ---------------------------------------------------------------- 验收（真实 HTTP）
 let staticBase = "";
@@ -386,9 +427,55 @@ const corsMatrixServer = http.createServer((req, res) => {
   if (p === "/no-cred") delete h["access-control-allow-credentials"];
   if (p === "/wildcard-cred") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
   if (p === "/no-acao") delete h["access-control-allow-origin"];
+  // 通配符 / 凭据 / 方法大小写 / 安全列表方法矩阵
+  if (p === "/wildcard-method") h["access-control-allow-methods"] = "*";
+  if (p === "/wildcard-header") h["access-control-allow-headers"] = "*";
+  if (p === "/explicit") {
+    h["access-control-allow-methods"] = "GET,POST,OPTIONS,DELETE,PUT";
+    h["access-control-allow-headers"] = "content-type,authorization,x-custom";
+  }
+  if (p === "/lower-method") h["access-control-allow-methods"] = "delete";
+  if (p === "/case-normalize") h["access-control-allow-methods"] = "PUT";
+  if (p === "/acao-wildcard") { h["access-control-allow-origin"] = "*"; delete h["access-control-allow-credentials"]; }
   if (req.method === "OPTIONS") { res.writeHead(204, h); res.end(); return; }
   res.writeHead(200, { "content-type": "text/html", ...h });
   res.end(`<!doctype html><html><head><title>cors</title></head><body>ok</body></html>`);
+});
+
+// 资源重定向矩阵：同一台服务器按首页路径引用不同资源，另一台模拟跨主机目标。
+let assetTargetBase = "";
+const assetPages = {
+  "/case/direct/": "/a/direct.css",
+  "/case/301ok/": "/a/301.css",
+  "/case/302bad/": "/a/302.css",
+  "/case/cross/": "/a/cross.css",
+  "/case/loop/": "/a/loop.css",
+  "/case/404/": "/a/404.css",
+  "/case/head405/": "/a/head405.css",
+  "/case/noloc/": "/a/noloc.css",
+};
+const assetRedirectServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  if (assetPages[p]) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>assets</title><link rel="stylesheet" href="${assetPages[p]}"></head><body>ok</body></html>`);
+    return;
+  }
+  if (p === "/a/direct.css" || p === "/a/final.css" || p === "/a/head405.css") {
+    if (p === "/a/head405.css" && req.method === "HEAD") { res.writeHead(405, { "content-type": "text/css" }); res.end(""); return; }
+    res.writeHead(200, { "content-type": "text/css" });
+    res.end("body{}");
+    return;
+  }
+  if (p === "/a/301.css") { res.writeHead(301, { location: "/a/final.css" }); res.end(); return; }
+  if (p === "/a/302.css") { res.writeHead(302, { location: "/a/missing.css" }); res.end(); return; }
+  if (p === "/a/cross.css") { res.writeHead(302, { location: `${assetTargetBase}/final.css` }); res.end(); return; }
+  if (p === "/a/loop.css") { res.writeHead(301, { location: "/a/loop.css" }); res.end(); return; }
+  if (p === "/a/noloc.css") { res.writeHead(308, {}); res.end(); return; }
+  res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
+});
+const assetTargetServer = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/css" }); res.end("body{}");
 });
 
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
@@ -408,7 +495,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -420,6 +507,8 @@ const dupUrl = `http://127.0.0.1:${dupCanonicalServer.address().port}`;
 const backupUrl = `http://127.0.0.1:${backupServer.address().port}/`;
 const ssrUrl = `http://127.0.0.1:${ssrServer.address().port}`;
 const corsMatrixUrl = `http://127.0.0.1:${corsMatrixServer.address().port}`;
+const assetRedirectBase = `http://127.0.0.1:${assetRedirectServer.address().port}`;
+assetTargetBase = `http://127.0.0.1:${assetTargetServer.address().port}`;
 
 const v1 = await runVerify(["--url", staticBase, "--mode", "static", "--json"]);
 const v1j = JSON.parse(v1.out);
@@ -481,9 +570,11 @@ const cOk = await corsCase("/ok", full);
 assert("预检：允许 Origin + 方法/头/凭据齐全判通过", cOk.pre?.status === "pass" && cOk.pre.notChecked.length === 0 && cOk.pre.checked.includes("Allow-Methods"), JSON.stringify(cOk.pre?.issues));
 const cDeny = await corsCase("/deny", full);
 assert("预检：拒绝 Origin 判失败", cDeny.pre?.status === "fail" && cDeny.pre.issues.some((s) => /不匹配/.test(s)), JSON.stringify(cDeny.pre?.issues));
-const cMethod1 = await corsCase("/missing-method", ["--cors-method", "POST"]);
-assert("预检：Allow-Methods 缺实际方法判失败", cMethod1.pre?.status === "fail" && cMethod1.pre.issues.some((s) => /不含实际请求方法/.test(s)), JSON.stringify(cMethod1.pre?.issues));
-const cMethod2 = await corsCase("/no-method", ["--cors-method", "POST"]);
+// POST 是 CORS-safelisted method，按规范不应因「没列在 Allow-Methods」判失败；
+// 这两条旧场景保留，但改用非安全方法 DELETE 才能真正测到「缺方法」。
+const cMethod1 = await corsCase("/missing-method", ["--cors-method", "DELETE"]);
+assert("预检：Allow-Methods 缺实际方法（DELETE）判失败", cMethod1.pre?.status === "fail" && cMethod1.pre.issues.some((s) => /不含实际请求方法/.test(s)), JSON.stringify(cMethod1.pre?.issues));
+const cMethod2 = await corsCase("/no-method", ["--cors-method", "DELETE"]);
 assert("预检：缺 Allow-Methods 头判失败", cMethod2.pre?.status === "fail" && cMethod2.pre.issues.some((s) => /缺少 Access-Control-Allow-Methods/.test(s)));
 const cHeader1 = await corsCase("/missing-header", ["--cors-headers", "content-type,authorization"]);
 assert("预检：Allow-Headers 缺实际请求头判失败", cHeader1.pre?.status === "fail" && cHeader1.pre.issues.some((s) => /不含实际请求头/.test(s)), JSON.stringify(cHeader1.pre?.issues));
@@ -498,6 +589,34 @@ assert("预检：204 但无 ACAO 不算通过", cNoAcao.pre?.status === "fail" &
 const cDefault = await corsCase("/ok");
 assert("预检：未提供的检查明确列入 notChecked", cDefault.pre?.status === "pass" && cDefault.pre.notChecked.length === 3 && /未执行/.test(cDefault.pre.detail), JSON.stringify(cDefault.pre?.notChecked));
 
+// ---------------------------------------------------------------- CORS 通配符 / 凭据 / 安全列表方法（Fetch 规范）
+const cWildMethod = await corsCase("/wildcard-method", ["--cors-method", "DELETE"]);
+assert("预检：无凭据 + Allow-Methods:* 允许非安全方法", cWildMethod.pre?.status === "pass", JSON.stringify(cWildMethod.pre?.issues));
+const cWildMethodCred = await corsCase("/wildcard-method", ["--cors-method", "DELETE", "--cors-credentials"]);
+assert("预检：带凭据 + Allow-Methods:* 不得当通配通过", cWildMethodCred.pre?.status === "fail" && cWildMethodCred.pre.issues.some((s) => /字面方法名/.test(s)), JSON.stringify(cWildMethodCred.pre?.issues));
+const cWildHeader = await corsCase("/wildcard-header", ["--cors-headers", "content-type"]);
+assert("预检：无凭据 + Allow-Headers:* 覆盖普通请求头", cWildHeader.pre?.status === "pass", JSON.stringify(cWildHeader.pre?.issues));
+const cWildHeaderAuth = await corsCase("/wildcard-header", ["--cors-headers", "authorization"]);
+assert("预检：Allow-Headers:* 不覆盖 Authorization（non-wildcard header）", cWildHeaderAuth.pre?.status === "fail" && cWildHeaderAuth.pre.issues.some((s) => /non-wildcard/.test(s)), JSON.stringify(cWildHeaderAuth.pre?.issues));
+const cWildHeaderCred = await corsCase("/wildcard-header", ["--cors-headers", "content-type", "--cors-credentials"]);
+assert("预检：带凭据 + Allow-Headers:* 不作通配", cWildHeaderCred.pre?.status === "fail" && cWildHeaderCred.pre.issues.some((s) => /不作通配符/.test(s)), JSON.stringify(cWildHeaderCred.pre?.issues));
+const cExplicitCred = await corsCase("/explicit", ["--cors-method", "DELETE", "--cors-headers", "authorization", "--cors-credentials"]);
+assert("预检：带凭据 + 显式允许方法与请求头通过", cExplicitCred.pre?.status === "pass", JSON.stringify(cExplicitCred.pre?.issues));
+const cSafePost = await corsCase("/no-method", ["--cors-method", "POST"]);
+assert("预检：POST 是 CORS-safelisted，缺 Allow-Methods 仍通过", cSafePost.pre?.status === "pass", JSON.stringify(cSafePost.pre?.issues));
+const cSafeGet = await corsCase("/no-method", ["--cors-method", "GET"]);
+assert("预检：GET 是 CORS-safelisted，缺 Allow-Methods 仍通过", cSafeGet.pre?.status === "pass", JSON.stringify(cSafeGet.pre?.issues));
+const cSafeHead = await corsCase("/missing-method", ["--cors-method", "HEAD"]);
+assert("预检：HEAD 是 CORS-safelisted，Allow-Methods 只列 GET,OPTIONS 仍通过", cSafeHead.pre?.status === "pass", JSON.stringify(cSafeHead.pre?.issues));
+const cCaseNorm = await corsCase("/case-normalize", ["--cors-method", "put"]);
+assert("预检：已知方法 put 按规范规范化为 PUT 后匹配", cCaseNorm.pre?.status === "pass", JSON.stringify(cCaseNorm.pre?.issues));
+const cCaseLower = await corsCase("/lower-method", ["--cors-method", "DELETE"]);
+assert("预检：Allow-Methods 小写 delete 与 DELETE 不匹配", cCaseLower.pre?.status === "fail" && cCaseLower.pre.issues.some((s) => /不含实际请求方法 DELETE/.test(s)), JSON.stringify(cCaseLower.pre?.issues));
+const cAcaoWild = await corsCase("/acao-wildcard", ["--cors-credentials"]);
+assert("简单请求：带凭据 + ACAO=* 判失败", cAcaoWild.result.checks.some((c) => c.id === "cors" && c.status === "fail"), JSON.stringify(cAcaoWild.result.checks.find((c) => c.id === "cors")));
+const cAcaoWildNoCred = await corsCase("/acao-wildcard");
+assert("简单请求：无凭据 + ACAO=* 仍允许", cAcaoWildNoCred.result.checks.some((c) => c.id === "cors" && c.status === "pass"), JSON.stringify(cAcaoWildNoCred.result.checks.find((c) => c.id === "cors")));
+
 const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
 assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((c) => c.id === "canonical" && c.status === "fail"));
@@ -505,6 +624,30 @@ assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((
 const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup", backupUrl, "--json"]);
 const v8j = JSON.parse(v8.out);
 assert("验收：拒绝 301 备用站", v8.code === 1 && v8j.checks.some((c) => c.id === "backup" && c.status === "fail"), "备用站跳到主站");
+
+// ---------------------------------------------------------------- 资源重定向矩阵
+const assetCase = async (casePath) => {
+  const r = await runVerify(["--url", `${assetRedirectBase}${casePath}`, "--mode", "static", "--assets-limit", "1", "--json"]);
+  const j = JSON.parse(r.out);
+  const assets = j.checks.find((c) => c.id === "assets");
+  return { code: r.code, assets, probed: assets?.probed?.[0] };
+};
+const aDirect = await assetCase("/case/direct/");
+assert("资源：直接 200 判通过且无重定向", aDirect.assets?.status === "pass" && aDirect.probed?.chain?.length === 1 && aDirect.probed.finalStatus === 200, JSON.stringify(aDirect.probed));
+const a301 = await assetCase("/case/301ok/");
+assert("资源：301 同主机跟随到最终 200 判通过", a301.assets?.status === "pass" && a301.probed?.redirected === true && a301.probed.finalStatus === 200 && /\/a\/final\.css$/.test(a301.probed.finalUrl) && a301.assets.redirects?.length === 1, JSON.stringify(a301.probed));
+const a302 = await assetCase("/case/302bad/");
+assert("资源：302 后最终 404 判失败", a302.assets?.status === "fail" && a302.code === 1 && /最终状态 404/.test(a302.assets.broken[0].reason), JSON.stringify(a302.assets?.broken));
+const aCross = await assetCase("/case/cross/");
+assert("资源：跨主机重定向不默默当正常，记录最终地址与链", aCross.assets?.status === "warn" && aCross.probed?.crossHost === true && aCross.probed.finalUrl.startsWith(assetTargetBase) && aCross.probed.chain.length === 1 && aCross.assets.warnings?.length === 1, JSON.stringify(aCross.probed));
+const aLoop = await assetCase("/case/loop/");
+assert("资源：重定向循环有跳数上限且判失败", aLoop.assets?.status === "fail" && /超过 5 跳/.test(aLoop.assets.broken[0].reason) && aLoop.probed?.chain?.length === 6, JSON.stringify(aLoop.assets?.broken));
+const a404 = await assetCase("/case/404/");
+assert("资源：直接 404 判失败", a404.assets?.status === "fail" && /最终状态 404/.test(a404.assets.broken[0].reason), JSON.stringify(a404.assets?.broken));
+const aHead405 = await assetCase("/case/head405/");
+assert("资源：HEAD 405 改 GET 复核后仍判通过", aHead405.assets?.status === "pass" && aHead405.probed?.method === "GET" && aHead405.probed.fallback === true, JSON.stringify(aHead405.probed));
+const aNoLoc = await assetCase("/case/noloc/");
+assert("资源：3xx 缺 Location 判失败", aNoLoc.assets?.status === "fail" && /缺少 Location/.test(aNoLoc.assets.broken[0].reason), JSON.stringify(aNoLoc.assets?.broken));
 
 // ---------------------------------------------------------------- SSR / API 验收
 const vSsr = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":true}', "--json"]);
@@ -552,7 +695,7 @@ const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");

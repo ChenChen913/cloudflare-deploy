@@ -19,6 +19,12 @@
  * 与字段顺序、缩进空白无关。旧版的字符串包含判断已废弃（无法判断结构）。
  * CORS 预检只对用户显式提供的 --cors-method / --cors-headers / --cors-credentials
  * 做断言；没提供的检查会列进 notChecked，绝不替用户推断实际请求方法或请求头。
+ * `*` 只在无凭据请求里是通配符（Fetch 规范）；带凭据时它是字面值，
+ * 且 Authorization / Range 永远不被 `*` 覆盖。GET/HEAD/POST 是 CORS-safelisted method，
+ * 不要求出现在 Allow-Methods 里；方法名按规范大小写敏感比较（已知方法先规范化为大写）。
+ *
+ * 资源重定向会单独跟随（同主机，最多 5 跳），3xx 不再直接算资源正常；
+ * 跨主机重定向只记录不跟随，明确标 warn。
  *
  * 只读：只发 GET/HEAD/OPTIONS。不会跟随跨主机重定向而不报告。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
@@ -77,9 +83,47 @@ function compareJson(expected, actual, at = "$") {
   return { match: true, reason: `${at} 的 ${Object.keys(expected).length} 个字段全部匹配` };
 }
 
-// CORS 头是按逗号分隔的 token 列表，大小写不敏感，也允许 `*`。
+// CORS 头是逗号分隔的 token 列表。请求头名大小写不敏感；HTTP 方法大小写敏感
+// （Fetch 规范只把 DELETE/GET/HEAD/OPTIONS/POST/PUT 规范化成大写）。
 const splitTokens = (v) => String(v || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-const hasToken = (headerValue, token) => splitTokens(headerValue).includes("*") || splitTokens(headerValue).includes(String(token).trim().toLowerCase());
+const methodTokens = (v) => String(v || "").split(",").map((s) => s.trim()).filter(Boolean);
+const CORS_SAFELISTED_METHODS = ["GET", "HEAD", "POST"];
+const NORMALIZED_METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"];
+// Fetch 规范：Authorization / Range 是 CORS non-wildcard request-header name，
+// 即使是无凭据请求，`Access-Control-Allow-Headers: *` 也不覆盖它们。
+const NON_WILDCARD_HEADERS = ["authorization", "range"];
+const normalizeMethod = (m) => {
+  const raw = String(m || "").trim();
+  const upper = raw.toUpperCase();
+  return NORMALIZED_METHODS.includes(upper) ? upper : raw;
+};
+
+/** Allow-Methods 判定：`*` 只在无凭据请求里是通配符；GET/HEAD/POST 永远允许。 */
+function allowMethodCheck(headerValue, wanted, credentials) {
+  const tokens = methodTokens(headerValue);
+  const method = normalizeMethod(wanted);
+  if (tokens.includes(method)) return { ok: true };
+  if (!credentials && tokens.includes("*")) return { ok: true };
+  if (CORS_SAFELISTED_METHODS.includes(method)) return { ok: true };
+  return {
+    ok: false,
+    reason: `Access-Control-Allow-Methods=${headerValue || "无"} 不含实际请求方法 ${method}`
+      + (credentials && tokens.includes("*") ? "（带凭据时 * 是字面方法名，不是通配符）" : tokens.includes("*") ? "（* 不是有效方法名）" : ""),
+  };
+}
+
+/** Allow-Headers 判定：`*` 只在无凭据时通配，且永不覆盖 Authorization / Range。 */
+function allowHeaderCheck(headerValue, wanted, credentials) {
+  const tokens = splitTokens(headerValue);
+  const header = String(wanted).trim().toLowerCase();
+  if (tokens.includes(header)) return { ok: true };
+  if (!credentials && tokens.includes("*") && !NON_WILDCARD_HEADERS.includes(header)) return { ok: true };
+  return {
+    ok: false,
+    reason: `Access-Control-Allow-Headers=${headerValue || "无"} 不含实际请求头 ${wanted}`
+      + (NON_WILDCARD_HEADERS.includes(header) && tokens.includes("*") ? "（Authorization/Range 是 CORS non-wildcard request-header，* 不覆盖）" : credentials && tokens.includes("*") ? "（带凭据时 * 不作通配符）" : ""),
+  };
+}
 
 if (!base) {
   console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--json]");
@@ -157,6 +201,52 @@ async function probe(url, headers = {}) {
 const sameHost = (a, b) => {
   try { return new URL(a, base).host === new URL(b, base).host; } catch { return false; }
 };
+
+const MAX_ASSET_REDIRECTS = 5;
+
+/**
+ * 资源专用探针。req() 用 redirect: "manual"，3xx 不会自动跟随；旧逻辑把
+ * `status >= 400` 当作唯一失败条件，于是 301/302/307/308 被默默算成资源正常。
+ * 这里单独跟随同主机重定向并验证最终 2xx；跨主机只记录最终地址、不跟随，
+ * 标 warn 交人工确认；跳数有上限，防止循环。
+ */
+async function probeAsset(url) {
+  const chainHops = [];
+  let current = url;
+  let method = null;
+  let fallback = false;
+  const out = (extra) => ({
+    url, current, method, fallback, chainHops,
+    redirected: chainHops.length > 1,
+    finalUrl: current, finalStatus: null, crossHost: false,
+    ...extra,
+  });
+  for (let hop = 0; hop <= MAX_ASSET_REDIRECTS; hop++) {
+    const r = await probe(current);
+    method = r.method;
+    if (r.note) fallback = true;
+    if (!r.res) return out({ ok: false, level: "fail", reason: `请求失败：${r.error}` });
+    const status = r.res.status;
+    const loc = r.res.headers.get("location");
+    chainHops.push({ url: current, status, location: loc });
+    if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
+    if (status >= 300 && status < 400) {
+      if (!loc) return out({ ok: false, level: "fail", reason: `${status} 重定向缺少 Location，无法确认最终资源`, finalStatus: status });
+      let next;
+      try { next = new URL(loc, current).toString(); }
+      catch { return out({ ok: false, level: "fail", reason: `${status} 重定向的 Location 无法解析：${loc}`, finalStatus: status }); }
+      if (!sameHost(next, current)) {
+        return out({ ok: true, level: "warn", reason: `跨主机重定向到 ${next}（按策略不跟随，最终资源未验证）`, finalUrl: next, finalStatus: status, crossHost: true });
+      }
+      current = next;
+      continue;
+    }
+    if (status >= 200 && status < 300) return out({ ok: true, level: "pass", reason: null, finalStatus: status });
+    return out({ ok: false, level: "fail", reason: `最终状态 ${status} 不是 2xx`, finalStatus: status });
+  }
+  return out({ ok: false, level: "fail", reason: `重定向超过 ${MAX_ASSET_REDIRECTS} 跳，可能循环`, finalStatus: chainHops.at(-1)?.status ?? null });
+}
+
 const root = await chain(base);
 let html = "";
 if (root.error || !root.res) {
@@ -298,24 +388,34 @@ if (html) {
   const allUnique = [...new Set(refs)];
   const unique = allUnique.slice(0, assetsLimit);
   const broken = [];
+  const warnings = [];
   const probed = [];
   for (const u of unique) {
-    const target = resolve(u);
-    const r = await probe(target);
-    const status = r.res?.status ?? null;
-    probed.push({ url: u, method: r.method, status, fallback: Boolean(r.note) });
-    if (!r.res || status >= 400) broken.push({ url: u, status: status ?? r.error, method: r.method });
+    const a = await probeAsset(resolve(u));
+    // 报告保留原始地址、完整重定向链和最终状态，便于事后核对。
+    probed.push({
+      url: u, method: a.method, status: a.finalStatus, fallback: a.fallback,
+      redirected: a.redirected, finalUrl: a.finalUrl, finalStatus: a.finalStatus,
+      crossHost: a.crossHost, chain: a.chainHops, level: a.level, reason: a.reason,
+    });
+    const entry = { url: u, reason: a.reason, finalUrl: a.finalUrl, finalStatus: a.finalStatus, chain: a.chainHops };
+    if (a.level === "fail") broken.push({ ...entry, status: a.finalStatus ?? a.reason, method: a.method });
+    else if (a.level === "warn") warnings.push(entry);
   }
   const fallbackCount = probed.filter((p) => p.fallback).length;
+  const redirects = probed.filter((p) => p.redirected).map((p) => ({ url: p.url, finalUrl: p.finalUrl, finalStatus: p.finalStatus, chain: p.chain }));
   const suffix = allUnique.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allUnique.length} 个；不是全站爬取）` : `（共 ${allUnique.length} 个，覆盖首页引用）`;
   const headNote = fallbackCount ? `；其中 ${fallbackCount} 个 HEAD 不可用，改用 GET` : "";
+  const redirectNote = redirects.length ? `；${redirects.length} 个发生重定向（见 chain / finalStatus）` : "";
   add(
     "assets",
-    broken.length ? "fail" : "pass",
+    broken.length ? "fail" : warnings.length ? "warn" : "pass",
     broken.length
-      ? `${broken.length}/${unique.length} 个资源失败${suffix}：${broken.slice(0, 5).map((b) => `${b.url}（${b.status}）`).join("、")}`
-      : `${unique.length} 个同源资源正常${suffix}${headNote}`,
-    { broken, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
+      ? `${broken.length}/${unique.length} 个资源失败${suffix}：${broken.slice(0, 5).map((b) => `${b.url}（${b.reason}）`).join("、")}${redirectNote}`
+      : warnings.length
+        ? `${warnings.length}/${unique.length} 个资源需人工确认${suffix}：${warnings.slice(0, 5).map((w) => `${w.url}（${w.reason}）`).join("、")}${redirectNote}`
+        : `${unique.length} 个同源资源正常${suffix}${headNote}${redirectNote}`,
+    { broken, warnings, redirects, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
   );
 } else {
   add("html", "warn", "没有拿到首页 HTML；跳过标题、canonical、资源检查");
@@ -412,8 +512,10 @@ if (origin) {
     const acac = r.res.headers.get("access-control-allow-credentials");
     const vary = r.res.headers.get("vary") || "";
     const multiple = Boolean(acao && acao.includes(","));
-    const wildcardWithCredentials = acao === "*" && acac === "true";
-    const matches = acao === "*" || acao === origin;
+    // 用户用 --cors-credentials 声明实际请求带凭据时，ACAO=* 同样无效；
+    // 不能只看服务器有没有回 Allow-Credentials: true。
+    const wildcardWithCredentials = acao === "*" && (acac === "true" || corsCredentials);
+    const matches = (acao === "*" && !wildcardWithCredentials) || acao === origin;
     const status = multiple || wildcardWithCredentials || (acao && !matches) ? "fail" : acao ? "pass" : "warn";
     add(
       "cors",
@@ -421,11 +523,11 @@ if (origin) {
       multiple
         ? `多个 Access-Control-Allow-Origin 值：${acao}`
         : wildcardWithCredentials
-          ? "ACAO=* 与 Allow-Credentials: true 组合无效，浏览器会拒绝带 Cookie 的请求"
+          ? `ACAO=* 与带凭据请求${acac === "true" ? "（或 Allow-Credentials: true）" : "（--cors-credentials）"}组合无效，浏览器会拒绝`
           : acao && !matches
             ? `ACAO=${acao}，与请求的 Origin（${origin}）不匹配，浏览器会拒绝`
             : `GET ${new URL(corsUrl).pathname} → ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`,
-      { url: corsUrl, acao, acac, vary, origin }
+      { url: corsUrl, acao, acac, vary, origin, credentials: corsCredentials }
     );
     if (acao && !vary.toLowerCase().includes("origin")) {
       add("cors-vary", "warn", "缺少 Vary: Origin；CDN 可能把给 A 站的响应缓存给 B 站");
@@ -470,15 +572,21 @@ if (origin) {
 
       if (corsMethod) {
         checked.push("Allow-Methods");
-        if (!allowMethods) issues.push("缺少 Access-Control-Allow-Methods");
-        else if (!hasToken(allowMethods, corsMethod)) issues.push(`Allow-Methods=${allowMethods} 不含实际请求方法 ${corsMethod}`);
+        const r = allowMethodCheck(allowMethods, corsMethod, corsCredentials);
+        if (!r.ok) {
+          // 缺头本身不必然失败：GET/HEAD/POST 是 CORS-safelisted，无需列在 Allow-Methods。
+          if (!allowMethods) issues.push("缺少 Access-Control-Allow-Methods");
+          issues.push(r.reason);
+        }
       }
       if (corsHeadersArg) {
         checked.push("Allow-Headers");
-        const wanted = splitTokens(corsHeadersArg);
-        if (!allowHeaders) issues.push("缺少 Access-Control-Allow-Headers");
-        else for (const h of wanted) {
-          if (!hasToken(allowHeaders, h)) issues.push(`Allow-Headers=${allowHeaders} 不含实际请求头 ${h}`);
+        for (const h of splitTokens(corsHeadersArg)) {
+          const r = allowHeaderCheck(allowHeaders, h, corsCredentials);
+          if (!r.ok) {
+            if (!allowHeaders) { issues.push("缺少 Access-Control-Allow-Headers"); break; }
+            issues.push(r.reason);
+          }
         }
       }
       if (corsCredentials) {

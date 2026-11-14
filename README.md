@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：124/124 通过（`node tests/run-tests.mjs`）。
+- 本地测试：167/167 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -21,9 +21,9 @@
 1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险信号；每个关键字段标注 `confirmed` / `inferred` / `unknown`。
 2. **选型**：给出 Pages / Workers 候选和置信度，由 DNS、部署方式、未来后端需求决定，不凭框架名拍板。
 3. **计划**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。
-4. **构建检查**：部署前按站点模式和套餐上限检查产物（默认 Free 20,000 文件，`--plan paid` + Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` 才按 100,000）；`ssr` 明确报告「不适用」，不会假装检查过。
+4. **构建检查**：部署前按站点模式、套餐和部署目标检查产物。默认 Free 20,000 文件；`--plan paid --target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，`--plan paid --target workers` 要 Wrangler >= 4.34.0，才按 100,000。目标未知、版本非法或证据不足一律退回 20,000 并给 `warn`；`ssr` 明确报告「不适用」。
 5. **部署**：先到 `pages.dev` / `workers.dev` 或预览分支。
-6. **验收**：首页、按模式判定的 404/回退、资源、响应头、canonical/noindex、CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
+6. **验收**：首页、按模式判定的 404/回退、资源（3xx 会跟随到最终 2xx，跨主机记录并告警）、响应头、canonical/noindex、CORS（预检按 Fetch 规范处理 `*` / 凭据 / 安全列表方法）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
 ## 目录
@@ -122,13 +122,15 @@ Agent 先运行 `scripts/probe.mjs` 和 `scripts/check-env.mjs`（两者都用�
 node scripts/probe.mjs                         # 第 0 步：0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs                     # 0 可部署 / 1 不可部署 / 2 不可构建
-node scripts/check-build.mjs --dir dist --mode static [--plan free|paid]   # 或 ssg / spa；ssr 报 skip
+node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # 或 ssg / spa；ssr 报 skip
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json
 ```
 
 `--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。
 
-`check-build.mjs` 默认按 Free **20,000** 文件检查；只有 `--plan paid` 且确认 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` 时才按 **100,000** 检查，证据不足会退回 20,000 并给 `warn`。CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
+`check-build.mjs` 默认按 Free **20,000** 文件检查。Paid **100,000** 的启用条件按部署目标分流：`--target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`（Pages 专属变量）；`--target workers` 要完整版本 **Wrangler >= 4.34.0**（官方 Workers Limits），不需要 Pages 变量。版本按点分数字比较（`4.9.0 < 4.34.0`），`4.x` 等非法版本视为未确认；不传 `--target`、证据不足都退回 20,000 并给 `warn`，结果里写明目标、生效上限与原因。
+
+CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；按 Fetch 规范，`*` 只在无凭据请求里作通配，`GET/HEAD/POST` 是 CORS-safelisted method，`Authorization` 不被 `*` 覆盖，方法名大小写敏感。资源 3xx 会跟随同主机最多 5 跳并验最终 2xx，跨主机只记录并告警。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
 
 SSR / 全栈的 HTTP 基线：
 
@@ -157,13 +159,13 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 124 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、JSON 结构、链路探针
+node tests/run-tests.mjs        # 167 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检、资源重定向、JSON 结构、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 ```
 
-测试会创建 12 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、301 假备用站、`--api` 的 JSON 结构与期望值比较。
+测试会创建 12 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次）以及 `ssr` 模式的显式跳过，并用 11 台本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、独立 CORS 域、重复 canonical、301 假备用站、`--api` 的 JSON 结构与期望值比较。
 
-另加三组回归：套餐放宽条件与文件数上限的纯函数边界（不真造两万个文件）、CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、204 但无 ACAO、未提供的检查不推断）、`--expect-json` 结构用例（键顺序、字段缺失、类型不符、嵌套数组、无效 JSON）。本地假 wrangler 验证链路探针在 `whoami --json` 调用失败时不会误判未登录，并覆盖 `--deploy` 的无 URL / 清理失败 / 部署失败；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
+五组专项回归：套餐按目标分流与完整版本比较（Pages 条件齐全 / 缺环境变量、Workers 4.34.0 / 4.33.0 / Free、目标未知、非法版本号、纯函数文件数边界，不真造两万个文件）、CORS 预检矩阵（允许/拒绝 Origin、缺方法、缺头、凭据错误、204 但无 ACAO、未提供的检查不推断、通配符 × 凭据、Authorization 非通配、安全列表方法、方法大小写）、资源重定向矩阵（直接 200、301→200、302→404、跨主机、循环、404、HEAD 405→GET、缺 Location）、`--expect-json` 结构用例（键顺序、字段缺失、类型不符、嵌套数组、无效 JSON）。本地假 wrangler 验证链路探针在 `whoami --json` 调用失败时不会误判未登录，并覆盖 `--deploy` 的无 URL / 清理失败 / 部署失败；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
 
 这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为。
 

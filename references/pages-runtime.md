@@ -148,7 +148,8 @@ Pages 默认 `Access-Control-Allow-Origin: *`。任何站点都能 `fetch()` 你
 - `Vary: Origin`。
 - 前端 `credentials: "include"`。
 - Cookie 在跨站场景要 `SameSite=None; Secure`。
-- `*` + 凭证会被浏览器拒绝。
+- `*` + 凭证会被浏览器拒绝：`Allow-Methods` / `Allow-Headers` 的 `*` 也只在**无凭据**请求里是通配符，带凭据时必须像下面示例那样显式列出；`Authorization` / `Range` 是 non-wildcard header，任何情况下都不被 `*` 覆盖。
+- `GET` / `HEAD` / `POST` 是 CORS-safelisted method，不要求列在 `Allow-Methods` 里；其他方法必须显式列出，且方法名大小写敏感。
 
 ### Pages Functions
 

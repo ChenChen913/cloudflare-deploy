@@ -83,11 +83,20 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 
 `OPTIONS` 返回 200/204 **不等于** CORS 通过。脚本始终检查 `ACAO` 是否匹配请求 Origin；`Allow-Methods`、`Allow-Headers`、`Allow-Credentials` 只在你显式提供对应参数时才断言。没提供的检查会写进结果的 `notChecked`，报告里必须写「未验证」，不能合并成「CORS 正常」。
 
+断言按 Fetch 规范实现，不是「看到 `*` 就算通过」：
+
+- `Allow-Methods` / `Allow-Headers` 的 `*` **只在无凭据请求里**是通配符；带 `--cors-credentials` 时它是字面值，必须显式列出方法和请求头。
+- `GET` / `HEAD` / `POST` 是 **CORS-safelisted method**，永远允许，不要求出现在 `Allow-Methods` 里；`PUT` / `DELETE` 等才需要显式匹配。
+- `Authorization` / `Range` 是 **CORS non-wildcard request-header name**，即使无凭据，`Allow-Headers: *` 也不覆盖。
+- HTTP 方法名大小写敏感：浏览器只把已知方法（`DELETE/GET/HEAD/OPTIONS/POST/PUT`）规范化成大写，所以服务器回小写 `delete` 不会匹配 `DELETE`。
+- 失败原因会点名具体是哪个响应头不符合要求。
+
 **HTTP 验收不是全栈验收。** 这条命令只证明页面和指定接口能返回；数据库写入、登录会话、第三方回调、真实 Secrets、冷启动仍要人工或专项验证，没测就在报告里写「未验证」。
 
-两个限制必须写进报告：
+三个限制必须写进报告：
 
 - 同源资源只查首页引用的前 20 个（`--assets-limit`），不是全站爬取；报告要写 `checked / total`。
+- 资源请求用 `redirect: "manual"`：3xx **不算通过**。同主机最多跟随 5 跳并验证最终 2xx；跨主机只记录最终地址、不跟随，判 `warn` 交人工确认；循环、缺 `Location`、最终 4xx/5xx 判 `fail`。`probed[].chain` / `finalUrl` / `finalStatus` 保留完整证据。
 - CORS 检查默认查 `--url` 首页；API 在别的子域时必须用 `--cors-url`，否则“首页没有 CORS 头”会被误读成接口有问题。
 
 ## 3. 脚本做不到的人工检查
@@ -141,6 +150,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - Pages 上 `/index.html` 跳 `/`（301/308）是正常的。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
 - 资源检查只覆盖首页引用的前 N 个。写了“资源正常”就必须说明检查了多少个。
+- 资源 301/302/307/308 只是**一跳**，不是结论；要看最终状态。跨主机重定向（CDN、签名 URL）要单独确认，不能默默算正常。
 
 ### 响应头
 
@@ -195,8 +205,10 @@ curl -s -o /dev/null -D - -X OPTIONS \
 
 判定要点：
 
-- `ACAO` 必须等于请求的 `Origin`，或是 `*`；值不匹配等于没配。
-- 带 Cookie 时 `ACAO` 不能是 `*`，且需要 `Access-Control-Allow-Credentials: true`。
+- `ACAO` 必须等于请求的 `Origin`，或（仅无凭据时）是 `*`；值不匹配等于没配。
+- 带 Cookie / 凭据时 `ACAO` 不能是 `*`，且需要 `Access-Control-Allow-Credentials: true`；`Allow-Methods` / `Allow-Headers` 的 `*` 也不再是通配符，必须显式列出。
+- `GET` / `HEAD` / `POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods`；其他方法必须显式匹配，且大小写敏感。
+- `Authorization` / `Range` 是 CORS non-wildcard request-header name，`Allow-Headers: *` 永远不覆盖，必须显式列出。
 - 出现多个 `ACAO` 值（逗号连接）时浏览器判为无效。
 - 缺 `Vary: Origin` 时，CDN 可能把给 A 站的响应缓存给 B 站。
 - 预检还要看 `Access-Control-Allow-Methods` 是否含实际请求方法、`Access-Control-Allow-Headers` 是否含实际请求头；`OPTIONS` 的 2xx 只是必要条件。
@@ -276,5 +288,5 @@ git log -1 --format='commit: %cI'
 - `未验证` 要写原因（没账号、没数据库权限、用户拒绝、超出范围）。
 - 只看了响应头，不能写“CORS 正常”。
 - 只看了 DNS，不能写“备用站正常”。
-- 资源检查要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。
+- 资源检查要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”；发生重定向时要附最终地址与最终状态。
 - 写清楚实际测试的 URL。预览地址不是生产地址。

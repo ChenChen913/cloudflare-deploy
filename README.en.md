@@ -11,7 +11,7 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 ## Status
 
 - Skill format validated (`quick_validate.py`): valid. Repository check `node tests/check-skill.mjs` also passes.
-- Local tests: 124/124 passing (`node tests/run-tests.mjs`).
+- Local tests: 167/167 passing (`node tests/run-tests.mjs`).
 - Real Cloudflare deployment: **not run in this automated test environment** (no account/token, Wrangler not installed). Migration and live observations from a separate real project are recorded in `references/migration-guide.md` (tagged "measured"), but that is historical evidence, not verification performed by these local tests. Local automation is not the same as account-level deployment verification. See `tests/results.md` for exactly what was and was not verified.
 
 ## What it does
@@ -21,9 +21,9 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 1. **Detects** the framework, build command, output directory, base path, SPA/SSR/API type, GitHub Pages setup, existing Wrangler config, bindings, env keys, PWA, workspaces, lockfiles, and risk signals — tagging each key field `confirmed` / `inferred` / `unknown`.
 2. **Proposes** Pages or Workers as candidates with a confidence level; DNS, deployment style, and future backend needs decide, not the framework name.
 3. **Plans** the change, with explicit confirmation gates for DNS, custom domains, production secrets, databases, deletions, and irreversible config.
-4. **Builds and checks** the artifact against the site mode and plan limit (Free 20,000 files by default; 100,000 on `--plan paid` with Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`); `ssr` explicitly reports "not applicable" instead of pretending to have checked it.
+4. **Builds and checks** the artifact against the site mode, plan, and deployment target. Free is 20,000 files by default; 100,000 requires `--plan paid --target pages` (Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`) or `--plan paid --target workers` (full Wrangler version >= 4.34.0). Unknown target, invalid versions, or missing evidence fall back to 20,000 with a `warn`; `ssr` reports "not applicable".
 5. **Deploys** to `pages.dev` / `workers.dev` or a preview branch.
-6. **Verifies** root status, mode-appropriate 404/fallback behavior, assets, headers, canonical/noindex, CORS (including preflight ACAO / Allow-Methods / Allow-Headers / credentials), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON structure.
+6. **Verifies** root status, mode-appropriate 404/fallback behavior, assets (3xx is followed to a final 2xx; cross-host redirects are recorded and warned), headers, canonical/noindex, CORS (preflight follows the Fetch spec for `*` / credentials / safelisted methods), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content, a single TTFB sample, and `--api` endpoint status / JSON structure.
 7. **Reports** every check as pass/fail/warn/unverified. It does not claim a test that was not run.
 
 ## Structure
@@ -122,13 +122,15 @@ Dependency-free, read-only Node 18+ ESM (Node 22+ is still recommended for actua
 node scripts/probe.mjs                         # Step 0: 0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs                     # 0 deployable / 1 not deployable / 2 not buildable
-node scripts/check-build.mjs --dir dist --mode static [--plan free|paid]   # or ssg / spa; ssr reports skip
+node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # or ssg / spa; ssr reports skip
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json
 ```
 
 `--mode` decides the 404 verdict: `static`/`ssg` require a 404 for unknown paths; `spa` requires the app shell; `ssr` normally expects 404 and only warns on 200. Build check and verification must use the same value.
 
-`check-build.mjs` defaults to the Free **20,000** file limit. Only `--plan paid` plus evidence of Wrangler v4 and `PAGES_WRANGLER_MAJOR_VERSION=4` raises it to **100,000**; missing evidence falls back to 20,000 with a `warn`. CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; everything else is listed in `notChecked`. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
+`check-build.mjs` defaults to the Free **20,000** file limit. The Paid **100,000** limit has different prerequisites per target: `--target pages` needs Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` (a Pages-only setting), while `--target workers` needs full Wrangler **>= 4.34.0** (official Workers Limits) and no Pages variable. Versions are compared numerically per segment (`4.9.0 < 4.34.0`); `4.x` and prerelease tags are treated as unverified. Omitting `--target` or any missing evidence falls back to 20,000 with a `warn`, and the result records the target, effective limit, and reason.
+
+CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; everything else is listed in `notChecked`. Per the Fetch spec, `*` is a wildcard only for requests without credentials, `GET`/`HEAD`/`POST` are CORS-safelisted methods, `Authorization` is never covered by `*`, and method names are case-sensitive. Asset 3xx responses follow up to 5 same-host hops and require a final 2xx; cross-host redirects are recorded and warned. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
 
 HTTP baseline for SSR / full-stack:
 
@@ -157,13 +159,13 @@ node scripts/verify-deployment.mjs \
 ## Tests
 
 ```bash
-node tests/run-tests.mjs        # 124 checks: detection, plan/artifact limits, real HTTP, CORS preflight, JSON structure, link probe
+node tests/run-tests.mjs        # 167 checks: detection, plan/artifact limits, real HTTP, CORS preflight, asset redirects, JSON structure, link probe
 node tests/check-skill.mjs      # structure check, no external tooling
 ```
 
-The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons.
+The runner creates twelve synthetic projects (the list above plus a Prisma/Drizzle + Neon fixture), asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks three artifacts (one twice, as static and SPA) plus the explicit `ssr` skip; and runs the verifier against eleven local HTTP servers — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, a separate CORS host, duplicate canonical tags, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons.
 
-Three additional regression groups cover: pure-function boundaries for plan escalation and file-count limits (without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method, missing header, bad credentials, 204 without ACAO, no inference for absent inputs), and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
+Five regression groups cover: target-aware plan escalation with full version comparison (Pages complete / missing env var, Workers 4.34.0 / 4.33.0 / Free, unknown target, invalid versions, pure-function file-count boundaries without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method/header, bad credentials, 204 without ACAO, no inference for absent inputs, wildcard × credentials, Authorization non-wildcard, safelisted methods, method casing), an asset redirect matrix (direct 200, 301→200, 302→404, cross-host, loop, 404, HEAD 405→GET, missing Location), and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
 
 These tests prove the scripts work. They do not prove account permissions, DNS, TLS, or platform behavior.
 
