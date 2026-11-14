@@ -429,6 +429,7 @@ const dupCanonicalServer = http.createServer((req, res) => {
 });
 
 // canonical href 形态矩阵：缺 href / 空 href / 单引号 / 双引号 / 不带引号 / 无法解析。
+// 另加 rel 识别矩阵：只认真正的 <link> 标签上的真正 rel token（忽略注释 / data-rel / 相似词）。
 // 每个页面都真实返回 HTML，测试执行验收脚本后断言 JSON 里的 canonical 检查。
 let canonicalHrefBase = "";
 const canonicalHrefCases = {
@@ -438,6 +439,17 @@ const canonicalHrefCases = {
   "/double-quote/": "double",
   "/unquoted/": "unquoted",
   "/bad-href/": "bad",
+  "/rel-double/": "rel-double",
+  "/rel-single/": "rel-single",
+  "/rel-unquoted/": "rel-unquoted",
+  "/href-first/": "href-first",
+  "/rel-multi-token/": "rel-multi-token",
+  "/real-plus-comment/": "real-plus-comment",
+  "/data-rel/": "data-rel",
+  "/aria-rel/": "aria-rel",
+  "/rel-canonicalized/": "rel-canonicalized",
+  "/comment-only/": "comment-only",
+  "/in-script/": "in-script",
 };
 const canonicalHrefServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
@@ -450,6 +462,17 @@ const canonicalHrefServer = http.createServer((req, res) => {
   else if (kind === "single") tag = `<link rel='canonical' href='${self}'>`;
   else if (kind === "double") tag = `<link rel="canonical" href="${self}">`;
   else if (kind === "unquoted") tag = `<link rel="canonical" href=${self}>`;
+  else if (kind === "rel-double") tag = `<link rel="canonical" href="${self}">`;
+  else if (kind === "rel-single") tag = `<link rel='canonical' href='${self}'>`;
+  else if (kind === "rel-unquoted") tag = `<link rel=canonical href="${self}">`;
+  else if (kind === "href-first") tag = `<link href="${self}" rel="canonical">`;
+  else if (kind === "rel-multi-token") tag = `<link rel="alternate canonical" href="${self}">`;
+  else if (kind === "real-plus-comment") tag = `<link rel="canonical" href="${self}"><!-- <link rel="canonical" href="${self}"> -->`;
+  else if (kind === "data-rel") tag = `<link data-rel="canonical" href="${self}">`;
+  else if (kind === "aria-rel") tag = `<link aria-rel="canonical" href="${self}">`;
+  else if (kind === "rel-canonicalized") tag = `<link rel="canonicalized" href="${self}">`;
+  else if (kind === "comment-only") tag = `<!-- <link rel="canonical" href="${self}"> -->`;
+  else if (kind === "in-script") tag = `<script>document.write('<link rel="canonical" href="${self}">')</script>`;
   else tag = `<link rel="canonical" href="http://">`;
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(`<!doctype html><html><head><title>canonical href</title>${tag}</head><body>ok</body></html>`);
@@ -993,6 +1016,24 @@ assert("canonical href：无法解析判失败，不回退到当前站点",
     && hrefBad.canonical.sameHost === undefined && hrefBad.canonical.samePath === undefined
     && /无法解析/.test(hrefBad.canonical.detail) && !/canonical 指向自身/.test(hrefBad.canonical.detail),
   JSON.stringify({ canonical: hrefBad.canonical, err: hrefBad.err }));
+
+// ---------------------------------------------------------------- canonical rel 识别矩阵
+// 只认真正的 <link> 标签 + 真正的 rel 属性 + 按 HTML 空白分隔的 canonical token。
+const canonicalRelPass = ["/rel-double/", "/rel-single/", "/rel-unquoted/", "/href-first/", "/rel-multi-token/", "/real-plus-comment/"];
+for (const p of canonicalRelPass) {
+  const r = await canonicalHrefCase(p);
+  assert(`canonical rel：${p} 正常识别为指向自身`,
+    r.code === 0 && r.canonical?.status === "pass" && r.canonical.hrefState === "valid"
+      && r.canonical.sameProtocol === true && r.canonical.sameHost === true && r.canonical.samePath === true,
+    JSON.stringify({ canonical: r.canonical, err: r.err }));
+}
+const canonicalRelSkip = ["/data-rel/", "/aria-rel/", "/rel-canonicalized/", "/comment-only/", "/in-script/"];
+for (const p of canonicalRelSkip) {
+  const r = await canonicalHrefCase(p);
+  assert(`canonical rel：${p} 不被误识别为 canonical`,
+    r.code === 0 && r.canonical?.status === "skip" && /没有 canonical/.test(r.canonical.detail || ""),
+    JSON.stringify({ canonical: r.canonical, err: r.err }));
+}
 
 const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup", backupUrl, "--json"]);
 const v8j = JSON.parse(v8.out);

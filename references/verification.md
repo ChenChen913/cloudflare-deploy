@@ -177,7 +177,7 @@ curl -sI https://site.example.com/ | grep -iE 'server|cache-control|x-robots-tag
 curl -s https://site.example.com/ | grep -io '<link[^>]*canonical[^>]*>'
 ```
 
-多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。
+多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。脚本只统计真正的 `<link rel="canonical">`：`rel` 按 HTML 空白分隔 token 精确匹配（`canonicalized` 以及 `data-rel` / `aria-rel` 都不算），HTML 注释和 `<script>` / `<style>` 里的假标签也不计入。
 
 - 主站：只有一个 canonical，指向自己。**指向自己要求协议、主机、规范化路径三者全部一致**；只比 host + pathname 会把 `https` 页面上的 `http` canonical 误判成 self-canonical。脚本在 `canonical` 检查结果里给出 `sameProtocol` / `sameHost` / `samePath`。
 - `href` 缺失、`href=""`、`href` 无法解析分别判 `fail`，结果带 `hrefState`（`missing` / `empty` / `invalid`）；**不会**把空值交给 `new URL("", base)` 解析成当前站点再误判成指向自身。合法的属性值支持双引号、单引号和不带引号三种写法。

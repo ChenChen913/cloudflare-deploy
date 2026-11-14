@@ -16,7 +16,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 268 项：识别、套餐与产物、真实 HTTP 验收、CORS、主站/资源重定向与 SSRF 防护、跳数边界、canonical 协议与 href 形态、3xx 状态分类（304）、CLI 参数校验、JSON 结构、链路探针
+node tests/run-tests.mjs     # 279 项：识别、套餐与产物、真实 HTTP 验收、CORS、主站/资源重定向与 SSRF 防护、跳数边界、canonical 协议 / href 形态 / rel 识别、3xx 状态分类（304）、CLI 参数校验、JSON 结构、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -35,7 +35,7 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     268/268 通过
+node tests/run-tests.mjs     279/279 通过
 node tests/check-skill.mjs   通过（SKILL.md 328 行，引用路径 26 个，无绝对路径）
 quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执行）
 ```
@@ -108,6 +108,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | 主站 / 备用站跳数边界（7 例） | 连续 5 次同源重定向 → 最终 200 判 `pass` + `same-origin-verified`，链 6 跳、服务器收到 6 个链跳请求；最终 404 判 `fail` + `same-origin-final-failed`（不是超限）；第 6 次重定向判 `loop-or-limit`，`limitHop.followed=false`，第 7 个地址零请求；5 次同源后跨源仍 `warn` 且跨源目标零请求；原有循环用例恰好 6 次请求；`--backup` 的 5 次 → 200 判 `pass`、6 次判超限 |
 | canonical 协议矩阵（5 例，真实本地 HTTPS 站点） | HTTPS + HTTPS 自身 canonical → `pass`（`sameProtocol/sameHost/samePath` 全 true）；HTTPS + HTTP canonical → `warn` 且 detail 点名「协议不一致」；其他主机 / 其他路径 → 原有 `warn`；多个标签 → 原有 `fail`。全部执行脚本并断言 JSON，不是读代码或匹配文案 |
 | canonical href 形态矩阵（6 例，真实本地 HTTP 站点） | 缺少 href → `fail` + `hrefState=missing` + `href=null`；`href=""` → `fail` + `hrefState=empty`；`href="http://"` → `fail` + `hrefState=invalid`；三者都不判指向自身、`sameHost`/`samePath` 不出现。单引号 / 双引号 / 不带引号的合法 href → `pass` + `hrefState=valid` + 三项比较全 true。每个页面由本地服务器真实返回 HTML，断言的是验收脚本输出的 JSON |
+| canonical rel 识别矩阵（11 例，真实本地 HTTP 站点） | 真 `<link rel=canonical>`（双引号 / 单引号 / 无引号、href 在 rel 前、`rel="alternate canonical"` 多 token）→ `pass`；`data-rel` / `aria-rel` / `rel="canonicalized"` / 注释中的标签 / `<script>` 字符串里的标签 → `skip`（没有 canonical 标签）；真正的 canonical + 注释中的 canonical → 仍 `pass`，不误判为重复标签。全部执行验收脚本并断言 JSON |
 | 3xx 状态分类矩阵：主站（7 例） | 304 → `fail` + `redirectOutcome=not-modified` + `statusClass=not-modified`，hops 只有 1 跳，不报缺少 Location；300 → `warn` + `redirectOutcome=unexpected-3xx`，不判通过；301/302/303/307/308 → 同源跟随到最终 200，`pass` + `same-origin-verified`，首跳 `statusClass=redirect`。全部真实请求本地服务器并断言 JSON |
 | 3xx 状态分类矩阵：资源（4 例） | 304 → `assets` 判 `fail`，`redirected=false`，`finalStatus=304`，不进 `redirects`，broken 记录里不出现「缺少 Location」；307 / 308 同主机跟随到最终 200 → `pass` 且进 `redirects`；300 → 只 `warn`、进 `warnings`、不进 `redirects`、不判正常 |
 | 3xx 状态分类矩阵：`/index.html`（7 例） | 304 / 300 → 只 `warn`，`statusClass` 分别为 `not-modified` / `unexpected-3xx`，`redirect=false`，不报缺少 Location；301/302/303/307/308 → `pass` + `statusClass=redirect` + `redirect=true` + `redirectKind=same-origin` + `convergesToRoot=true`，`httpStatus` 等于实际状态码 |
@@ -164,6 +165,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 - `check-build` 资源存在性按部署产物真实文件名大小写敏感匹配，拒绝 `..` 逃逸；`index.html` 是目录时输出 JSON 而不是崩溃。
 - Windows 项目路径含空格时，本地 `.cmd` wrangler 仍能执行，`whoami` 用实际解析到的本地 wrangler；部署失败时清理结论为 `skip`，不谎称删除失败。
 - `check-skill.mjs` 对 BOM、YAML 块标量 `description` 与 fenced code 示例不误报，同时代码块之外的失效路径仍会被报告；目录名 ASCII 与运行期目录忽略也已覆盖。
+- canonical 标签识别按真正的 `rel` 属性 token 精确匹配：`data-rel`/`aria-rel`、`rel="canonicalized"`、HTML 注释和 `<script>` 里的假标签都不会被误识别；真正标签的属性顺序和三种引号写法不影响结果，注释 + 真实标签也不会误报重复。
 
 ## 没有测试什么
 
@@ -210,6 +212,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 26. **probe 在部署失败后仍执行 delete 并报清理失败。** 部署命令失败时根本没有创建临时 Worker，删除自然失败，结果却写「未能删除，请手动清理」。改为只在部署成功后清理；部署失败时 `deploy-cleanup` 记 `skip`。
 27. **verify 的 CLI 参数不校验。** `--api "http://["` / `--expect-404` 非法 URL 会抛 `TypeError`、拿不到 JSON；`--assets-limit abc` 被当成 0 个资源并判 assets `pass`；`--timeout 0` 让所有请求立即中止并触发 Node 警告。入口统一校验数值与 URL 参数，错误以退出码 2 报用法。
 28. **check-skill 的误报与漏报。** 路径 / 链接扫描不剔除 fenced code，合法示例会弄红结构检查；frontmatter 不支持 BOM 与 `|-` / `>-` 块标量；链接标题、目录链接被误报；目录名 ASCII 与 `.work` / `.tmp` 空目录处理不一致。已分别修正，并加了自检用例。
+29. **canonical 标签识别用宽松正则。** 旧正则 `<link\b[^>]*\brel\s*=\s*["']?canonical["']?[^>]*>` 会把 `data-rel="canonical"`、`rel="canonicalized"`、HTML 注释里的标签都算成 canonical，甚至把「真实标签 + 注释标签」误判成重复标签。改为先去掉 `<script>` / `<style>` 与 HTML 注释，再用属性扫描器读取真正的 `rel` 属性，并按 HTML 空白分隔 token 精确比较（ASCII 大小写不敏感）；`href` 缺失 / 空值 / 无法解析、协议 / 主机 / 规范化路径比较、多标签 `fail` 判定均未改动。
 
 ## CLI / JSON 兼容性
 
@@ -247,3 +250,4 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | `check-build.mjs` 的资源存在性改为大小写敏感匹配并拒绝 `..` / 绝对路径；读目录 / 读文件异常不再崩栈 | **行为变化（必须）** | Windows 本地大小写不敏感会掩盖部署到 CDN 后的大小写 404；路径逃逸会误判资源存在 |
 | `check-env.mjs` 的 Windows 命令加引号、whoami 使用实际解析到的 wrangler；`probe.mjs` 部署失败时 `deploy-cleanup` 记 `skip` | 内部实现 / 状态细化 | 修复含空格项目路径无法执行本地 wrangler、执行失败被写成未登录、没有创建 Worker 却报清理失败 |
 | `tests/check-skill.mjs` 忽略 fenced code 示例、支持 BOM 与 YAML 块标量、校验目录名 ASCII、跳过运行期目录 | 内部实现 | 消除结构检查的误报，同时保留代码块外失效路径的检查 |
+| `canonical` 识别规则：只统计真正的 `<link rel=canonical>`（`rel` token 精确匹配，忽略注释 / script / style / `data-rel` / `aria-rel`） | **行为变化（必须）** | 旧宽松正则会误识别 `data-rel="canonical"`、`rel="canonicalized"`、注释里的标签，导致 skip 变 pass 或误报重复标签；canonical 的 href / 协议 / 主机 / 路径判定规则不变 |

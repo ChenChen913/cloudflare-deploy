@@ -572,12 +572,38 @@ function readHtmlAttr(tag, name) {
   return { present: false, value: null };
 }
 
+/**
+ * 去掉 <script> / <style> 的内容和 HTML 注释：这两处的 "<link rel=canonical>"
+ * 只是字符串或注释，不是真实标签，不能计入 canonical 数量。
+ * 先去掉 script/style，避免脚本里的 "<!--" 片段干扰注释扫描。
+ */
+const stripNonTagContent = (s) => s
+  .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+  .replace(/<!--[\s\S]*?-->/g, "");
+
+/**
+ * rel 是 HTML 空白分隔的 token 列表，token 按 ASCII 大小写不敏感比较。
+ * 只匹配完整 token：rel="canonicalized" 不是 canonical，rel="alternate canonical" 是。
+ */
+function relHasToken(value, token) {
+  return String(value ?? "")
+    .split(/[\t\n\f\r ]+/)
+    .some((part) => part && part.toLowerCase() === token);
+}
+
 // ---------------------------------------------------------------- HTML 内容
 if (html) {
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim().replace(/\s+/g, " ").slice(0, 120) || null;
   add("title", title ? "pass" : "warn", title || "没有 <title>");
 
-  const canonTags = [...html.matchAll(/<link\b[^>]*\brel\s*=\s*["']?canonical["']?[^>]*>/gi)].map((m) => m[0]);
+  // 只认真正的 <link> 标签上的真正 rel 属性：
+  // 排除注释 / script / style 里的假标签，排除 data-rel / aria-rel，按 token 精确匹配。
+  const canonTags = [...stripNonTagContent(html).matchAll(/<link\b[^>]*>/gi)]
+    .map((m) => m[0])
+    .filter((tag) => {
+      const rel = readHtmlAttr(tag, "rel");
+      return rel.present && relHasToken(rel.value, "canonical");
+    });
   if (canonTags.length === 0) {
     add("canonical", "skip", "没有 canonical 标签");
   } else if (canonTags.length > 1) {
