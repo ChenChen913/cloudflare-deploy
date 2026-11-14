@@ -329,7 +329,7 @@ function main() {
     push(
       "404",
       "warn",
-      `${mode} 模式但缺少顶层 404.html：Pages 会把未知路径回退到 /（200）。多页站应补 404.html；只有确认是 SPA 时才改用 --mode spa`,
+      `${mode} 模式但缺少顶层 404.html：Cloudflare 官方说明——没有顶层 404.html 时按 SPA 处理，未知路径返回根路径 /；官方原文未写状态码，实际回退通常是 200。多页站补 404.html；HashRouter 用 static 时必须补 404.html，只有确认是 history 路由才改用 --mode spa。注意：默认回退也会把缺失静态资源路径返回 HTML 200，不能只看状态码。官方文档：https://developers.cloudflare.com/pages/configuration/serving-pages/#single-page-application-spa-rendering`,
       { severity: "high", mode }
     );
   }

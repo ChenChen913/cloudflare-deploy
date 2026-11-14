@@ -70,7 +70,7 @@ function git(args) {
   return (r.stdout || "").trim() || null;
 }
 
-const BUILD_NOISE = ["node_modules", ".git", "dist", "build", "_site", "public", ".next", ".output", "vendor"];
+const BUILD_NOISE = ["node_modules", ".git", "dist", "dist-web", "out", "build", "_site", "public", ".next", ".output", "vendor", "coverage"];
 // HTML 入口发现不能跳过 public/：纯静态站可能只有 public/index.html（Workers assets）。
 const HTML_NOISE = BUILD_NOISE.filter((name) => name !== "public");
 function walkFiles(dir, maxDepth = 3, acc = [], depth = 0, skipNames = BUILD_NOISE) {
@@ -287,12 +287,48 @@ const wrangler = wranglerFile ? {
 const wranglerOutputDir = wrangler?.pagesBuildOutputDir || wrangler?.assetsDirectory || null;
 const resolvedOutputDir = wranglerOutputDir || outputDir || null;
 
-const isNoisePath = (f) => relToRoot(f).split("/").some((part) => ["node_modules", "tests", "test", "scripts", "docs", ".github", ".wrangler"].includes(part));
-const srcFiles = walkFiles(path.join(root, "src"), 3, [], 1)
+const isNoisePath = (f) => relToRoot(f).split("/").some((part) => ["node_modules", "tests", "test", "scripts", "docs", ".github", ".wrangler", "dist", "dist-web", "out", "build", "_site", "coverage"].includes(part));
+const srcFiles = walkFiles(path.join(root, "src"), 6, [], 1)
   .filter((f) => !isNoisePath(f))
-  .concat(walkFiles(root, 2, [], 1).filter((f) => /\.(m?[jt]sx?)$/.test(f) && !isNoisePath(f)))
+  .concat(walkFiles(root, 3, [], 1).filter((f) => /\.(m?[jt]sx?)$/.test(f) && !isNoisePath(f)))
   .slice(0, 400);
 const sourceText = srcFiles.map((f) => read(f) || "").join("\n").slice(0, 400000);
+// 路由类型只用于决定验收/部署模式：HashRouter 的未知路径可以 404（static），
+// BrowserRouter/history 路由需要 SPA fallback（spa）。这里剥离注释和字符串，
+// 避免注释/文案里的路由名误导；输出 unknown/mixed 时要求人工确认。
+const routerSourceText = srcFiles
+  .filter((f) => {
+    const rel = relToRoot(f);
+    return !/(?:^|\/)(?:__tests__|e2e|tests?)\//i.test(rel)
+      && !/\.(?:test|spec|stories)\.[^.]+$/i.test(rel);
+  })
+  .map((f) => stripJsComments(read(f) || "")).join("\n").slice(0, 400000);
+const routerInlineScripts = htmlIndexes.slice(0, 3).map((f) => read(f) || "").join("\n").slice(0, 100000);
+const routerScanText = `${routerSourceText}\n${routerInlineScripts}`;
+const routerCode = routerScanText
+  .replace(/`(?:\\[\s\S]|[^`\\])*`/g, '""')
+  .replace(/"(?:\\[\s\S]|[^"\\])*"/g, '""')
+  .replace(/'(?:\\[\s\S]|[^'\\])*'/g, '""');
+const hashRouterSignal = /\bHashRouter\b|\bcreateHashRouter\b|\bcreateWebHashHistory\s*\(|\bcreateHashHistory\s*\(|\buseHashLocation\b|\bwithHashLocation\s*\(|\bHashLocationStrategy\b|\buseHash\s*:\s*true\b/.test(routerCode);
+const historyRouterSignal = /\bBrowserRouter\b|\bcreateBrowserRouter\b|\bcreateWebHistory\s*\(|\bcreateBrowserHistory\s*\(/.test(routerCode);
+// Vue Router 3 的 mode 是字符串配置；只在确实依赖 vue-router 时读取，避免普通
+// 配置字符串被误当成路由模式。
+const vueModeHashSignal = hasDep("vue-router") && /\bmode\s*:\s*["']hash["']/i.test(routerSourceText);
+const vueModeHistorySignal = hasDep("vue-router") && /\bmode\s*:\s*["']history["']/i.test(routerSourceText);
+const hashSignal = hashRouterSignal || vueModeHashSignal;
+const historySignal = historyRouterSignal || vueModeHistorySignal;
+const routerDeps = ["react-router", "react-router-dom", "vue-router", "@angular/router", "wouter", "@tanstack/react-router", "history"].filter((d) => hasDep(d));
+const vueRouterVersion = routerDeps.includes("vue-router") ? String(deps["vue-router"] || "") : "";
+const vueRouterV3DefaultHash = /^[~^=v\s]*3(?:\.|$)/.test(vueRouterVersion)
+  && !historySignal && !vueModeHashSignal && !vueModeHistorySignal;
+const routerContext = kind === "spa"
+  || ((kind === "static" || kind === "static-html" || kind === "unknown") && routerDeps.length > 0);
+const spaRouting = !routerContext ? null
+  : hashSignal && historySignal ? "mixed"
+  : hashSignal ? "hash"
+  : historySignal ? "history"
+  : vueRouterV3DefaultHash ? "hash"
+  : "unknown";
 const nativeRisk = ["sharp", "canvas", "puppeteer", "playwright", "bcrypt", "argon2"]
   .filter((n) => hasDep(n));
 const fsUsage = /\bfrom\s+["'](?:node:)?fs["']|require\(\s*["'](?:node:)?fs["']\s*\)/.test(sourceText);
@@ -384,6 +420,11 @@ if (!hasIndexHtml && htmlIndexes.length === 0) {
 }
 if (lockfiles.length > 1) risks.push(`同时存在 ${lockfiles.length} 个锁文件（${lockfiles.join("、")}）；包管理器不确定，先确认 CI 实际用哪个，避免混用。`);
 if (dynamicConfig && (!viteBase || !viteOut)) risks.push("Vite 配置是动态的（函数或环境变量）；base 和输出目录无法静态确认，构建后必须核对产物路径。");
+if (spaRouting === "hash") risks.push(`检测到 HashRouter/默认 hash 路由${routerDeps.length ? `（${routerDeps.join("、")}）` : ""}：部署验收建议用 --mode static 并提供 404.html；未知路径 404 对 hash 路由是正常行为。`);
+if (spaRouting === "history") risks.push(`检测到 history 路由（BrowserRouter/createBrowserRouter/createWebHistory）：Pages 需要 _redirects /* /index.html 200（或 Workers not_found_handling），否则刷新深链会 404；验收用 --mode spa。`);
+if (spaRouting === "mixed") risks.push("同时检测到 hash 与 history 路由特征；先确认实际 Router，再选择 static（hash）或带 fallback 的 spa（history），不要凭默认值部署。");
+if (spaRouting === "unknown" && kind === "spa") risks.push("未识别出客户端路由类型；若使用 HashRouter 用 --mode static，使用 BrowserRouter/history 用 --mode spa 并配置回退。");
+if (spaRouting && kind !== "spa") risks.push(`检测到客户端路由依赖但项目类型按 ${kind} 识别（常见于 Vue CLI/Angular/webpack 等未被框架识别的构建）；请人工确认这是 SPA，并按 ${spaRouting} 选择验收模式。`);
 
 // 目标：只给候选。最终由 DNS、部署方式和未来后端需求决定。
 const decideBy = ["域名 NS 是否在 Cloudflare（Workers 要求 NS 托管，Pages 的子域可用外部 CNAME）", "是否要零配置 git push 部署", "以后是否需要 Cloudflare 侧后端（D1/DO/Queues/Cron）"];
@@ -442,6 +483,9 @@ const target = (() => {
 const SSG_FRAMEWORKS = new Set(["jekyll", "hugo", "mkdocs", "gatsby", "docusaurus", "vitepress", "astro", "sveltekit"]);
 const suggestedMode = (() => {
   if (kind === "ssr" || kind === "fullstack") return "ssr";
+  if (spaRouting === "mixed") return "unknown";
+  if (spaRouting === "hash") return "static";
+  if (spaRouting === "history") return "spa";
   if (kind === "spa") return "spa";
   if (kind === "static") return SSG_FRAMEWORKS.has(framework) || framework === "nextjs" ? "ssg" : "static";
   return "unknown";
@@ -456,11 +500,21 @@ const unknowns = [
 if (framework === "unknown") unknowns.push("框架类型（未识别）");
 if (!resolvedOutputDir) unknowns.push("构建产物目录（未能确认）");
 if (framework === "vite" && !viteBase) unknowns.push("base path（Vite 配置里没有静态值，默认 / 但需构建后核对）");
+if (kind === "spa" && spaRouting === "unknown") unknowns.push("客户端路由类型（未识别；HashRouter 用 static，BrowserRouter/history 用 spa + fallback）");
+if (spaRouting === "mixed") unknowns.push("实际 Router（同时检测到 hash 与 history 特征，验收模式保持 unknown，禁止自动选）");
+if (spaRouting && kind !== "spa") unknowns.push("项目是否确实是客户端路由 SPA（检测到 router 依赖但框架类型未识别）");
 if (lockfiles.length === 0 && pkgPath) unknowns.push("实际包管理器（没有锁文件，按 npm 推断）");
 if (kind === "api" || kind === "fullstack") unknowns.push("服务端入口是否就是检测到的那个文件");
 
 const evidence = {
   framework: ev(framework, frameworkSource.startsWith("package.json") ? "confirmed" : "inferred", frameworkSource),
+  spaRouting: ev(
+    spaRouting,
+    spaRouting === "hash" || spaRouting === "history" || spaRouting === "mixed" ? "inferred" : "unknown",
+    spaRouting === "hash" || spaRouting === "history" || spaRouting === "mixed"
+      ? "源码中的 Router 特征（HashRouter/BrowserRouter/createWebHashHistory/createWebHistory/mode）"
+      : "没有可确认的客户端路由特征（unknown 时不能凭默认值断言）"
+  ),
   kind: ev(kind, "inferred", `结合 ${frameworkSource} 与构建配置推断`),
   buildCommand: ev(buildCommand, scripts.build ? "confirmed" : buildCommand ? "inferred" : "unknown", scripts.build ? "package.json scripts.build" : "框架默认构建命令"),
   outputDir: ev(
@@ -495,6 +549,7 @@ const result = {
     scripts: Object.keys(scripts),
     basePath: viteBase || nextBasePath || null,
     suggestedMode,
+    spaRouting,
     hasIndexHtml,
     htmlEntries,
     serverEntry,
@@ -555,7 +610,7 @@ if (human) {
   console.log(`  包管理器   ${p.packageManager || "n/a"}${p.lockfiles.length > 1 ? `（${p.lockfiles.length} 个锁文件，需确认）` : ""}${p.nodeEngine ? `, node ${p.nodeEngine}` : ""}`);
   console.log(`  构建       ${p.buildCommand || "n/a"}`);
   console.log(`  输出目录   ${p.outputDir || "n/a"}（${result.evidence.outputDir.confidence}）`);
-  console.log(`  验收模式   ${p.suggestedMode}`);
+  console.log(`  验收模式   ${p.suggestedMode}${p.spaRouting ? `（路由：${p.spaRouting}）` : ""}`);
   console.log(`  目标       ${tLabel}`);
   t.basis.forEach((b) => console.log(`    依据     ${b}`));
   if (t.decideBy.length) console.log(`    待确认   ${t.decideBy.join("；")}`);

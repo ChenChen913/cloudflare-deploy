@@ -37,7 +37,7 @@
 | 部署方式 | {{Git / Direct Upload / wrangler / Workers Builds}} | {{...}} |
 | 是否迁后端 | {{否 / 是，范围}} | {{...}} |
 | GitHub Pages 备用 | {{保留 / 不保留}} | {{...}} |
-| 索引策略 | {{主站 self-canonical，备用站 noindex / 其他}} | {{...}} |
+| 索引策略 | {{主站 self-canonical，备用站 noindex / 其他；Cloudflare 与 GitHub Pages 并存时必须二选一}} | {{...}} |
 
 ## 改动
 

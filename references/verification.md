@@ -169,7 +169,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 
 - `/` 至少 200；只有最终 200 才做内容检查（4xx/5xx 错误页的 title/canonical 不作为站点证据）。
 - `static`/`ssg`：未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
-- `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受。
+- `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受，但更推荐用 `static` + 顶层 `404.html`（HashRouter 的未知路径本来就应 404）。
+- Pages 缺顶层 `404.html` 的默认行为：按 [官方 Serving Pages](https://developers.cloudflare.com/pages/configuration/serving-pages/#single-page-application-spa-rendering)，Pages 把项目当 SPA，未匹配路径返回 `/`；官方未写状态码，实际通常 200。该回退对缺失静态资源路径也生效，所以资源检查不能只看 200，要看 content-type/内容。
 - `ssr`：未知路径通常 404；返回 200 要人工确认是自定义 404 还是 catch-all 把所有路径渲染成首页。
 - Pages 上 `/index.html` 跳 `/`（301/308）是正常的。脚本只把**同源且目标就是站点根**的重定向判 `pass`（结果带 `convergesToRoot`）；跨源、非 HTTP(S)、其他路径只给 `warn`，不请求目标，也不证明收敛到 `/`；`/index.html` 返回 5xx 判 `fail`。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
@@ -178,6 +179,9 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - `304 Not Modified` 不是重定向：脚本没有发送条件请求，`/` 返回 304 不能当作首页可用；`/index.html` 返回 304 也不能证明收敛到 `/`；资源返回 304 判 `fail` 且不进入 `redirects`。
 - 少见 3xx（如 `300 Multiple Choices`）既不跟随也不判通过：主站/资源/`/index.html` 都单独分类（`unexpected-3xx`），按警告处理并交人工确认。
 - 首页 `redirectOutcome` 为 `cross-origin-unverified` 时写「主站跨源重定向，目标未验证」，`warn` 不等于通过，也不能写成「首页 200」。
+- **网络错误 vs HTTP 断言失败**：`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`，每次尝试使用 `--timeout`）；HTTP 4xx/5xx、TLS 证书错误、DNS 解析错误和脚本自身单次超时都不重试；连接超时/连接重置可重试。detail 中“已重试 N 次”只说明网络路径，重试后仍失败才判 `fail`，不能把它写成站点 HTTP 返回失败。JSON 的 `retry` 字段记录策略，root/404/index-redirect/API/CORS/backup 失败项带 `attempts`/`errorKind`，root 还带 `retried`。
+- **SEO 策略**：若首页没有 canonical、meta robots、X-Robots-Tag 三者中任何一个，脚本在成功解析 HTML 后额外给 `seo` `warn`（不影响退出码）。同时保留 GitHub Pages 备用站时必须明确 self-canonical / noindex；没有策略时不能把“canonical 检查 skip”当成通过。
+- **浏览器冒烟**：HTTP 全绿不等于页面可用。SPA/SSG 报告至少记录一次真实浏览器检查：打开首页和关键 hash/deep link，确认 `#root`/app 容器非空、没有本应用 console error；没有执行就写“未验证”。
 
 ### 响应头
 

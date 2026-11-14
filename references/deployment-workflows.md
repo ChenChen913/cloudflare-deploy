@@ -25,18 +25,24 @@ node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 适用：构建必须放在自己的 CI，或两个目标需要不同产物。
 
 ```bash
-# 首次创建项目
+# 首次创建项目（项目名和最终 *.pages.dev 域名可能不同，以命令输出为准）
 npx wrangler pages project create "<项目名>" --production-branch main
 
 # 用项目自己的命令构建，然后上传
 npm ci
 npm run build
-npx wrangler pages deploy "<输出目录>" --project-name "<项目名>"
+
+# 必须在目标项目根目录执行：Pages 的 Source commit 取 wrangler 进程的 cwd
+cd "<目标项目根目录>"
+npx wrangler pages deploy "<输出目录>" --project-name "<项目名>" \
+  --commit-hash "$(git -C "<目标项目根目录>" rev-parse HEAD)" --commit-dirty=true
 ```
 
 注意：
 
-- 首次部署会得到 `*.pages.dev` 地址。先在这里验收，再加域名。
+- **部署前先 `cd` 目标项目根目录。** Wrangler 的 Pages Source 记录当前工作目录的 Git 提交；在技能仓/其他目录执行会把 source 记成错误仓库。显式传 `--commit-hash` 更稳。
+- 首次部署输出的 `*.pages.dev` 才是实际地址；不要用项目名直接拼域名。名称被占用时 Cloudflare 可能分配带后缀的域名（例如项目名 `hangla` 实际为 `hangla-9bk.pages.dev`），以 wrangler 输出为准。
+- 先在生产/预览地址验收，再加自定义域名。
 - `--branch=<name>` 创建预览部署和分支别名。
 - **Direct Upload 之后不能改成 Git 集成**，只能重建项目。
 - 拖拽上传上限 1,000 文件，且不能编译 `functions/`；有 Functions 用 Wrangler。
@@ -110,6 +116,7 @@ npm run build
 ```
 
 - Cloudflare 上 `base: "/"`。GitHub Pages 的构建常常是 `base: "/repo/"`。
+- **先判断路由类型**：React Router `HashRouter` / `createWebHashHistory`（Vue）用 `--mode static` + `404.html`；`BrowserRouter` / `createBrowserRouter` / `createWebHistory` 用 `--mode spa`，并在 `_redirects` 写 `/* /index.html 200`（或 Workers `not_found_handling`）。
 - SPA 回退只覆盖前端路由，不要把 `/api/*` 也回退成 HTML。
 - 改 base 后检查 `manifest.webmanifest`、`sw.js`、图标路径。
 

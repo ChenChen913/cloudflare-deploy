@@ -7,8 +7,9 @@
 | 现象 | 最可能原因 | 修法 | 验证 |
 |---|---|---|---|
 | `wrangler` 说未认证 | 没登录 / 没 Token | `npx wrangler login`，或设 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | `npx wrangler whoami` |
+| 构建报 `TS2688: Cannot find type definition file for 'xxx'` | Windows 上祖先目录（例如用户目录下的 `node_modules/@types`）里的空/损坏类型包被 TypeScript 自动包含 | 临时 tsconfig 只保留项目自己的 `typeRoots: ["./node_modules/@types"]`，跑 `npx tsc --noEmit -p tsconfig.deploy-temp.json`，再 `npx vite build`/原构建命令；完成后删除临时文件。不要直接删用户的全局 `node_modules` | `node --check` 构建脚本 + 重跑构建 |
 | 所有路径 404 | 输出目录错 / 产物为空 | 检查产物；设置正确目录 | `curl -I https://site/` |
-| 所有路径都返回首页（200） | 缺顶层 `404.html`，Pages 把未知路径回退到 `/` | 多页站补 `404.html`；SPA 确认这是预期回退 | `verify-deployment.mjs --mode static` 或 `--mode spa` |
+| 所有路径都返回首页（200） | 缺顶层 `404.html`；Cloudflare 官方：没有顶层 `404.html` 时按 SPA 处理，未知路径返回 `/`（状态码官方未写，实际回退通常 200） | 多页站补 `404.html`；HashRouter 用 static 时必须补 404；只有 BrowserRouter/history 才用 spa + 显式回退 | `verify-deployment.mjs --mode static` / `--mode spa`；见官方 [Serving Pages](https://developers.cloudflare.com/pages/configuration/serving-pages/#single-page-application-spa-rendering) |
 | 子页面点得开，刷新 404 | 缺 SPA 回退 | Pages 用 `_redirects`：`/* /index.html 200`；Workers 设 `not_found_handling` | 新标签页打开子路由 |
 | CSS/JS/图片 404 | 构建 base 是 `/repo/` 或其他前缀 | 用 `base: "/"` 重新构建；用相对路径 | DevTools Network |
 | `.html` 链接多一跳 | Pages 把 `.html` 308 到无扩展名 | 接受，或改内链（但 GitHub Pages 可能 404） | `curl -I https://site/page.html` |
@@ -45,6 +46,8 @@ gh auth status
 node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|spa|ssg|ssr>"
 ```
 
+> `check-env` 的 `canBuild=true` 只表示 Node/Git/wrangler 等前置条件可用，**不会执行也不会验证项目自己的 build 命令**。构建失败仍按下面的产物检查定位。
+
 检查：
 
 - 产物根目录有 `index.html`（SSR 除外）；
@@ -58,8 +61,10 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|s
 
 ## 3. SPA 与 404
 
-缺 `404.html` 时，Pages 会把未知路径回退到 `200` + `/`。**这对 SPA 是预期，对多页站是故障。** 先确定 `--mode`，再判断：
+Cloudflare 官方 [Serving Pages](https://developers.cloudflare.com/pages/configuration/serving-pages/#single-page-application-spa-rendering)：**没有顶层 `404.html` 时，Pages 把项目当成 SPA**，未匹配路径返回根路径 `/`（官方未写状态码，实际回退通常 200）。**这对 BrowserRouter/history 路由的 SPA 是预期，对多页站是故障；HashRouter 不应依赖它，建议 static + 404.html。** 先确定 `--mode`，再判断：
 
+- HashRouter：`--mode static`，提供 404.html；`/#/templates` 这类路由只改 hash，不会发到服务器。
+- BrowserRouter / history 路由：`--mode spa`，用 `_redirects` 显式声明 `/* /index.html 200`（或 Workers 的 `not_found_handling`）；不要只依赖“缺 404”的隐式回退。
 - 多页站 / SSG：保留 `404.html`，未知路径必须 404。
 - SPA：接受回退，但确认返回的是 app shell；排除 `/api/*` 和静态目录。
 - Workers：显式设置 `not_found_handling`（`"404-page"` 或 `"single-page-application"`），没有隐式 SPA 检测。

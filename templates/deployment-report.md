@@ -14,6 +14,8 @@
 | 输出目录 | `{{output_dir}}` |
 | 站点模式 | {{static / ssg / spa / ssr}} |
 | 部署地址 | {{https://...}} |
+| Pages 项目名 / 默认域名 | {{项目名 / wrangler 输出的 *.pages.dev；两者不保证相同}} |
+| 部署目录 / Source commit | {{实际执行 wrangler 的目录 / 部署记录里的 commit}} |
 | 正式域名 | {{https://... 或 未绑定}} |
 | GitHub Pages 备用 | {{保留且独立 / 保留但不独立 / 已移除}} |
 | 部署时间 | {{ISO 时间}} |
@@ -32,8 +34,9 @@
 |---|---|---|
 | 首页 200 + 标题 | {{通过}} | `GET / -> 200`，标题 `{{...}}` |
 | 首页重定向 | {{不适用 / 通过 / 警告 / 失败}} | {{写 `redirectOutcome`：同源验证成功 / 跨源目标未验证 / 循环或超跳数 / Location 无法解析 / 协议不受支持；最多 5 次同源重定向并额外请求最终地址，第 6 次重定向判超限并附 `limitHop`；跨源附 Location、状态码与重定向链，并写「目标未验证」，不要写成通过}} |
-| 未知路径 | {{通过 / 失败}} | {{static/ssg：GET /__missing__ -> 404；spa：-> 200 + app shell}} |
+| 未知路径 | {{通过 / 失败}} | {{static/ssg（含 HashRouter）：GET /__missing__ -> 404；spa（BrowserRouter/history）：-> 200 + app shell；HashRouter 不要求 SPA 回退}} |
 | 同源资源 | {{通过 / 警告 / 失败}} | 检查 {{n}} / 共 {{m}} 个（首页引用）；3xx 跟随同源到最终 2xx，跨主机记录原始/最终地址、最终状态与完整链但不请求目标，单列 `redirects` |
+| 浏览器冒烟 | {{通过 / 警告 / 未验证}} | {{Chrome/Edge 打开首页与关键 hash/deep link；`#root`/app 容器非空、无本应用 console error；仅 HTTP 全绿不算此检查通过}} |
 | SPA 深链 + 刷新 | {{通过 / 不适用}} | {{...}} |
 | `_headers` / `_redirects` | {{通过 / 不适用}} | {{...}} |
 | 文件数 / 套餐上限 | {{通过 / 不适用}} | {{检查了 N 个；目标 {{pages / workers}}；生效上限 {{20,000 / 100,000}}，依据 {{默认 Free / Pages: Wrangler v4 + PAGES_WRANGLER_MAJOR_VERSION=4 / Workers: Wrangler >= 4.34.0}}}} |
@@ -46,7 +49,7 @@
 | 数据库读写 | {{通过 / 不适用}} | {{...}} |
 | PWA / 离线 | {{通过 / 不适用}} | {{...}} |
 | 备用站独立性 | {{通过 / 不适用}} | {{200，Server: GitHub.com，无跳转}} |
-| canonical / noindex | {{通过 / 警告 / 不适用}} | {{只有一个 canonical，且协议、主机、规范化路径全部一致才算指向自身；协议不一致须写明两个协议并标警告}} |
+| canonical / noindex | {{通过 / 警告 / 不适用}} | {{只有一个 canonical，且协议、主机、规范化路径全部一致才算指向自身；协议不一致须写明两个协议并标警告。若同时保留 GitHub Pages：必须明确 Cloudflare self-canonical 或备用站 noindex；两者都没有时 verify 会给 `seo` warn}} |
 | HTTPS / 域名 | {{通过 / 不适用}} | {{签发者、到期时间}} |
 | 部署 workflow | {{通过}} | {{run id / 状态}} |
 

@@ -44,7 +44,7 @@ Cloudflare 的 Pages 文档顶部现在写着：
 | 新静态站，域名 NS 在 Cloudflare | Workers + Static Assets | 官方默认；以后加 API 不用换平台 |
 | 新静态站，DNS 在外部，用子域 | Pages | 外部 CNAME 可用；Workers 要求 NS 在 Cloudflare |
 | 新静态站，要零配置 `git push` | Pages | 不用维护 Wrangler 配置 |
-| Vite / React / Vue SPA | 两者都可 | Pages 用 `_redirects`；Workers 用 `not_found_handling` |
+| Vite / React / Vue SPA | 两者都可 | HashRouter：static + 404.html；BrowserRouter/history：Pages `_redirects` 或 Workers `not_found_handling` |
 | 静态前端 + Supabase / Firebase | 两者都可，只迁前端 | 不要默认迁后端 |
 | 需要 D1/KV/R2/DO/Queues/Cron | Workers | Pages Functions 能绑 KV/D1/R2，但没有 DO/Queues/Cron 和完整可观测性 |
 | Next.js SSR/ISR | Workers + vinext 或 OpenNext | 除非应用允许静态导出 |

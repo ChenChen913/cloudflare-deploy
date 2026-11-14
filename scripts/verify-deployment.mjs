@@ -50,6 +50,7 @@
 
 import { classifyRedirect, classifyStatus } from "./redirect-policy.mjs";
 import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, resourceReferences } from "./html-scan.mjs";
+import { DEFAULT_RETRIES, RETRY_BACKOFF_MS, isTransientNetworkError, parseRetries } from "./net-retry.mjs";
 
 const argv = process.argv.slice(2);
 const getArg = (name, fallback = null) => {
@@ -63,8 +64,14 @@ const origin = getArg("--origin");
 const notFoundPath = getArg("--expect-404", `__cf_deploy_check_${Date.now()}/`);
 const timeoutRaw = getArg("--timeout", "15000");
 const assetsLimitRaw = getArg("--assets-limit", "20");
+const retriesIdx = argv.indexOf("--retries");
+const retriesEq = argv.find((a) => a.startsWith("--retries="));
+const retriesRaw = retriesIdx >= 0
+  ? (argv[retriesIdx + 1] && !argv[retriesIdx + 1].startsWith("--") ? argv[retriesIdx + 1] : "")
+  : retriesEq ? retriesEq.slice("--retries=".length) : String(DEFAULT_RETRIES);
 const timeout = Number(timeoutRaw);
 const assetsLimit = Number(assetsLimitRaw);
+const retries = parseRetries(retriesRaw);
 const MODES = ["static", "spa", "ssg", "ssr"];
 const mode = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
 const apiPaths = argv.reduce((acc, a, i) => (a === "--api" && argv[i + 1] && !argv[i + 1].startsWith("--") ? [...acc, argv[i + 1]] : acc), []);
@@ -148,7 +155,7 @@ function allowHeaderCheck(headerValue, wanted, credentials) {
 }
 
 if (!base) {
-  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--json]");
+  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--retries 1] [--json]");
   process.exit(2);
 }
 if (!MODES.includes(mode)) {
@@ -182,6 +189,10 @@ if (!Number.isFinite(timeout) || timeout <= 0) {
 }
 if (!Number.isInteger(assetsLimit) || assetsLimit < 1) {
   console.error(`--assets-limit 必须是正整数：${assetsLimitRaw}`);
+  process.exit(2);
+}
+if (retries === null) {
+  console.error(`--retries 必须是 0..3 的整数（默认 ${DEFAULT_RETRIES}）：${retriesRaw || "缺少值"}`);
   process.exit(2);
 }
 if (backup) {
@@ -245,18 +256,42 @@ function collectAssetRefs(elements, assetBase, siteOrigin) {
   return { unique: [...new Map(entries.map((e) => [e.abs, e])).values()], ignored };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 单次 HTTP 请求。连接类瞬时错误会在同一次调用内重试（默认 1 次），
+ * 但 HTTP 响应、脚本超时、证书/DNS/URL 错误绝不重试，避免掩盖真实断言。
+ * `errorKind`：timeout（本次尝试超时）| network（连接类错误）| null（拿到响应）。
+ */
 async function req(url, opts = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
-  const started = Date.now();
-  try {
-    const res = await fetch(url, { redirect: "manual", ...opts, signal: ctrl.signal });
-    return { res, ms: Date.now() - started, error: null };
-  } catch (e) {
-    return { res: null, ms: Date.now() - started, error: String(e.cause?.code || e.message || e) };
-  } finally {
-    clearTimeout(timer);
+  let attempts = 0;
+  let last = { res: null, ms: 0, error: "请求未执行", attempts: 0, retried: false, errorKind: "network" };
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    attempts = attempt;
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeout);
+    const started = Date.now();
+    try {
+      const res = await fetch(url, { redirect: "manual", ...opts, signal: ctrl.signal });
+      return { res, ms: Date.now() - started, error: null, attempts, retried: attempt > 1, errorKind: null };
+    } catch (e) {
+      const errorKind = timedOut || e?.name === "AbortError" ? "timeout" : "network";
+      const error = errorKind === "timeout"
+        ? `请求超时（${timeout}ms）`
+        : String(e?.cause?.code || e?.message || e);
+      last = { res: null, ms: Date.now() - started, error, attempts, retried: attempt > 1, errorKind };
+      // 只有「没有拿到 HTTP 响应 + 连接类瞬时错误」才重试；单次超时不重试。
+      if (attempt <= retries && isTransientNetworkError(e, timedOut)) {
+        await sleep(RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      return last;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return last;
 }
 
 /**
@@ -272,51 +307,54 @@ async function chain(url, max = MAX_REDIRECTS) {
   const hops = [];
   let current = url;
   let startOrigin = null;
+  let retried = false;
   try { startOrigin = new URL(url).origin; } catch { /* --url / --backup 已在入口校验 */ }
   const done = (extra = {}) => ({
     error: null, hops, final: current, status: null, res: null,
-    stopped: null, stopReason: null, redirectTarget: null, ...extra,
+    stopped: null, stopReason: null, redirectTarget: null,
+    attempts: null, errorKind: null, retried, ...extra,
   });
   // redirects 表示「本跳之前已跟随的重定向次数」；0..max 共 max+1 次请求。
   for (let redirects = 0; redirects <= max; redirects++) {
     const r = await req(current, { method: "GET", headers: { "user-agent": UA } });
-    if (!r.res) return done({ error: r.error });
+    if (r.attempts > 1) retried = true;
+    if (!r.res) return done({ error: r.error, attempts: r.attempts, errorKind: r.errorKind });
     const loc = r.res.headers.get("location");
     const status = r.res.status;
     const statusClass = classifyStatus(status);
     // 3xx 里只有 304 之外的常见重定向才需要看 Location；304 直接结束，
     // 不能因为缺少 Location 被报成 invalid-location。
     if (statusClass !== "redirect") {
-      hops.push({ url: current, status, location: loc, ms: r.ms, statusClass });
+      hops.push({ url: current, status, location: loc, ms: r.ms, statusClass, attempts: r.attempts });
       if (statusClass === "not-modified") {
         return done({
-          status, res: r.res, stopped: "not-modified",
+          status, res: r.res, attempts: r.attempts, stopped: "not-modified",
           stopReason: "304 Not Modified 是缓存协商结果，不是重定向；本次请求没有发送条件请求头，也没有可验证的响应体",
         });
       }
       if (statusClass === "unexpected-3xx") {
         return done({
-          status, res: r.res, stopped: "unexpected-3xx",
+          status, res: r.res, attempts: r.attempts, stopped: "unexpected-3xx",
           stopReason: `${status} 属于 3xx，但不在需要跟随的重定向状态（301/302/303/307/308）里，也没有可验证的 2xx 响应`,
         });
       }
-      return done({ status, res: r.res });
+      return done({ status, res: r.res, attempts: r.attempts });
     }
     const c = classifyRedirect(current, loc, startOrigin);
     const hop = {
       url: current, status, location: loc, ms: r.ms, statusClass,
-      redirect: c.kind, next: c.next, protocolChanged: c.protocolChanged,
+      redirect: c.kind, next: c.next, protocolChanged: c.protocolChanged, attempts: r.attempts,
     };
     if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
     // 安全策略优先：跨源 / 非 http(s) / 无效 Location 一律不请求目标。
     if (c.kind !== "same-origin") {
       hops.push(hop);
-      return done({ status, res: r.res, stopped: c.kind, stopReason: c.reason, redirectTarget: c.next });
+      return done({ status, res: r.res, attempts: r.attempts, stopped: c.kind, stopReason: c.reason, redirectTarget: c.next });
     }
     // 第 max+1 次同源重定向 = 超限；不跟随，也不为「完成最终验证」请求目标。
     if (redirects === max) {
       return done({
-        status, res: r.res, stopped: "loop-or-limit",
+        status, res: r.res, attempts: r.attempts, stopped: "loop-or-limit",
         stopReason: `重定向超过 ${max} 跳，可能循环（第 ${max + 1} 次重定向指向 ${c.next || loc || "未知地址"}，未请求目标）`,
         limitHop: { ...hop, followed: false },
       });
@@ -337,6 +375,8 @@ async function probe(url, headers = {}) {
     res: g.res,
     method: "GET",
     error: g.error,
+    attempts: g.attempts,
+    errorKind: g.errorKind,
     note: h.res ? `HEAD ${h.res.status}，已用 GET 复核` : `HEAD 失败（${h.error}），已用 GET 复核`,
   };
 }
@@ -447,10 +487,12 @@ const crossedHost = Boolean(root.redirectTarget) && !sameHost(rootCrossTarget, b
 const rootExtra = {
   hops: root.hops, finalUrl: root.final, redirectTarget: root.redirectTarget,
   crossedHost, httpStatus: root.status, statusClass: root.status == null ? null : classifyStatus(root.status),
-  limitHop: root.limitHop || null,
+  limitHop: root.limitHop || null, attempts: root.attempts || null, errorKind: root.errorKind || null,
+  retried: Boolean(root.retried),
 };
 if (root.error) {
-  add("root", "fail", `请求失败：${root.error}`, { ...rootExtra, redirectOutcome: "network-error", verified: false });
+  const retryNote = root.attempts > 1 ? `（已重试 ${root.attempts - 1} 次，共 ${root.attempts} 次尝试）` : "";
+  add("root", "fail", `请求失败：${root.error}${retryNote}`, { ...rootExtra, redirectOutcome: "network-error", verified: false });
 } else if (root.stopped === "cross-origin") {
   // 关键：不请求跨源目标，也就不会拿到「别的网站返回 200」来给原站点判 pass。
   add("root", "warn",
@@ -481,7 +523,8 @@ if (root.error) {
     "root",
     ok ? "pass" : "fail",
     `GET / -> ${root.status}，${last?.ms ?? "?"}ms`
-      + (sameOriginHops > 0 ? `；同源重定向 ${sameOriginHops} 跳后${ok ? "最终验证成功" : "最终状态未通过"}` : ""),
+      + (sameOriginHops > 0 ? `；同源重定向 ${sameOriginHops} 跳后${ok ? "最终验证成功" : "最终状态未通过"}` : "")
+      + (root.retried ? "；连接重试后成功" : ""),
     {
       ...rootExtra, redirectTarget: null, crossedHost: false, verified: ok,
       redirectOutcome: sameOriginHops > 0
@@ -508,7 +551,8 @@ const missingUrl = resolve(notFoundPath);
 const missing = await req(missingUrl, { method: "GET", headers: { "user-agent": UA } });
 
 if (!missing.res) {
-  add("404", "warn", `无法检查 404：${missing.error}`, { mode });
+  const retryNote = missing.attempts > 1 ? `（已重试 ${missing.attempts - 1} 次）` : "";
+  add("404", "warn", `无法检查 404：${missing.error}${retryNote}`, { mode, attempts: missing.attempts, errorKind: missing.errorKind });
 } else {
   const status = missing.res.status;
   const ct = missing.res.headers.get("content-type") || "";
@@ -728,7 +772,8 @@ if (apiPaths.length) {
     const started = Date.now();
     const r = await req(u, { method: "GET", headers: { "user-agent": UA } });
     if (!r.res) {
-      add("api", "fail", `GET ${p} 请求失败：${r.error}`, { path: p, expectedFound: expected ? false : null });
+      const retryNote = r.attempts > 1 ? `（已重试 ${r.attempts - 1} 次）` : "";
+      add("api", "fail", `GET ${p} 请求失败：${r.error}${retryNote}`, { path: p, expectedFound: expected ? false : null, attempts: r.attempts, errorKind: r.errorKind });
       continue;
     }
     const status = r.res.status;
@@ -842,7 +887,8 @@ if (headers) {
     }
   } else {
     // 网络失败不能静默跳过：否则 JSON 里没有 index-redirect，看起来像没这项检查。
-    add("index-redirect", "warn", `检查 /index.html 失败：${r.error}；无法确认收敛到 /`, { httpStatus: null, statusClass: null, redirect: false });
+    const retryNote = r.attempts > 1 ? `（已重试 ${r.attempts - 1} 次）` : "";
+    add("index-redirect", "warn", `检查 /index.html 失败：${r.error}${retryNote}；无法确认收敛到 /`, { httpStatus: null, statusClass: null, redirect: false, attempts: r.attempts, errorKind: r.errorKind });
   }
 }
 
@@ -853,7 +899,8 @@ if (origin) {
   const corsUrl = resolve(getArg("--cors-url", ""));
   const r = await req(corsUrl, { method: "GET", headers: { "user-agent": UA, origin } });
   if (!r.res) {
-    add("cors", "warn", `CORS 检查失败：${r.error}`, { url: corsUrl });
+    const retryNote = r.attempts > 1 ? `（已重试 ${r.attempts - 1} 次）` : "";
+    add("cors", "warn", `CORS 检查失败：${r.error}${retryNote}`, { url: corsUrl, attempts: r.attempts, errorKind: r.errorKind });
   } else {
     const acao = r.res.headers.get("access-control-allow-origin");
     const acac = r.res.headers.get("access-control-allow-credentials");
@@ -992,11 +1039,15 @@ if (backup) {
   const bExtra = {
     hops: b.hops, redirectOutcome: b.stopped, redirectTarget: b.redirectTarget,
     httpStatus: b.status, statusClass: b.status == null ? null : classifyStatus(b.status),
+    attempts: b.attempts || null, errorKind: b.errorKind || null,
   };
   if (sameOriginBackup) {
     // 备用站和主站同源，主站挂掉时它也会挂，不构成独立备用入口。
     add("backup", "fail", `备用站与主站同源（${backupOrigin}），不是独立备用入口`, bExtra);
-  } else if (b.error) add("backup", "fail", `备用站请求失败：${b.error}`, bExtra);
+  } else if (b.error) {
+    const retryNote = b.attempts > 1 ? `（已重试 ${b.attempts - 1} 次）` : "";
+    add("backup", "fail", `备用站请求失败：${b.error}${retryNote}`, bExtra);
+  }
   else if (redirectedToMain) add("backup", "fail", "备用站跳转到主站，不是独立备用入口（只解析 Location 判断，未请求主站）", bExtra);
   else if (b.stopped === "not-modified" || b.stopped === "unexpected-3xx") {
     // 与主站共用状态分类：这两种 3xx 不是重定向，不能写成「重定向未完成验证」。
@@ -1007,6 +1058,24 @@ if (backup) {
     if (b.status !== 200) add("backup", "fail", `备用站 -> ${b.status}${b.hops.at(-1)?.location ? `（${b.hops.at(-1).location}）` : ""}`, bExtra);
     else if (/cloudflare/i.test(server)) add("backup", "warn", `备用站由 Cloudflare 提供（${server}），可能扛不住 Cloudflare 故障`, bExtra);
     else add("backup", "pass", `备用站 200，Server: ${server || "未知"}`, bExtra);
+  }
+}
+
+// ---------------------------------------------------------------- SEO 决策提示
+// canonical / meta robots / X-Robots-Tag 三者都没有时，不把它们说成“检查通过”，
+// 但公开站点（尤其同时保留 GitHub Pages 备用站）需要知道存在重复内容/索引策略空白。
+if (html) {
+  const canonicalCheck = checks.find((c) => c.id === "canonical");
+  const metaRobotsCheck = checks.find((c) => c.id === "meta-robots");
+  const xRobotsCheck = checks.find((c) => c.id === "x-robots-tag");
+  if (canonicalCheck?.status === "skip" && metaRobotsCheck?.status === "skip" && xRobotsCheck?.status === "skip") {
+    add(
+      "seo",
+      "warn",
+      "首页没有 canonical、meta robots 或 X-Robots-Tag；索引策略未声明"
+        + (backup ? "，且同时提供了 --backup 备用站：两个公开地址内容重复时，建议明确 self-canonical 或给备用站 noindex" : "；对外站点建议明确 self-canonical 或 noindex，内网/测试站可忽略"),
+      { backupProvided: Boolean(backup), note: "不影响退出码；这是策略提醒，不是 HTTP 错误" }
+    );
   }
 }
 
@@ -1023,6 +1092,7 @@ const result = {
   api: apiPaths.length ? apiPaths : null,
   expectJson,
   expectJsonMode: expectJson ? "json-subset" : null,
+  retry: { maxRetries: retries, mode: "transient-network-only", backoffMs: RETRY_BACKOFF_MS },
   checkedAt: new Date().toISOString(), summary, checks,
 };
 

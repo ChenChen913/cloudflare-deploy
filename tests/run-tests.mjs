@@ -20,6 +20,7 @@ import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scrip
 import { classifyRedirect } from "../scripts/redirect-policy.mjs";
 import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, decodeCharacterReferences, resourceReferences, parseSrcset, scanScriptData } from "../scripts/html-scan.mjs";
 import { classifyWranglerWhoami, extractAccountId } from "../scripts/wrangler-auth.mjs";
+import { isTransientNetworkError, parseRetries, collectNetworkErrorCodes } from "../scripts/net-retry.mjs";
 import { TLS_KEY, TLS_CERT } from "./fixtures/loopback-tls.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,27 @@ function detect(dir) {
   if (r.status !== 0) throw new Error(`识别失败 ${dir}：${r.stderr || r.error || r.status}`);
   return JSON.parse(r.stdout);
 }
+
+// 网络重试只对连接类瞬时错误生效；HTTP 响应、超时、证书错误不得重试。
+assert("网络重试：只分类连接类瞬时错误（含 cause/AggregateError）",
+  isTransientNetworkError({ cause: { code: "UND_ERR_SOCKET" } })
+    && isTransientNetworkError({ cause: { errors: [{ code: "ECONNRESET" }] } })
+    && isTransientNetworkError({ cause: { cause: { code: "ETIMEDOUT" } } })
+    && !isTransientNetworkError({ cause: { code: "DEPTH_ZERO_SELF_SIGNED_CERT" } })
+    && !isTransientNetworkError({ cause: { code: "ENOTFOUND" } })
+    && !isTransientNetworkError({ cause: { code: "EAI_AGAIN" } })
+    && !isTransientNetworkError(new Error("aborted"), true)
+    && collectNetworkErrorCodes({ cause: { errors: [{ code: "ECONNRESET" }, { code: "EPIPE" }] } }).includes("EPIPE"),
+  JSON.stringify({
+    socket: isTransientNetworkError({ cause: { code: "UND_ERR_SOCKET" } }),
+    cert: isTransientNetworkError({ cause: { code: "DEPTH_ZERO_SELF_SIGNED_CERT" } }),
+    dns: isTransientNetworkError({ cause: { code: "EAI_AGAIN" } }),
+    timeout: isTransientNetworkError(new Error("aborted"), true),
+  }), "unit");
+assert("网络重试：--retries 只接受 0..3 的整数",
+  parseRetries("0") === 0 && parseRetries("3") === 3
+    && ["4", "-1", "1.5", "abc", ""].every((v) => parseRetries(v) === null),
+  JSON.stringify(["0", "3", "4", "-1", "1.5", "abc", ""].map((v) => [v, parseRetries(v)])), "unit");
 function checkBuild(dir, mode = "static") {
   const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, "--mode", mode, "--json"], { encoding: "utf8", timeout: 30000 });
   return { code: r.status, json: JSON.parse(r.stdout) };
@@ -77,6 +99,67 @@ w("vite/vite.config.ts", `export default { base: "/repo/", build: { outDir: "dis
 w("vite/index.html", `<!doctype html><html><head><title>Vite</title></head><body><div id="root"></div><script type="module" src="/repo/src/main.jsx"></script></body></html>\n`);
 w("vite/src/main.jsx", `console.log("vite");\n`);
 w("vite/.github/workflows/pages.yml", `name: pages\non: push\njobs:\n  x:\n    steps:\n      - uses: actions/configure-pages@v5\n      - uses: actions/deploy-pages@v4\n`);
+
+// HashRouter 与 history 路由的验收模式不同：前者未知路径 404 正常（static），
+// 后者必须有 SPA fallback（spa）。识别错误会导致验收结论相反。
+json("router-hash/package.json", {
+  name: "router-hash-fixture", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-hash/index.html", `<!doctype html><html><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>\n`);
+w("router-hash/src/main.tsx", `import { HashRouter, Routes, Route } from "react-router";\nexport function App(){ return <HashRouter><Routes><Route path="/" element={<div>hash</div>} /></Routes></HashRouter>; }\n`);
+json("router-history/package.json", {
+  name: "router-history-fixture", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-history/index.html", `<!doctype html><html><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>\n`);
+w("router-history/src/main.tsx", `import { BrowserRouter } from "react-router";\nexport function App(){ return <BrowserRouter><div>history</div></BrowserRouter>; }\n`);
+
+// 路由识别不能只看 kind=spa：Vue CLI/Angular/webpack 等项目的 HTML 可能在
+// public/ 或 src/，会被识别成 static/static-html；但仍需按 router 依赖判断模式。
+json("router-history-tool/package.json", {
+  name: "router-history-tool", scripts: { build: "vue-cli-service build" },
+  dependencies: { "vue-router": "^4.4.0" },
+});
+w("router-history-tool/public/index.html", `<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>\n`);
+w("router-history-tool/src/main.js", `import { createRouter, createWebHistory } from "vue-router";\nexport const router = createRouter({ history: createWebHistory(), routes: [] });\n`);
+json("router-vue3-hash/package.json", {
+  name: "router-vue3-hash", scripts: { build: "vue-cli-service build" },
+  dependencies: { "vue-router": "^3.6.5" },
+});
+w("router-vue3-hash/index.html", `<!doctype html><html><body><div id="app"></div></body></html>\n`);
+w("router-vue3-hash/src/main.js", `import VueRouter from "vue-router";\nexport const router = new VueRouter({ routes: [] });\n`);
+json("router-deep-hash/package.json", {
+  name: "router-deep-hash", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-deep-hash/index.html", `<!doctype html><html><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>\n`);
+w("router-deep-hash/src/pages/admin/nested/route.tsx", `import { HashRouter } from "react-router";\nexport const Router = () => <HashRouter><div>deep</div></HashRouter>;\n`);
+json("router-string-only/package.json", {
+  name: "router-string-only", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-string-only/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+w("router-string-only/src/main.tsx", `const label = "HashRouter is only a string"; export default label;\n`);
+json("router-mixed/package.json", {
+  name: "router-mixed", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-mixed/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+w("router-mixed/src/main.tsx", `import { HashRouter } from "react-router";\nconst docs = "use BrowserRouter for history";\nexport const App = () => <HashRouter><div>{docs}</div></HashRouter>;\n`);
+json("router-vue3-history/package.json", {
+  name: "router-vue3-history", scripts: { build: "vue-cli-service build" },
+  dependencies: { "vue-router": "^3.6.5" },
+});
+w("router-vue3-history/index.html", `<!doctype html><html><body><div id="app"></div></body></html>\n`);
+w("router-vue3-history/src/main.js", `import VueRouter from "vue-router";\nexport const router = new VueRouter({ mode: "history", routes: [] });\n`);
+json("router-bundle-leak/package.json", {
+  name: "router-bundle-leak", scripts: { build: "vite build" },
+  dependencies: { react: "^19.0.0", "react-router": "^7.0.0" }, devDependencies: { vite: "^6.0.0" },
+});
+w("router-bundle-leak/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+w("router-bundle-leak/src/main.tsx", `import { HashRouter } from "react-router";\nexport const App = () => <HashRouter><div>real</div></HashRouter>;\n`);
+w("router-bundle-leak/dist-web/assets/app-old.js", `import { BrowserRouter } from "react-router";\nsetInterval(() => {}, 1000);\nconsole.log("old bundle only");\n`);
 
 json("jekyll/package.json", { name: "jekyll-fixture" });
 w("jekyll/_config.yml", `title: Fixture\nurl: https://www.example.com\n`);
@@ -181,6 +264,46 @@ assert("Vite：输出目录 + base", vite.project.outputDir === "dist" && vite.p
 assert("Vite：识别 GitHub Pages", vite.githubPages.configured === true && vite.githubPages.workflows.length === 1);
 assert("Vite：目标给候选而不是定论", vite.target.suggested === null && vite.target.candidates.join(",") === "pages,workers" && vite.recommendedTarget === "either", `${vite.target.suggested}/${vite.target.candidates}`);
 assert("Vite：输出目录有证据等级", vite.evidence.outputDir.confidence === "confirmed" && vite.evidence.outputDir.source.includes("outDir"), `${vite.evidence.outputDir.confidence}`);
+
+const routerHash = detect(path.join(work, "router-hash"));
+const routerHistory = detect(path.join(work, "router-history"));
+assert("Vite+HashRouter：识别 hash 路由并用 static 验收",
+  routerHash.project.spaRouting === "hash" && routerHash.project.suggestedMode === "static"
+    && routerHash.risks.some((r) => /HashRouter/.test(r)),
+  JSON.stringify({ routing: routerHash.project.spaRouting, mode: routerHash.project.suggestedMode, risks: routerHash.risks }));
+assert("Vite+BrowserRouter：识别 history 路由并用 spa 验收",
+  routerHistory.project.spaRouting === "history" && routerHistory.project.suggestedMode === "spa"
+    && routerHistory.risks.some((r) => /history 路由/.test(r)),
+  JSON.stringify({ routing: routerHistory.project.spaRouting, mode: routerHistory.project.suggestedMode, risks: routerHistory.risks }));
+
+const routerHistoryTool = detect(path.join(work, "router-history-tool"));
+const routerVue3Hash = detect(path.join(work, "router-vue3-hash"));
+const routerDeepHash = detect(path.join(work, "router-deep-hash"));
+const routerStringOnly = detect(path.join(work, "router-string-only"));
+const routerMixed = detect(path.join(work, "router-mixed"));
+const routerVue3History = detect(path.join(work, "router-vue3-history"));
+const routerBundleLeak = detect(path.join(work, "router-bundle-leak"));
+assert("路由识别不依赖 kind=spa：Vue/webpack 风格 history 项目仍建议 spa",
+  (routerHistoryTool.project.kind === "static" || routerHistoryTool.project.kind === "unknown")
+    && routerHistoryTool.project.spaRouting === "history" && routerHistoryTool.project.suggestedMode === "spa",
+  JSON.stringify({ kind: routerHistoryTool.project.kind, routing: routerHistoryTool.project.spaRouting, mode: routerHistoryTool.project.suggestedMode }));
+assert("Vue Router 3 默认 hash：无显式 history 时按 hash/static 建议",
+  routerVue3Hash.project.spaRouting === "hash" && routerVue3Hash.project.suggestedMode === "static",
+  JSON.stringify({ routing: routerVue3Hash.project.spaRouting, mode: routerVue3Hash.project.suggestedMode }));
+assert("路由识别覆盖深层源码，且字符串字面量不误报",
+  routerDeepHash.project.spaRouting === "hash" && routerDeepHash.project.suggestedMode === "static"
+    && routerStringOnly.project.spaRouting === "unknown" && routerStringOnly.project.suggestedMode === "spa",
+  JSON.stringify({ deep: routerDeepHash.project.spaRouting, string: routerStringOnly.project.spaRouting, mode: routerStringOnly.project.suggestedMode }));
+assert("mixed 字符串噪声不改变真实 HashRouter 判定",
+  routerMixed.project.spaRouting === "hash" && routerMixed.project.suggestedMode === "static",
+  JSON.stringify({ routing: routerMixed.project.spaRouting, mode: routerMixed.project.suggestedMode, risks: routerMixed.risks }));
+assert("Vue Router 3 显式 mode:history 不被默认 hash 覆盖",
+  routerVue3History.project.spaRouting === "history" && routerVue3History.project.suggestedMode === "spa",
+  JSON.stringify({ routing: routerVue3History.project.spaRouting, mode: routerVue3History.project.suggestedMode }));
+assert("构建产物目录不参与源码路由/长驻进程扫描",
+  routerBundleLeak.project.spaRouting === "hash" && routerBundleLeak.project.suggestedMode === "static"
+    && !routerBundleLeak.risks.some((r) => /长驻/.test(r)),
+  JSON.stringify({ routing: routerBundleLeak.project.spaRouting, mode: routerBundleLeak.project.suggestedMode, risks: routerBundleLeak.risks }));
 
 const jekyll = detect(path.join(work, "jekyll"));
 assert("Jekyll：框架/静态", jekyll.project.framework === "jekyll" && jekyll.project.kind === "static", `${jekyll.project.framework}/${jekyll.project.kind}`);
@@ -1150,12 +1273,39 @@ const subServer = http.createServer((req, res) => {
 });
 let subBase = "";
 
+// 瞬时故障服务器：用真实 socket 行为验证 verify-deployment 的重试边界。
+let flakyMode = "ok";
+let flakyRootHits = 0;
+let flakyBase = "";
+const flakyServer = http.createServer((req, res) => {
+  const p = new URL(req.url, "http://x").pathname;
+  if (p === "/") {
+    if (req.method !== "HEAD") flakyRootHits++;
+    if (flakyMode === "reset-first" || flakyMode === "always-reset") {
+      if (flakyMode === "always-reset" || flakyRootHits === 1) { req.socket.destroy(); return; }
+    }
+    if (flakyMode === "503") { res.writeHead(503, { "content-type": "text/plain" }); res.end("service unavailable"); return; }
+    const send = () => {
+      if (res.writableEnded || res.destroyed) return;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
+      res.end(`<!doctype html><html><head><title>Flaky</title><link rel="canonical" href="${flakyBase}/"></head><body>ok</body></html>`);
+    };
+    if (flakyMode === "slow") { setTimeout(send, 300); return; }
+    send();
+    return;
+  }
+  if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
+  res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
+});
+flakyServer.on("clientError", (_e, socket) => { try { socket.destroy(); } catch { /* 已关闭 */ } });
+
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, tlsCanonicalServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, flakyServer, tlsCanonicalServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
 backupTarget = staticBase;
+flakyBase = `http://127.0.0.1:${flakyServer.address().port}`;
 const spaUrl = `http://127.0.0.1:${spaServer.address().port}`;
 const corsUrl = `http://127.0.0.1:${corsServer.address().port}`;
 const badCorsUrl = `http://127.0.0.1:${badCorsServer.address().port}`;
@@ -1186,6 +1336,84 @@ assert("验收：标题 / content-type / cache-control 检查落进 JSON", (() =
   const byId = (id) => v1j.checks.find((c) => c.id === id);
   return byId("title")?.status === "pass" && byId("content-type")?.status === "pass" && byId("cache-control")?.status === "pass";
 })(), JSON.stringify(["title", "content-type", "cache-control"].map((id) => v1j.checks.find((c) => c.id === id))));
+assert("验收 SEO：存在 canonical 时不误报 seo warn", !v1j.checks.some((c) => c.id === "seo"),
+  JSON.stringify(v1j.checks.filter((c) => c.id === "seo")), "adversarial");
+
+// 瞬时网络错误重试：只重试连接类错误，不重试 HTTP 响应/超时。
+{
+  flakyMode = "reset-first"; flakyRootHits = 0;
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "1", "--timeout", "3000", "--json"]);
+  const j = JSON.parse(r.out);
+  const root = j.checks.find((c) => c.id === "root");
+  assert("验收重试：首次连接重置后第二次成功（attempts=2）",
+    r.code === 0 && root?.status === "pass" && root.attempts === 2 && flakyRootHits === 2,
+    JSON.stringify({ code: r.code, root, hits: flakyRootHits }), "adversarial");
+}
+{
+  flakyMode = "always-reset"; flakyRootHits = 0;
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "2", "--timeout", "3000", "--json"]);
+  const j = JSON.parse(r.out);
+  const root = j.checks.find((c) => c.id === "root");
+  assert("验收重试：重试耗尽仍失败时报告 attempts/errorKind，且不伪造 HTTP 状态",
+    r.code === 1 && root?.status === "fail" && root.attempts === 3 && root.errorKind === "network"
+      && root.httpStatus === null && /已重试 2 次/.test(root.detail || ""),
+    JSON.stringify({ code: r.code, root }), "adversarial");
+}
+{
+  flakyMode = "503"; flakyRootHits = 0;
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "3", "--timeout", "3000", "--json"]);
+  const j = JSON.parse(r.out);
+  const root = j.checks.find((c) => c.id === "root");
+  assert("验收重试：HTTP 503 不重试（服务器只收到 1 次 GET）",
+    r.code === 1 && root?.status === "fail" && root.httpStatus === 503 && flakyRootHits === 1
+      && !/已重试/.test(root.detail || ""),
+    JSON.stringify({ code: r.code, root, hits: flakyRootHits }), "adversarial");
+}
+{
+  flakyMode = "slow"; flakyRootHits = 0;
+  const startedAt = Date.now();
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "3", "--timeout", "100", "--json"]);
+  const j = JSON.parse(r.out);
+  const root = j.checks.find((c) => c.id === "root");
+  assert("验收重试：单次超时不重试且不放大等待",
+    r.code === 1 && root?.status === "fail" && root.errorKind === "timeout" && flakyRootHits === 1
+      && Date.now() - startedAt < 5000,
+    JSON.stringify({ code: r.code, root, hits: flakyRootHits, ms: Date.now() - startedAt }), "adversarial");
+}
+{
+  flakyMode = "reset-first"; flakyRootHits = 0;
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "0", "--timeout", "3000", "--json"]);
+  const j = JSON.parse(r.out);
+  const root = j.checks.find((c) => c.id === "root");
+  assert("验收重试：--retries 0 关闭重试（只请求 1 次）",
+    r.code === 1 && root?.status === "fail" && root.attempts === 1 && flakyRootHits === 1,
+    JSON.stringify({ code: r.code, root, hits: flakyRootHits }), "boundary");
+}
+{
+  flakyMode = "ok"; flakyRootHits = 0;
+  const r = await runVerify(["--url", flakyBase, "--mode", "static", "--retries", "1", "--json"]);
+  const j = JSON.parse(r.out);
+  assert("验收重试：无故障请求不触发重试，且 retry 配置写入 JSON",
+    r.code === 0 && j.checks.find((c) => c.id === "root")?.attempts === 1
+      && j.retry?.maxRetries === 1 && j.retry?.mode === "transient-network-only",
+    JSON.stringify({ code: r.code, retry: j.retry, root: j.checks.find((c) => c.id === "root") }), "boundary");
+}
+{
+  const r = await runVerify(["--url", staticBase, "--mode", "static", "--retries=2", "--json"]);
+  const j = JSON.parse(r.out);
+  assert("验收重试：支持 --retries=N 等号形式，且不误触发重试",
+    r.code === 0 && j.retry?.maxRetries === 2 && j.checks.find((c) => c.id === "root")?.attempts === 1,
+    JSON.stringify({ code: r.code, retry: j.retry, root: j.checks.find((c) => c.id === "root") }), "boundary");
+}
+{
+  // 无 canonical/meta 的 SPA：SEO 是策略提醒，不应改变退出码。
+  const r = await runVerify(["--url", spaUrl, "--mode", "spa", "--json"]);
+  const j = JSON.parse(r.out);
+  const seo = j.checks.find((c) => c.id === "seo");
+  assert("验收 SEO：canonical/meta 都缺少时给出 warn，但不改退出码",
+    r.code === 0 && seo?.status === "warn" && /canonical|索引策略/.test(seo.detail || ""),
+    JSON.stringify({ code: r.code, seo, canonical: j.checks.find((c) => c.id === "canonical") }), "adversarial");
+}
 assert("验收：安全头按数量给结论", (() => {
   const sec = v1j.checks.find((c) => c.id === "security-headers");
   return sec?.status === "warn" && /x-content-type-options/.test(sec.detail || "");
@@ -1274,12 +1502,14 @@ for (const [name, args] of [
   ["--expect-404 的 URL 无法解析", ["--expect-404", "http://["]],
   ["--assets-limit 不是正整数", ["--assets-limit", "abc"]],
   ["--timeout 不是正数", ["--timeout", "0"]],
+  ["--retries 不是 0..3 的整数", ["--retries", "99"]],
+  ["--retries 不是整数", ["--retries", "1.5"]],
   ["--backup 不是合法 URL", ["--backup", "http://["]],
   ["--origin 不是合法 origin", ["--origin", "a b"]],
   ["CORS 参数缺少 --origin", ["--cors-method", "POST"]],
 ]) {
   const r = await runVerify(["--url", staticBase, "--mode", "static", ...args, "--json"]);
-  assert(`CLI：${name} 退出码 2 且不输出半截 JSON`, r.code === 2 && !r.out.trim() && /无法解析|正整数|正数|合法 URL|--origin|需要同时提供/.test(r.err), `code=${r.code} out=${r.out.slice(0, 40)} err=${r.err.slice(0, 80)}`);
+  assert(`CLI：${name} 退出码 2 且不输出半截 JSON`, r.code === 2 && !r.out.trim() && /无法解析|正整数|正数|合法 URL|--origin|需要同时提供|--retries|0\.\.3/.test(r.err), `code=${r.code} out=${r.out.slice(0, 40)} err=${r.err.slice(0, 80)}`);
 }
 
 // 其余 CLI / 模式边界：非法模式、非法 --url、--cors-url、带 query 的 --url、ssg 模式。
@@ -2063,7 +2293,7 @@ const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, tlsCanonicalServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, canonicalHrefServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, indexStatusServer, crossTargetServer, flakyServer, tlsCanonicalServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");

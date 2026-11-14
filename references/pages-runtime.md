@@ -37,7 +37,7 @@ Pages 给静态资源加这些头：
 ## 3. 404 与被当成 SPA
 
 - Pages 从请求路径向上找最近的 `404.html`。
-- **没有顶层 `404.html` 时，Pages 把项目当成 SPA**，未匹配路径返回 `/`（200）。
+- **没有顶层 `404.html` 时，按 Cloudflare 官方 [Serving Pages](https://developers.cloudflare.com/pages/configuration/serving-pages/#single-page-application-spa-rendering) 文档：Pages 把项目当成 SPA**，未匹配路径返回 `/`（官方未写明状态码，实际回退通常 200）。HashRouter 不需要这个回退，建议 static + 顶层 404.html；BrowserRouter/history 路由才需要显式 SPA 回退。默认回退对**缺失的静态资源路径**也会返回 HTML 200，因此“资源 404”不能只看状态码，要看 content-type/内容。
 
 这是最常见的静默故障。永远探一下：
 

@@ -184,7 +184,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 node "<技能目录>/scripts/check-env.mjs"
 ```
 
-退出码就是结论：`0` 可部署、`1` 可构建但不可部署、`2` 连构建条件都不满足。**不要忽略非零退出码继续往下走。** 只想本地构建、不打算部署时用 `--build-only`。登录缺失会给出准确命令，**不要让用户在聊天里粘贴 Token**。登录判定要求正向证据：`whoami` 退出码 0 但没有邮箱 / Account ID / 明确登录文本时只会给 `warn`（`authState: "unknown"`），不能当成已登录继续部署。
+退出码就是结论：`0` 可部署、`1` 可构建但不可部署、`2` 连构建条件都不满足。**不要忽略非零退出码继续往下走。** 只想本地构建、不打算部署时用 `--build-only`。`canBuild=true` 只代表 Node/Git/wrangler 等前置条件可用，**不会执行项目自己的 build 命令**。登录缺失会给出准确命令，**不要让用户在聊天里粘贴 Token**。登录判定要求正向证据：`whoami` 退出码 0 但没有邮箱 / Account ID / 明确登录文本时只会给 `warn`（`authState: "unknown"`），不能当成已登录继续部署。
 
 用项目自己的构建命令，然后检查产物：
 
@@ -197,12 +197,12 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 
 | 模式 | 用在 | 未知路径的期望 | 产物检查 |
 |---|---|---|---|
-| `static` | 预渲染的多页站 | 404 | 适用 |
+| `static` | 预渲染的多页站；**HashRouter SPA 也用这个** | 404 | 适用 |
 | `ssg` | Hugo / Jekyll / Astro 等生成的静态站 | 404 | 适用 |
-| `spa` | 客户端路由（React/Vue/Vite SPA） | 200 + app shell | 适用，不要求 `404.html` |
+| `spa` | BrowserRouter / history 路由的客户端 SPA | 200 + app shell | 适用，不要求 `404.html` |
 | `ssr` | 服务端渲染 / 全栈 | 通常 404；200 要确认不是 catch-all | **不适用**，脚本只报 `skip` |
 
-`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
+`detect-project.mjs` 会从源码识别 HashRouter / BrowserRouter / `createWebHashHistory` / `createWebHistory`：HashRouter 建议 `static`，history 路由建议 `spa`；未识别时会给出风险项。**不要手动把 HashRouter 套成 `spa`**：HashRouter 的未知路径本来就应该 404，套 `spa` 会误判并需要不必要的 fallback。`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 history 路由 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。SSR 没有可上传的静态产物目录，不要为了凑检查去建一个空目录。
 
 产物检查的补充规则：资源存在性按产物里的**真实文件名大小写敏感**匹配（Cloudflare 区分大小写，Windows 本地不区分；顶层 `index.html` / `404.html` / `_headers` 也按大小写严格判断）；`..` 逃逸判坏；以 `/` 开头的引用按产物根相对路径解析（存在即通过，不是逃逸），相对引用受 `<base href>` 影响；目录式 URL（`/about/`、`/about`）按 `about/index.html` 查找；产物里的 symlink/junction 会跟随并计入。 `check-build` 只核对显式参数 / 环境变量 / 项目依赖里的套餐证据，账号套餐和 Pages 项目设置仍需人工确认。
 
@@ -216,7 +216,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<st
 
 证据可来自 `--wrangler-version` / `--pages-wrangler-major`、CI 环境变量或项目 `package.json`；非法版本（`4.x`、预发布标签）和只给主版本 `4` 都**不能**证明 Workers 的 >= 4.34.0。证据不足自动退回 20,000 并给 `warn`，结果里写明生效上限、目标与原因。控制台里的账号套餐与 Pages 项目设置本地看不到，仍需人工确认。详见 `references/platform-selection.md`。
 
-部署前修掉阻断项（输出目录不存在、文件数超过**当前生效上限**、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。构建失败按第 0 步的止损线处理，不要原样重试。
+部署前修掉阻断项（输出目录不存在、文件数超过**当前生效上限**、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Cloudflare 官方说明没有顶层 `404.html` 时按 SPA 处理、未知路径返回 `/`（官方未写状态码，实际回退通常 200）；HashRouter 应补 404.html 并用 static 验收，BrowserRouter/history 路由才改用带显式 fallback 的 spa。构建失败按第 0 步的止损线处理，不要原样重试。
 
 ### 5. 部署
 
@@ -233,6 +233,7 @@ npx wrangler deploy
 规则：
 
 - 已有脚本/workflow 能正常部署时，复用它。
+- **Pages Direct Upload 前先 `cd` 目标项目根目录**，并用 wrangler 输出的实际 `*.pages.dev` 地址验收；项目名不保证等于默认域名（可能带随机后缀）。
 - 不要新建第二条部署路径和现有流程打架。
 - Pages 的 Direct Upload **不可逆**；在 Git 集成和它之间做选择前先确认。
 - Git 集成、Workers Builds 是控制台/API 流程，**不要说 CLI 已经连好仓库**。
@@ -244,7 +245,7 @@ npx wrangler deploy
 node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**：脚本不会凭默认值发送 `Access-Control-Request-Method/Headers`，对应断言列进 `notChecked`，未提供实际方法/请求头的预检最多 `warn`，不能判通过；同时给 `--cors-*` 却漏 `--origin` 会直接退出码 2。`--cors-credentials` 只是声明「预期请求带凭据」：脚本不会真的发浏览器 Cookie 或身份凭据，响应里的 `ACAC: true` 也不代表请求带凭据，无凭据时 `ACAO: *` 依旧有效；显式声明带凭据时才要求 ACAO 精确匹配 Origin 且必须有 `ACAC: true`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization` 永远不被 `Allow-Headers: *` 覆盖（`Range` 可以被覆盖）；方法名大小写敏感（已知方法先规范化为大写）。简单请求 3xx/4xx/5xx 不判通过（脚本不跟随 CORS URL 的重定向）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/连接重置可重试。detail 会区分“网络连接失败（已重试 N 次）”与 HTTP 断言失败。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**：脚本不会凭默认值发送 `Access-Control-Request-Method/Headers`，对应断言列进 `notChecked`，未提供实际方法/请求头的预检最多 `warn`，不能判通过；同时给 `--cors-*` 却漏 `--origin` 会直接退出码 2。`--cors-credentials` 只是声明「预期请求带凭据」：脚本不会真的发浏览器 Cookie 或身份凭据，响应里的 `ACAC: true` 也不代表请求带凭据，无凭据时 `ACAO: *` 依旧有效；显式声明带凭据时才要求 ACAO 精确匹配 Origin 且必须有 `ACAC: true`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization` 永远不被 `Allow-Headers: *` 覆盖（`Range` 可以被覆盖）；方法名大小写敏感（已知方法先规范化为大写）。简单请求 3xx/4xx/5xx 不判通过（脚本不跟随 CORS URL 的重定向）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。canonical / meta robots / X-Robots-Tag 全缺失时会多一条 `seo` warn（不改退出码），同时保留备用站时要明确 self-canonical / noindex 策略。
 
 `--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
 
@@ -287,7 +288,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **退出码 0 不等于成功，缺证据不等于通过。** 登录态、部署验证、CORS 预检、SPA 回退、资源引用都按 fail-closed 处理：没有可验证证据时最多 `warn`，不能判 `pass`；`canDeploy`/`ready` 只认正向证据。
 - **资源引用只认子资源属性。** `src`（只对 img/script/iframe/embed/video/audio/source/track/input）、`poster`（只对 video）、`srcset`（只对 img/source，按 WHATWG 算法拆候选）、`<object data>`、`<link href>` 才是资源；导航链接、canonical、`<base>` 不探测。`finalUrl` 不能指向从未请求过的地址；跨源目标只记录不请求。
 - **HTML 的状态有明确边界，不能靠“看起来像”判断。** HTML 命名空间的非空元素写成 `<div/>` 不会关闭（self-closing 只对 void/foreign 元素生效）；EOF 未完成开始标签按浏览器丢弃，不产生元素也不并入文本；外域结束标签回退 HTML 时会在 table/select 等 scope 边界停止，浏览器丢弃的 table-internal 标签不进入祖先栈。 script data 有 escaped/double-escaped（`<!--<script></script>-->` 内层 `</script>` 不关闭）；DOCTYPE public/system 标识符里的 `>` 按规范 abrupt 结束 DOCTYPE；SVG/MathML 用命名空间栈（foreignObject/desc/title/MathML 文本集成点、annotation-xml、breakout、HTML 祖先结束标签、template 隔离）；集成点内部的 `<link>` 才是 HTML 元素。`tests/fixtures/html5-oracle.json` 用真实 Chrome/Edge DOM facts 锁这些边界，有浏览器时可跑 `node tests/browser-diff.mjs`。
-- **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
+- **缺少 `404.html` 会触发 Pages 的默认 SPA 行为**（官方：按 SPA 处理，未知路径返回 `/`；官方未写状态码，实际通常 200）。这对 BrowserRouter SPA 是预期，对多页站和 HashRouter 是故障；先定模式再判断，不要一刀切。
 - **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。
 - **不要随手加自定义缓存**，除非文件名带内容哈希且用户接受代价。
@@ -324,7 +325,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 模板：`templates/deployment-plan.md`、`templates/deployment-report.md`、`templates/wrangler.workers.jsonc`、`templates/wrangler.pages.toml`。
 
-脚本：`scripts/probe.mjs`（链路探针）、`deploy-verdict.mjs`（探针 `--deploy` 的可测判定逻辑）、`detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
+脚本：`scripts/probe.mjs`（链路探针）、`deploy-verdict.mjs`（探针 `--deploy` 的可测判定逻辑）、`redirect-policy.mjs`（重定向同源判定）、`net-retry.mjs`（瞬时网络错误分类，verify 重试用）、`detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
 
 ## 八、输出要求
 
