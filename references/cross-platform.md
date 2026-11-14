@@ -12,7 +12,7 @@ Wrangler 的系统要求（2026-11 官方文档）：
 | macOS | **13.5+** |
 | Linux | 需要 **glibc 2.35+** 的发行版 |
 
-Node.js 要求：Current、Active、Maintenance 三个分支。2026 年下半年建议 **Node 22+**；Node 20 已 EOL。
+Node.js 分三档：本技能的脚本最低 **18**（零依赖 + 内置 fetch）；完整部署建议 **22+**（当前仍在维护的最老 LTS）；Wrangler 官方只支持 **Current / Active / Maintenance** 三个分支，Node 18/20 已 EOL，奇数版本（23/25）也已结束支持。
 
 Windows 上如果只能用 PowerShell，Wrangler 命令本身可以跑；但本文的验证命令需要按第 3 节替换。
 

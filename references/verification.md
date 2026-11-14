@@ -2,12 +2,25 @@
 
 验收只回答一件事：**我们实际观察到了什么？** 状态码是证据，部署命令的退出码不是。
 
+## 0. 先定站点模式
+
+所有 404 结论都取决于模式。`check-build.mjs` 和 `verify-deployment.mjs` 必须用同一个 `--mode`，报告里写明用了哪个。
+
+| 模式 | 用在 | 未知路径 | 构建产物 |
+|---|---|---|---|
+| `static` | 预渲染多页站 | 必须 404 | 通常有顶层 `404.html` |
+| `ssg` | Hugo / Jekyll / Astro 生成的静态站 | 必须 404 | 通常有 `404.html` |
+| `spa` | 客户端路由 | 200 + app shell | 不要求 `404.html`（Pages 会回退） |
+
+同一个站，`static` 判“未知路径返回 200”是失败，`spa` 判“未知路径返回 404”是警告。模式选错，结论就会反。
+
 ## 1. 按项目类型选检查项
 
 | 检查 | 纯静态 | SPA | Jekyll/博客 | 静态 + Supabase | API + 数据库 |
 |---|---|---|---|---|---|
 | 首页 200 + 标题 | 必须 | 必须 | 必须 | 必须 | 必须 |
-| 未知路径 404 | 必须 | 必须 | 必须 | 必须 | 必须 |
+| 未知路径 404（`static`/`ssg`） | 必须 | — | 必须 | 按模式 | 按模式 |
+| 深链回退（`spa`） | — | 必须 | — | 按模式 | — |
 | 同源资源 | 必须 | 必须 | 必须 | 必须 | 必须 |
 | SPA 深链 + 刷新 | — | 必须 | — | 必须 | — |
 | 旧 `.html` 链接 | — | — | 必须 | — | — |
@@ -25,20 +38,27 @@
 ## 2. 自动基线
 
 ```bash
-node "<技能目录>/scripts/verify-deployment.mjs" --url "<地址>" --json
+node "<技能目录>/scripts/verify-deployment.mjs" --url "<地址>" --mode "<static|spa|ssg>" --json
 ```
 
-带备用站和 CORS：
+带备用站、CORS 和独立 API 域：
 
 ```bash
 node "<技能目录>/scripts/verify-deployment.mjs" \
   --url "https://site.example.com" \
+  --mode "static" \
   --backup "https://owner.github.io/repo/" \
   --origin "https://app.example.com" \
+  --cors-url "https://api.example.com/items" \
   --json
 ```
 
 脚本输出 `pass`、`warn`、`fail`、`skip`。`fail` 是阻断项；`warn` 要读清楚再决定是否接受。
+
+两个限制必须写进报告：
+
+- 同源资源只查首页引用的前 20 个（`--assets-limit`），不是全站爬取；报告要写 `checked / total`。
+- CORS 检查默认查 `--url` 首页；API 在别的子域时必须用 `--cors-url`，否则“首页没有 CORS 头”会被误读成接口有问题。
 
 ## 3. 脚本做不到的人工检查
 
@@ -76,9 +96,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 ### 状态码
 
 - `/` 至少 200。
-- 未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
+- `static`/`ssg`：未知路径必须 404。返回 200 说明 SPA 回退或 rewrite 把所有路径都吞了。
+- `spa`：未知路径应 200 且返回 app shell（含 root 容器或入口脚本）。404 说明深链刷新会断；如果用的是 hash 路由，可以接受。
 - Pages 上 `/index.html` 跳 `/`（301/308）是正常的。
 - 自定义域名 5xx、但 `pages.dev` 正常，通常是 DNS/证书/zone 配置，不是构建。
+- 资源检查只覆盖首页引用的前 N 个。写了“资源正常”就必须说明检查了多少个。
 
 ### 响应头
 
@@ -97,7 +119,12 @@ curl -sI https://site.example.com/ | grep -iE 'server|cache-control|x-robots-tag
 curl -s https://site.example.com/ | grep -io '<link[^>]*canonical[^>]*>'
 ```
 
+多个标签的检测用脚本（`canonical` 检查会数数量并判 `fail`），不要只肉眼看第一条。
+
 - 主站：只有一个 canonical，指向自己。
+- 一个页面出现多个 canonical 标签 → 模板重复输出，必须修（脚本会判 `fail`）。
+- canonical 指向其他主机 → 如果这是备用站、策略是“指主站”，属预期；否则权重被指向外部。
+- canonical 指向另一个路径 → 可能是有意的（分页/聚合），确认后再接受。
 - 备用站：要么 `noindex`，要么 canonical 指主站，不能同时。
 - 两个 self-canonical 主机 = 两个规范地址。改策略，不是改标签。
 
@@ -123,6 +150,15 @@ curl -s -o /dev/null -D - -X OPTIONS \
 ```
 
 `curl` 只显示头，不执行浏览器的 CORS 判定。最终以 DevTools → Network 的失败请求和 Console 报错为准。
+
+如果前端和 API 不同源（`app.example.com` 调 `api.example.com`），请求必须打到 **API 地址**，不是首页：`verify-deployment.mjs --cors-url https://api.example.com/items`。查首页只能得到“首页没有 CORS 头”，会被误读成接口坏了。
+
+判定要点：
+
+- `ACAO` 必须等于请求的 `Origin`，或是 `*`；值不匹配等于没配。
+- 带 Cookie 时 `ACAO` 不能是 `*`，且需要 `Access-Control-Allow-Credentials: true`。
+- 出现多个 `ACAO` 值（逗号连接）时浏览器判为无效。
+- 缺 `Vary: Origin` 时，CDN 可能把给 A 站的响应缓存给 B 站。
 
 ### DNS
 
@@ -194,7 +230,9 @@ git log -1 --format='commit: %cI'
 ## 5. 报告规则
 
 - 每项写 `通过`、`失败`、`警告` 或 `未验证`。
+- 写明用了哪个 `--mode`；换模式会改变 404 的结论。
 - `未验证` 要写原因（没账号、没数据库权限、用户拒绝、超出范围）。
 - 只看了响应头，不能写“CORS 正常”。
 - 只看了 DNS，不能写“备用站正常”。
+- 资源检查要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。
 - 写清楚实际测试的 URL。预览地址不是生产地址。

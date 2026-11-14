@@ -7,13 +7,18 @@
  *
  * 默认输出 JSON（字段名稳定，带 schemaVersion）；--human 输出摘要。
  * 不写项目文件、不安装依赖、不访问网络。
+ *
+ * 输出分三层：
+ *   project / github / cloudflare / runtime  实际读到的值
+ *   evidence                                 每个关键字段的来源与可信度（confirmed / inferred / unknown）
+ *   target                                   候选产品，不是最终决定
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const argv = process.argv.slice(2);
 const human = argv.includes("--human");
 const rootArg = argv.find((a) => !a.startsWith("--"));
@@ -50,6 +55,8 @@ const listDir = (p) => {
   }
 };
 const firstExisting = (names) => names.find((n) => exists(path.join(root, n))) || null;
+const relToRoot = (f) => path.relative(root, f).replace(/\\/g, "/");
+const ev = (value, confidence, source) => ({ value: value ?? null, confidence, source });
 
 if (!exists(root) || !fs.statSync(root).isDirectory()) {
   console.error(`不是目录： ${root}`);
@@ -91,7 +98,6 @@ const viteConfig = configText(["vite.config.ts", "vite.config.js", "vite.config.
 const nextConfig = configText(["next.config.js", "next.config.mjs", "next.config.ts"]);
 const astroConfig = configText(["astro.config.mjs", "astro.config.ts", "astro.config.js"]);
 const svelteConfig = configText(["svelte.config.js"]);
-const nuxtConfig = configText(["nuxt.config.ts", "nuxt.config.js"]);
 
 const hasIndexHtml = exists(path.join(root, "index.html"));
 const jekyllConfig = exists(path.join(root, "_config.yml"));
@@ -103,39 +109,46 @@ const hasMkDocs = exists(path.join(root, "mkdocs.yml"));
 
 let framework = "unknown";
 let kind = "unknown";
+let frameworkSource = "没有匹配到已知框架";
 
-if (hasDep("next")) { framework = "nextjs"; kind = /output\s*:\s*["']export["']/.test(nextConfig) ? "static" : "ssr"; }
-else if (hasDep("nuxt") || hasDep("nuxt3")) { framework = "nuxt"; kind = "ssr"; }
-else if (hasDep("@sveltejs/kit")) { framework = "sveltekit"; kind = /adapter-static/.test(svelteConfig) || hasDep("@sveltejs/adapter-static") ? "static" : "ssr"; }
-else if (hasDep("astro")) { framework = "astro"; kind = /adapter/.test(astroConfig) ? "ssr" : "static"; }
-else if (hasDep("@remix-run/react") || hasDep("@remix-run/node")) { framework = "remix"; kind = "ssr"; }
-else if (hasDep("gatsby")) { framework = "gatsby"; kind = "static"; }
-else if (hasDep("@docusaurus/core")) { framework = "docusaurus"; kind = "static"; }
-else if (hasDep("vitepress")) { framework = "vitepress"; kind = "static"; }
-else if (hasDep("vite")) { framework = "vite"; kind = hasIndexHtml ? "spa" : "library"; }
-else if (hasDep("react-scripts")) { framework = "cra"; kind = "spa"; }
-else if (hasDep("vue") && hasIndexHtml) { framework = "vue"; kind = "spa"; }
+if (hasDep("next")) { framework = "nextjs"; kind = /output\s*:\s*["']export["']/.test(nextConfig) ? "static" : "ssr"; frameworkSource = "package.json 依赖 next"; }
+else if (hasDep("nuxt") || hasDep("nuxt3")) { framework = "nuxt"; kind = "ssr"; frameworkSource = "package.json 依赖 nuxt"; }
+else if (hasDep("@sveltejs/kit")) { framework = "sveltekit"; kind = /adapter-static/.test(svelteConfig) || hasDep("@sveltejs/adapter-static") ? "static" : "ssr"; frameworkSource = "package.json 依赖 @sveltejs/kit"; }
+else if (hasDep("astro")) { framework = "astro"; kind = /adapter/.test(astroConfig) ? "ssr" : "static"; frameworkSource = "package.json 依赖 astro"; }
+else if (hasDep("@remix-run/react") || hasDep("@remix-run/node")) { framework = "remix"; kind = "ssr"; frameworkSource = "package.json 依赖 @remix-run"; }
+else if (hasDep("gatsby")) { framework = "gatsby"; kind = "static"; frameworkSource = "package.json 依赖 gatsby"; }
+else if (hasDep("@docusaurus/core")) { framework = "docusaurus"; kind = "static"; frameworkSource = "package.json 依赖 @docusaurus/core"; }
+else if (hasDep("vitepress")) { framework = "vitepress"; kind = "static"; frameworkSource = "package.json 依赖 vitepress"; }
+else if (hasDep("vite")) { framework = "vite"; kind = hasIndexHtml ? "spa" : "library"; frameworkSource = "package.json 依赖 vite"; }
+else if (hasDep("react-scripts")) { framework = "cra"; kind = "spa"; frameworkSource = "package.json 依赖 react-scripts"; }
+else if (hasDep("vue") && hasIndexHtml) { framework = "vue"; kind = "spa"; frameworkSource = "package.json 依赖 vue + 根目录 index.html"; }
 else if (hasDep("express") || hasDep("koa") || hasDep("fastify") || hasDep("@nestjs/core") || hasDep("hono")) {
   framework = hasDep("hono") ? "hono" : hasDep("@nestjs/core") ? "nestjs" : hasDep("express") ? "express" : hasDep("koa") ? "koa" : "fastify";
   kind = hasIndexHtml ? "fullstack" : "api";
+  frameworkSource = `package.json 依赖 ${framework}`;
 }
-else if (hasJekyll) { framework = "jekyll"; kind = "static"; }
-else if (hasHugo) { framework = "hugo"; kind = "static"; }
-else if (hasMkDocs) { framework = "mkdocs"; kind = "static"; }
-else if (hasIndexHtml) { framework = "static-html"; kind = "static"; }
+else if (hasJekyll) { framework = "jekyll"; kind = "static"; frameworkSource = "_config.yml + Gemfile/_layouts"; }
+else if (hasHugo) { framework = "hugo"; kind = "static"; frameworkSource = "hugo 配置 + content/layouts"; }
+else if (hasMkDocs) { framework = "mkdocs"; kind = "static"; frameworkSource = "mkdocs.yml"; }
+else if (hasIndexHtml) { framework = "static-html"; kind = "static"; frameworkSource = "根目录 index.html（无框架依赖）"; }
 
-const htmlIndexes = walkFiles(root, 2).filter((f) => /[\\/]index\.html$/i.test(f));
+const htmlIndexes = walkFiles(root, 3).filter((f) => /[\\/]index\.html$/i.test(f));
 let htmlRoot = null;
 if (framework === "unknown" && htmlIndexes.length === 1) {
   framework = "static-html";
   kind = "static";
   htmlRoot = path.relative(root, path.dirname(htmlIndexes[0])) || ".";
+  frameworkSource = `唯一的 index.html：${relToRoot(htmlIndexes[0])}`;
 }
+const htmlEntries = htmlIndexes.slice(0, 20).map(relToRoot);
 
-const manager = exists(path.join(root, "pnpm-lock.yaml")) ? "pnpm"
-  : exists(path.join(root, "yarn.lock")) ? "yarn"
-  : exists(path.join(root, "bun.lockb")) || exists(path.join(root, "bun.lock")) ? "bun"
-  : exists(path.join(root, "package-lock.json")) ? "npm"
+// 锁文件：多个同时存在时，包管理器只能推断，不能确认。
+const LOCKFILES = ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "package-lock.json", "npm-shrinkwrap.json"];
+const lockfiles = LOCKFILES.filter((n) => exists(path.join(root, n)));
+const manager = lockfiles.includes("pnpm-lock.yaml") ? "pnpm"
+  : lockfiles.includes("yarn.lock") ? "yarn"
+  : lockfiles.includes("bun.lockb") || lockfiles.includes("bun.lock") ? "bun"
+  : lockfiles.includes("package-lock.json") || lockfiles.includes("npm-shrinkwrap.json") ? "npm"
   : pkgPath ? "npm" : null;
 
 const defaultBuild = {
@@ -182,6 +195,8 @@ const defaultOut = {
 const viteOut = viteConfig.match(/outDir\s*:\s*["']([^"']+)["']/)?.[1] || null;
 const viteBase = viteConfig.match(/\bbase\s*:\s*["']([^"']+)["']/)?.[1] || null;
 const nextBasePath = nextConfig.match(/basePath\s*:\s*["']([^"']+)["']/)?.[1] || null;
+const dynamicConfig = /defineConfig\s*\(\s*(?:async\s*)?(?:\(\s*[^)]*\)\s*=>|function)/.test(viteConfig) ||
+  /\bloadEnv\s*\(/.test(viteConfig);
 
 const buildCommand = scripts.build ? `${manager || "npm"} run build` : defaultBuild[framework] || null;
 const outputDir = viteOut || htmlRoot || defaultOut[framework] || null;
@@ -217,6 +232,7 @@ const wrangler = wranglerFile ? {
   pagesBuildOutputDir: wranglerText.match(/pages_build_output_dir\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
   assetsDirectory: wranglerText.match(/directory\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
   compatibilityDate: wranglerText.match(/compatibility_date\s*[:=]\s*["']([^"']+)["']/)?.[1] || null,
+  hasMain: /^\s*main\s*[:=]/m.test(wranglerText),
   bindings: {
     d1: /d1_databases/.test(wranglerText),
     kv: /kv_namespaces/.test(wranglerText),
@@ -229,7 +245,6 @@ const wrangler = wranglerFile ? {
 
 const resolvedOutputDir = outputDir || wrangler?.assetsDirectory || wrangler?.pagesBuildOutputDir || null;
 
-const relToRoot = (f) => path.relative(root, f).replace(/\\/g, "/");
 const isNoisePath = (f) => relToRoot(f).split("/").some((part) => ["node_modules", "tests", "test", "scripts", "docs", ".github", ".wrangler"].includes(part));
 const srcFiles = walkFiles(path.join(root, "src"), 3, [], 1)
   .filter((f) => !isNoisePath(f))
@@ -256,29 +271,128 @@ const envKeys = envExample.length
 const monorepo = exists(path.join(root, "pnpm-workspace.yaml")) || Boolean(pkg.workspaces) ||
   exists(path.join(root, "turbo.json")) || exists(path.join(root, "lerna.json")) || exists(path.join(root, "nx.json"));
 
+// monorepo 里真正可部署的子应用；只看一层，不猜更深的结构。
+const workspaces = [];
+if (monorepo) {
+  for (const group of ["apps", "packages", "services"]) {
+    for (const ent of listDir(path.join(root, group))) {
+      if (!ent.isDirectory()) continue;
+      const pj = path.join(root, group, ent.name, "package.json");
+      if (!exists(pj)) continue;
+      const j = readJson(pj) || {};
+      workspaces.push({
+        path: `${group}/${ent.name}`,
+        name: j.name || ent.name,
+        hasBuild: Boolean(j.scripts?.build),
+      });
+    }
+  }
+}
+
+const startScript = scripts.start || "";
+const serverEntry = pkg.main || startScript.match(/\b(?:node|tsx|ts-node|bun)\s+([^\s&|]+)/)?.[1] || null;
+
 const risks = [];
 if (!buildCommand && !resolvedOutputDir && kind !== "api" && kind !== "fullstack") risks.push("没有检测到构建脚本；请手动生成输出目录，或补一个 build 脚本。");
 if (framework === "nextjs" && kind !== "static") risks.push("Next.js SSR 不能当纯静态资源上传；改用 Workers 上的 vinext/OpenNext，或改成 output: 'export'。");
-if (nativeRisk.length) risks.push(`以下原生/重依赖可能无法在 Workers 上运行： ${nativeRisk.join(", ")}.`);
+if (nativeRisk.length) risks.push(`以下原生/重依赖可能无法在 Workers 上运行：${nativeRisk.join(", ")}。`);
 if (fsUsage) risks.push("源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。");
 if (longRunning) risks.push("检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。");
 if (kind === "api" || kind === "fullstack") risks.push("服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。");
 if (!resolvedOutputDir) risks.push("输出目录未知；部署前先确认构建产物位置。");
-if (monorepo) risks.push("检测到 monorepo；部署前确认要发布哪个子包及其输出路径。");
-if (framework === "static-html" && htmlIndexes.length > 1) risks.push(`Multiple index.html files found (${htmlIndexes.length}); 确认哪个目录才是站点根目录。`);
+if (monorepo) risks.push(`检测到 monorepo${workspaces.length ? `（${workspaces.map((w) => w.path).join("、")}）` : ""}；部署前确认要发布哪个子包及其输出路径。`);
+if (framework === "static-html" && htmlIndexes.length > 1) risks.push(`发现 ${htmlIndexes.length} 个 index.html（${htmlEntries.slice(0, 3).join("、")}${htmlEntries.length > 3 ? " 等" : ""}）；确认哪个目录才是站点根目录。`);
+if (framework === "unknown" && htmlIndexes.length > 1) risks.push(`发现 ${htmlIndexes.length} 个 index.html（${htmlEntries.slice(0, 3).join("、")}${htmlEntries.length > 3 ? " 等" : ""}），但没有识别出框架；确认站点根目录，或补构建配置。`);
 if (!hasIndexHtml && htmlIndexes.length === 0) {
   const htmlFiles = walkFiles(root, 3).filter((f) => /\.html?$/i.test(f));
-  if (htmlFiles.length) risks.push(`Found ${htmlFiles.length} 个 HTML 文件，但没有 index.html；直接部署目录根会 404。选择入口目录，或补一个 index。`);
+  if (htmlFiles.length) risks.push(`找到 ${htmlFiles.length} 个 HTML 文件，但没有 index.html；直接部署目录根会 404。选择入口目录，或补一个 index。`);
 }
+if (lockfiles.length > 1) risks.push(`同时存在 ${lockfiles.length} 个锁文件（${lockfiles.join("、")}）；包管理器不确定，先确认 CI 实际用哪个，避免混用。`);
+if (dynamicConfig && (!viteBase || !viteOut)) risks.push("Vite 配置是动态的（函数或环境变量）；base 和输出目录无法静态确认，构建后必须核对产物路径。");
 
-const deployTarget = (() => {
-  if (nativeRisk.length || longRunning) return "assess";
-  if (wrangler?.pagesBuildOutputDir || (framework !== "unknown" && kind !== "ssr" && kind !== "api")) return "pages";
-  if (wrangler && (wrangler.bindings.d1 || wrangler.bindings.kv || wrangler.bindings.r2 || wrangler.bindings.durableObjects)) return "workers";
-  if (kind === "ssr" || kind === "fullstack" || kind === "api") return "workers";
-  if (kind === "static" || kind === "spa") return "pages";
-  return "undetermined";
+// 目标：只给候选。最终由 DNS、部署方式和未来后端需求决定。
+const decideBy = ["域名 NS 是否在 Cloudflare（Workers 要求 NS 托管，Pages 的子域可用外部 CNAME）", "是否要零配置 git push 部署", "以后是否需要 Cloudflare 侧后端（D1/DO/Queues/Cron）"];
+const target = (() => {
+  if (nativeRisk.length || longRunning) {
+    return {
+      candidates: [],
+      suggested: "assess",
+      confidence: "high",
+      basis: ["检测到原生/重依赖或长驻进程，Workers 运行时可能无法承载"],
+      decideBy: ["能否替换依赖（sharp→图像服务、better-sqlite3→D1/外部库）", "是否改用 Containers 或保留原主机"],
+    };
+  }
+  if (wrangler?.pagesBuildOutputDir) {
+    return { candidates: ["pages"], suggested: "pages", confidence: "high", basis: [`wrangler 配置里已有 pages_build_output_dir = ${wrangler.pagesBuildOutputDir}`], decideBy: [] };
+  }
+  if (wrangler && (wrangler.hasMain || wrangler.assetsDirectory)) {
+    const parts = [];
+    if (wrangler.hasMain) parts.push("main 入口");
+    if (wrangler.assetsDirectory) parts.push(`assets.directory = ${wrangler.assetsDirectory}`);
+    return { candidates: ["workers"], suggested: "workers", confidence: "high", basis: [`现有 wrangler 配置已经是 Workers 形态（${parts.join("，")}）`], decideBy: [] };
+  }
+  if (wrangler?.bindings.durableObjects || wrangler?.bindings.queues) {
+    return { candidates: ["workers"], suggested: "workers", confidence: "high", basis: ["wrangler 配置使用了 Durable Objects 或 Queues，Pages Functions 没有这些能力"], decideBy: [] };
+  }
+  if (exists(path.join(root, "functions")) || exists(path.join(root, "_worker.js"))) {
+    return {
+      candidates: ["pages"],
+      suggested: "pages",
+      confidence: "medium",
+      basis: ["仓库里有 Pages Functions 的入口（functions/ 或 _worker.js）"],
+      decideBy: ["确认 Functions 只在 Pages 上运行过；如果已经迁到 Workers，改用 main + assets 配置"],
+    };
+  }
+  if (kind === "ssr" || kind === "fullstack" || kind === "api") {
+    return {
+      candidates: ["workers"],
+      suggested: "workers",
+      confidence: "medium",
+      basis: [`kind=${kind}：需要服务端运行时，Pages 只能通过 Functions 做有限承载`],
+      decideBy: ["框架是否有官方 Workers 适配器（vinext/OpenNext/其他）", "服务端依赖的 Node API 是否被 workerd 支持"],
+    };
+  }
+  if (kind === "static" || kind === "spa") {
+    return {
+      candidates: ["pages", "workers"],
+      suggested: null,
+      confidence: "medium",
+      basis: [`kind=${kind}：构建产物是静态资源，Pages 和 Workers 都能托管`],
+      decideBy,
+    };
+  }
+  return { candidates: [], suggested: null, confidence: "low", basis: ["未能确认项目类型"], decideBy: ["先确认框架、构建命令和产物目录"] };
 })();
+
+const unknowns = [
+  "DNS 托管在哪、域名是否使用 Cloudflare 的 NS",
+  "Cloudflare 账号、API Token 和 wrangler 登录状态",
+  "生产密钥及其真实值",
+  "用户是否要保留 GitHub Pages 作为独立备用站",
+];
+if (framework === "unknown") unknowns.push("框架类型（未识别）");
+if (!resolvedOutputDir) unknowns.push("构建产物目录（未能确认）");
+if (framework === "vite" && !viteBase) unknowns.push("base path（Vite 配置里没有静态值，默认 / 但需构建后核对）");
+if (lockfiles.length === 0 && pkgPath) unknowns.push("实际包管理器（没有锁文件，按 npm 推断）");
+if (kind === "api" || kind === "fullstack") unknowns.push("服务端入口是否就是检测到的那个文件");
+
+const evidence = {
+  framework: ev(framework, frameworkSource.startsWith("package.json") ? "confirmed" : "inferred", frameworkSource),
+  kind: ev(kind, "inferred", `结合 ${frameworkSource} 与构建配置推断`),
+  buildCommand: ev(buildCommand, scripts.build ? "confirmed" : buildCommand ? "inferred" : "unknown", scripts.build ? "package.json scripts.build" : "框架默认构建命令"),
+  outputDir: ev(
+    resolvedOutputDir,
+    wrangler?.assetsDirectory || wrangler?.pagesBuildOutputDir || viteOut ? "confirmed" : resolvedOutputDir ? "inferred" : "unknown",
+    wrangler?.assetsDirectory ? `${wrangler.file} 的 assets.directory` : wrangler?.pagesBuildOutputDir ? `${wrangler.file} 的 pages_build_output_dir` : viteOut ? "vite.config 的 build.outDir" : htmlRoot ? "唯一的 index.html 所在目录" : "框架默认输出目录"
+  ),
+  packageManager: ev(
+    manager,
+    lockfiles.length === 1 ? "confirmed" : lockfiles.length > 1 ? "inferred" : pkgPath ? "inferred" : "unknown",
+    lockfiles.length ? `锁文件：${lockfiles.join("、")}` : pkgPath ? "没有锁文件，按 npm 推断" : "没有 package.json"
+  ),
+  basePath: ev(viteBase || nextBasePath || null, viteBase || nextBasePath ? "confirmed" : "unknown", viteBase ? "vite.config 的 base" : nextBasePath ? "next.config 的 basePath" : "没有静态 base 配置"),
+  nodeEngine: ev(pkg.engines?.node || read(path.join(root, ".nvmrc"))?.trim() || read(path.join(root, ".node-version"))?.trim() || null, pkg.engines?.node || read(path.join(root, ".nvmrc")) || read(path.join(root, ".node-version")) ? "confirmed" : "unknown", "package.json engines / .nvmrc / .node-version"),
+};
 
 const result = {
   schemaVersion: SCHEMA_VERSION,
@@ -289,14 +403,19 @@ const result = {
     framework,
     kind,
     packageManager: manager,
-    nodeEngine: pkg.engines?.node || read(path.join(root, ".nvmrc"))?.trim() || read(path.join(root, ".node-version"))?.trim() || null,
+    lockfiles,
+    nodeEngine: evidence.nodeEngine.value,
     monorepo,
+    workspaces,
     buildCommand,
     outputDir: resolvedOutputDir,
     scripts: Object.keys(scripts),
     basePath: viteBase || nextBasePath || null,
     hasIndexHtml,
+    htmlEntries,
+    serverEntry,
   },
+  evidence,
   github: {
     repo: gitRemote,
     branch: gitBranch,
@@ -328,37 +447,41 @@ const result = {
       exists(path.join(root, "manifest.json")) || /vite-plugin-pwa|next-pwa/.test(JSON.stringify(deps)),
     serviceWorker: ["public/sw.js", "sw.js", "src/sw.js", "public/service-worker.js"].some((f) => exists(path.join(root, f))),
   },
-  recommendedTarget: deployTarget,
+  target,
+  // 兼容旧字段：只是候选的别名，不代表最终决定。
+  recommendedTarget: target.suggested || "either",
   risks,
-  unknowns: [
-    "DNS 托管在哪、域名是否使用 Cloudflare 的 NS",
-    "Cloudflare 账号、API Token 和 wrangler 登录状态",
-    "生产密钥及其真实值",
-    "用户是否要保留 GitHub Pages 作为独立备用站",
-  ],
+  unknowns,
   nextSteps: [
     "执行任何部署命令前，先跑 scripts/check-env.mjs。",
-    "读 references/platform-selection.md，确认 Pages 还是 Workers。",
-    "本地构建后，用 scripts/check-build.mjs 检查输出目录。",
+    "按 target.candidates 和 decideBy 里的问题确认 Pages 还是 Workers；读 references/platform-selection.md。",
+    "本地构建后，用 scripts/check-build.mjs --mode <static|spa|ssg> 检查输出目录。",
     "按选定的目标读 references/deployment-workflows.md。",
   ],
 };
 
 if (human) {
   const p = result.project;
+  const t = result.target;
+  const tLabel = t.suggested ? `${t.suggested}（${t.confidence}）` : `待定（${t.confidence}）；候选：${t.candidates.join(" / ") || "无"}`;
   console.log(`项目： ${p.name}`);
   console.log(`  根目录     ${root}`);
   console.log(`  框架       ${p.framework} (${p.kind})`);
-  console.log(`  包管理器   ${p.packageManager || "n/a"}${p.nodeEngine ? `, node ${p.nodeEngine}` : ""}`);
+  console.log(`  包管理器   ${p.packageManager || "n/a"}${p.lockfiles.length > 1 ? `（${p.lockfiles.length} 个锁文件，需确认）` : ""}${p.nodeEngine ? `, node ${p.nodeEngine}` : ""}`);
   console.log(`  构建       ${p.buildCommand || "n/a"}`);
-  console.log(`  输出目录   ${p.outputDir || "n/a"}`);
-  console.log(`  建议目标   ${result.recommendedTarget}`);
+  console.log(`  输出目录   ${p.outputDir || "n/a"}（${result.evidence.outputDir.confidence}）`);
+  console.log(`  目标       ${tLabel}`);
+  t.basis.forEach((b) => console.log(`    依据     ${b}`));
+  if (t.decideBy.length) console.log(`    待确认   ${t.decideBy.join("；")}`);
+  if (p.workspaces.length) console.log(`  子应用     ${p.workspaces.map((w) => `${w.path}${w.hasBuild ? "" : "(无 build)"}`).join("、")}`);
   console.log(`  GH Pages   ${result.githubPages.configured ? "configured" : "no"}${result.githubPages.cname ? ` (${result.githubPages.cname})` : ""}`);
   console.log(`  CF 配置    ${result.cloudflare.configured ? result.cloudflare.wrangler.file : "no"}`);
   if (risks.length) {
     console.log("\n风险：");
     risks.forEach((r) => console.log(`  - ${r}`));
   }
+  console.log("\n未知：");
+  unknowns.forEach((u) => console.log(`  - ${u}`));
 } else {
   console.log(JSON.stringify(result, null, 2));
 }

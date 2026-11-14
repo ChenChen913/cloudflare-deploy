@@ -4,11 +4,17 @@
  *
  * 用法：
  *   node scripts/verify-deployment.mjs --url https://site.example.com \
- *     [--backup https://owner.github.io/repo/] [--origin https://app.example.com] \
- *     [--expect-404 /__missing__] [--json]
+ *     [--mode static|spa|ssg] [--backup https://owner.github.io/repo/] \
+ *     [--origin https://app.example.com] [--cors-url https://api.example.com/items] \
+ *     [--expect-404 /__missing__] [--assets-limit 20] [--json]
+ *
+ * 模式必须和 check-build.mjs 用同一个值：
+ *   static / ssg  未知路径应当 404
+ *   spa           未知路径应当回退到 app shell（200 + HTML）
  *
  * 只读：只发 GET/HEAD/OPTIONS。不会跟随跨主机重定向而不报告。
- * 不能证明搜索引擎实际选择的 canonical。
+ * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
+ * 不能证明搜索引擎实际选择的 canonical，也不能替代浏览器里的 CORS 判定。
  */
 
 const argv = process.argv.slice(2);
@@ -20,16 +26,39 @@ const json = argv.includes("--json");
 const base = getArg("--url");
 const backup = getArg("--backup");
 const origin = getArg("--origin");
-const notFoundPath = getArg("--expect-404", `/__cf_deploy_check_${Date.now()}/`);
+const notFoundPath = getArg("--expect-404", `__cf_deploy_check_${Date.now()}/`);
 const timeout = Number(getArg("--timeout", "15000"));
+const assetsLimit = Math.max(1, Number(getArg("--assets-limit", "20")));
+const MODES = ["static", "spa", "ssg"];
+const mode = argv.includes("--spa") ? "spa" : (getArg("--mode") || "static");
 
 if (!base) {
-  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--backup ...] [--origin ...] [--json]");
+  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg] [--backup ...] [--origin ...] [--json]");
   process.exit(2);
 }
+if (!MODES.includes(mode)) {
+  console.error(`未知模式：${mode}；只支持 ${MODES.join(" / ")}`);
+  process.exit(2);
+}
+try {
+  new URL(base);
+} catch {
+  console.error(`--url 不是合法 URL：${base}`);
+  process.exit(2);
+}
+const corsArg = getArg("--cors-url");
+if (corsArg) {
+  try { new URL(corsArg, base); } catch { console.error(`--cors-url 不是合法 URL：${corsArg}`); process.exit(2); }
+}
 
+const UA = "cloudflare-deploy-verify/2";
 const checks = [];
-const add = (id, status, detail, extra = {}) => checks.push({ id, status, detail, ...extra });
+// 附加字段不能覆盖 id/status/detail 本身。
+const add = (id, status, detail, extra = {}) => checks.push({ ...extra, id, status, detail });
+// 站点可能挂在子路径下（GitHub Pages project site、多站点同域）。
+// 相对路径按站点根解析；以 / 开头的仍按域名根解析。
+const dirBase = base.endsWith("/") ? base : `${base}/`;
+const resolve = (u) => new URL(u, dirBase).toString();
 
 async function req(url, opts = {}) {
   const ctrl = new AbortController();
@@ -49,7 +78,7 @@ async function chain(url, max = 5) {
   const hops = [];
   let current = url;
   for (let i = 0; i < max; i++) {
-    const r = await req(current, { method: "GET", headers: { "user-agent": "cloudflare-deploy-verify/1" } });
+    const r = await req(current, { method: "GET", headers: { "user-agent": UA } });
     if (!r.res) return { error: r.error, hops, final: current, status: null, res: null };
     const loc = r.res.headers.get("location");
     hops.push({ url: current, status: r.res.status, location: loc, ms: r.ms });
@@ -62,56 +91,159 @@ async function chain(url, max = 5) {
   return { error: "重定向次数过多", hops, final: current, status: null, res: null };
 }
 
+// HEAD 优先；405/501 或网络错误时用 GET 复核，避免把「支持 GET 不支持 HEAD」误判为失败。
+async function probe(url, headers = {}) {
+  const h = await req(url, { method: "HEAD", headers: { "user-agent": UA, ...headers } });
+  if (h.res && ![405, 501].includes(h.res.status)) return { res: h.res, method: "HEAD", error: null, note: null };
+  const g = await req(url, { method: "GET", headers: { "user-agent": UA, ...headers } });
+  if (g.res?.body) { try { await g.res.body.cancel(); } catch { /* 已关闭 */ } }
+  return {
+    res: g.res,
+    method: "GET",
+    error: g.error,
+    note: h.res ? `HEAD ${h.res.status}，已用 GET 复核` : `HEAD 失败（${h.error}），已用 GET 复核`,
+  };
+}
+
+const sameHost = (a, b) => {
+  try { return new URL(a, base).host === new URL(b, base).host; } catch { return false; }
+};
 const root = await chain(base);
+let html = "";
 if (root.error || !root.res) {
   add("root", "fail", `请求失败：${root.error}`, { hops: root.hops });
 } else {
-  add("root", root.status === 200 ? "pass" : "fail", `GET / -> ${root.status}，${root.hops[0]?.ms ?? "?"}ms`, { hops: root.hops });
+  const first = root.hops[0];
+  const crossedHost = root.final !== base && !sameHost(root.final, base);
+  add(
+    "root",
+    root.status === 200 ? "pass" : "fail",
+    `GET / -> ${root.status}，${first?.ms ?? "?"}ms${crossedHost ? `；跨主机重定向到 ${root.final}` : ""}`,
+    { hops: root.hops, finalUrl: root.final, crossedHost }
+  );
   const ct = root.res.headers.get("content-type") || "";
   add("content-type", /text\/html/i.test(ct) ? "pass" : "warn", ct || "缺少 content-type");
+  try { html = await root.res.text(); } catch { html = ""; }
 }
 
-// 404 行为：Pages 迁移后最常见的静默故障。
-const missing = await req(new URL(notFoundPath, base).toString(), { method: "GET" });
-if (!missing.res) add("404", "warn", `无法检查 404：${missing.error}`);
-else if (missing.res.status === 404) add("404", "pass", `GET ${notFoundPath} -> 404`);
-else add("404", "fail", `GET ${notFoundPath} -> ${missing.res.status}；期望 404（可能是 SPA 回退吞掉了未知路径）`, { status: missing.res.status });
+// ---------------------------------------------------------------- 404 / SPA 回退
+const missingUrl = resolve(notFoundPath);
+const missing = await req(missingUrl, { method: "GET", headers: { "user-agent": UA } });
 
-// HTML 与资源
-let html = "";
-if (root.res) {
-  try { html = await root.res.text(); } catch { html = ""; }
+if (!missing.res) {
+  add("404", "warn", `无法检查 404：${missing.error}`, { mode });
+} else {
+  const status = missing.res.status;
+  const ct = missing.res.headers.get("content-type") || "";
+  const isHtml = /text\/html/i.test(ct);
+
+  if (mode === "spa") {
+    if (status === 200 && isHtml) {
+      const body = await missing.res.text().catch(() => "");
+      const markers = ["id=\"root\"", "id='root'", "id=\"app\"", "id='app'", "id=\"__next\"", "id='__next'"].filter((m) => html.includes(m));
+      const moduleScript = html.match(/<script[^>]+type=["']module["'][^>]*src=["']([^"']+)["']/i)?.[1];
+      const tokens = [...markers, ...(moduleScript ? [moduleScript] : [])];
+      const shellOk = tokens.length ? tokens.some((t) => body.includes(t)) : body.length > 0;
+      add(
+        "spa-fallback",
+        shellOk ? "pass" : "warn",
+        shellOk
+          ? `GET ${notFoundPath} -> 200，返回的 HTML 含有 app shell 标记`
+          : `GET ${notFoundPath} -> 200，但返回内容不像 app shell（没有 root 容器或入口脚本）；确认没有把 404 页当 200 返回`,
+        { status, mode, markers: tokens.length }
+      );
+    } else if (status === 404) {
+      add("spa-fallback", "warn", `GET ${notFoundPath} -> 404：纯客户端路由刷新会断；若使用 hash 路由可接受`, { status, mode });
+    } else if (status >= 300 && status < 400) {
+      add("spa-fallback", "warn", `GET ${notFoundPath} -> ${status}${missing.res.headers.get("location") ? ` -> ${missing.res.headers.get("location")}` : ""}；重定向式回退会让深链丢失原路径`, { status, mode });
+    } else {
+      add("spa-fallback", "fail", `GET ${notFoundPath} -> ${status}；SPA 期望 200 + HTML`, { status, mode });
+    }
+  } else if (status === 404) {
+    add("404", "pass", `GET ${notFoundPath} -> 404（${mode} 模式）`, { status, mode });
+  } else if (status === 200) {
+    const body = await missing.res.text().catch(() => "");
+    const looksLikeRoot = html.length > 0 && body.length > 0 && (body === html || (body.includes("<title") && body.length > html.length * 0.5));
+    add(
+      "404",
+      "fail",
+      `GET ${notFoundPath} -> 200；${mode} 模式期望 404${looksLikeRoot ? "。返回内容与首页接近：SPA 回退把未知路径吞掉了" : "。可能是 rewrite 或自定义 404 用了 200"}`,
+      { status, mode, looksLikeRoot }
+    );
+  } else {
+    add("404", "fail", `GET ${notFoundPath} -> ${status}；${mode} 模式期望 404`, { status, mode });
+  }
+}
+
+// ---------------------------------------------------------------- HTML 内容
+if (html) {
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim().replace(/\s+/g, " ").slice(0, 120) || null;
   add("title", title ? "pass" : "warn", title || "没有 <title>");
 
-  const canonical = html.match(/<link[^>]+rel=["']canonical["'][^>]*>/i)?.[0] || null;
-  if (canonical) {
-    const href = canonical.match(/href=["']([^"']+)["']/i)?.[1] || "";
-    const sameHost = (() => { try { return new URL(href, base).host === new URL(base).host; } catch { return false; } })();
-    add("canonical", sameHost ? "pass" : "warn", canonical.slice(0, 240), { href, sameHost });
-  } else {
+  const canonTags = [...html.matchAll(/<link\b[^>]*\brel\s*=\s*["']?canonical["']?[^>]*>/gi)].map((m) => m[0]);
+  if (canonTags.length === 0) {
     add("canonical", "skip", "没有 canonical 标签");
+  } else if (canonTags.length > 1) {
+    add("canonical", "fail", `发现 ${canonTags.length} 个 canonical 标签；浏览器和爬虫只认第一个，通常意味着模板重复输出`, { count: canonTags.length, tags: canonTags.slice(0, 3) });
+  } else {
+    const href = canonTags[0].match(/href\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+    let parsed = null;
+    try { parsed = new URL(href, base); } catch { parsed = null; }
+    const norm = (p) => (p.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/");
+    if (!parsed) {
+      add("canonical", "fail", `canonical href 无法解析：${href || "(空)"}`, { href });
+    } else {
+      const hostOk = parsed.host === new URL(base).host;
+      const pathOk = norm(parsed.pathname) === norm(new URL(base).pathname);
+      add(
+        "canonical",
+        hostOk && pathOk ? "pass" : "warn",
+        hostOk && pathOk
+          ? `canonical 指向自身（${parsed.pathname}）`
+          : !hostOk
+            ? `canonical 指向其他主机：${parsed.origin}${parsed.pathname}；如果这是备用站且策略是「canonical 指主站」属预期，否则权重被指向外部`
+            : `canonical 指向另一个路径：${parsed.pathname}；确认这是有意为之（分页/聚合页）`,
+        { href, sameHost: hostOk, samePath: pathOk }
+      );
+    }
   }
 
   const robots = html.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] || null;
   add("meta-robots", robots ? "pass" : "skip", robots ? robots.slice(0, 160) : "没有 meta robots");
 
+  // ---------------------------------------------------------------- 同源资源
   const refs = [...html.matchAll(/(?:src|href)\s*=\s*["']([^"']+)["']/gi)]
     .map((m) => m[1])
     .filter((u) => !/^(?:https?:)?\/\//i.test(u) && !u.startsWith("data:") && !u.startsWith("#") && !u.startsWith("mailto:") && !u.startsWith("tel:"))
     .map((u) => u.split(/[?#]/)[0])
     .filter(Boolean);
-  const unique = [...new Set(refs)].slice(0, 20);
+  const allUnique = [...new Set(refs)];
+  const unique = allUnique.slice(0, assetsLimit);
   const broken = [];
+  const probed = [];
   for (const u of unique) {
-    const target = new URL(u, base).toString();
-    const r = await req(target, { method: "HEAD" });
-    if (!r.res || r.res.status >= 400) broken.push({ url: u, status: r.res?.status ?? r.error });
+    const target = resolve(u);
+    const r = await probe(target);
+    const status = r.res?.status ?? null;
+    probed.push({ url: u, method: r.method, status, fallback: Boolean(r.note) });
+    if (!r.res || status >= 400) broken.push({ url: u, status: status ?? r.error, method: r.method });
   }
-  add("assets", broken.length ? "fail" : "pass", broken.length ? `${broken.length} 个资源失败：${broken.slice(0, 5).map((b) => `${b.url}（${b.status}）`).join("、")}` : `${unique.length} 个同源资源正常`, { broken });
+  const fallbackCount = probed.filter((p) => p.fallback).length;
+  const suffix = allUnique.length > unique.length ? `（只检查前 ${unique.length} 个，共 ${allUnique.length} 个；不是全站爬取）` : `（共 ${allUnique.length} 个，覆盖首页引用）`;
+  const headNote = fallbackCount ? `；其中 ${fallbackCount} 个 HEAD 不可用，改用 GET` : "";
+  add(
+    "assets",
+    broken.length ? "fail" : "pass",
+    broken.length
+      ? `${broken.length}/${unique.length} 个资源失败${suffix}：${broken.slice(0, 5).map((b) => `${b.url}（${b.status}）`).join("、")}`
+      : `${unique.length} 个同源资源正常${suffix}${headNote}`,
+    { broken, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
+  );
+} else {
+  add("html", "warn", "没有拿到首页 HTML；跳过标题、canonical、资源检查");
 }
 
-// 响应头
+// ---------------------------------------------------------------- 响应头
 const headers = root.res?.headers;
 if (headers) {
   const server = headers.get("server");
@@ -124,28 +256,68 @@ if (headers) {
 }
 
 // /index.html 是否收敛到 /
-for (const p of ["/index.html"]) {
-  const r = await req(new URL(p, base).toString(), { method: "HEAD" });
-  if (r.res) add("index-redirect", r.res.status >= 300 && r.res.status < 400 ? "pass" : "warn", `HEAD ${p} -> ${r.res.status}${r.res.headers.get("location") ? ` -> ${r.res.headers.get("location")}` : ""}`);
+{
+  const r = await probe(resolve("index.html"));
+  if (r.res) {
+    add(
+      "index-redirect",
+      r.res.status >= 300 && r.res.status < 400 ? "pass" : "warn",
+      `${r.method} /index.html -> ${r.res.status}${r.res.headers.get("location") ? ` -> ${r.res.headers.get("location")}` : ""}`
+    );
+  }
 }
 
-// CORS（可选）
+// ---------------------------------------------------------------- CORS（可选）
 if (origin) {
-  const r = await req(base, { method: "GET", headers: { origin } });
-  if (!r.res) add("cors", "warn", `CORS 检查失败：${r.error}`);
-  else {
+  // 默认查首页；API 在别的子域时用 --cors-url 指到真正的接口。
+  const corsUrl = resolve(getArg("--cors-url", base));
+  const r = await req(corsUrl, { method: "GET", headers: { "user-agent": UA, origin } });
+  if (!r.res) {
+    add("cors", "warn", `CORS 检查失败：${r.error}`, { url: corsUrl });
+  } else {
     const acao = r.res.headers.get("access-control-allow-origin");
     const acac = r.res.headers.get("access-control-allow-credentials");
-    const multiple = acao && acao.includes(",");
-    add("cors", multiple ? "fail" : acao ? "pass" : "warn",
-      multiple ? `多个 Access-Control-Allow-Origin 值：${acao}` : `ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}`,
-      { acao, acac });
+    const vary = r.res.headers.get("vary") || "";
+    const multiple = Boolean(acao && acao.includes(","));
+    const wildcardWithCredentials = acao === "*" && acac === "true";
+    const matches = acao === "*" || acao === origin;
+    const status = multiple || wildcardWithCredentials || (acao && !matches) ? "fail" : acao ? "pass" : "warn";
+    add(
+      "cors",
+      status,
+      multiple
+        ? `多个 Access-Control-Allow-Origin 值：${acao}`
+        : wildcardWithCredentials
+          ? "ACAO=* 与 Allow-Credentials: true 组合无效，浏览器会拒绝带 Cookie 的请求"
+          : acao && !matches
+            ? `ACAO=${acao}，与请求的 Origin（${origin}）不匹配，浏览器会拒绝`
+            : `GET ${new URL(corsUrl).pathname} → ACAO=${acao || "无"}${acac ? `，ACAC=${acac}` : ""}${vary.includes("Origin") ? "，Vary: Origin" : ""}`,
+      { url: corsUrl, acao, acac, vary, origin }
+    );
+    if (acao && !vary.toLowerCase().includes("origin")) {
+      add("cors-vary", "warn", "缺少 Vary: Origin；CDN 可能把给 A 站的响应缓存给 B 站");
+    }
+    const pre = await req(corsUrl, {
+      method: "OPTIONS",
+      headers: { "user-agent": UA, origin, "access-control-request-method": "POST", "access-control-request-headers": "content-type,authorization" },
+    });
+    if (pre.res) {
+      const preAcao = pre.res.headers.get("access-control-allow-origin");
+      const preMethods = pre.res.headers.get("access-control-allow-methods") || "";
+      const ok = [200, 204].includes(pre.res.status) && Boolean(preAcao);
+      add(
+        "cors-preflight",
+        ok ? "pass" : "warn",
+        `OPTIONS -> ${pre.res.status}；ACAO=${preAcao || "无"}${preMethods ? `；Allow-Methods=${preMethods}` : ""}`,
+        { status: pre.res.status, acao: preAcao, methods: preMethods }
+      );
+    } else {
+      add("cors-preflight", "warn", `预检请求失败：${pre.error}`);
+    }
   }
-  const pre = await req(base, { method: "OPTIONS", headers: { origin, "access-control-request-method": "GET" } });
-  if (pre.res) add("cors-preflight", [200, 204].includes(pre.res.status) ? "pass" : "warn", `OPTIONS -> ${pre.res.status}；ACAO=${pre.res.headers.get("access-control-allow-origin") || "无"}`);
 }
 
-// 备用站独立性（GitHub Pages）
+// ---------------------------------------------------------------- 备用站独立性（GitHub Pages）
 if (backup) {
   const b = await chain(backup);
   if (b.error || !b.res) add("backup", "fail", `备用站请求失败：${b.error}`, { hops: b.hops });
@@ -165,7 +337,7 @@ const summary = {
   fail: checks.filter((c) => c.status === "fail").length,
   skip: checks.filter((c) => c.status === "skip").length,
 };
-const result = { schemaVersion: 1, url: base, backup, origin, checkedAt: new Date().toISOString(), summary, checks };
+const result = { schemaVersion: 2, url: base, mode, backup, origin, corsUrl: origin ? resolve(getArg("--cors-url", base)) : null, checkedAt: new Date().toISOString(), summary, checks };
 
 if (json) console.log(JSON.stringify(result, null, 2));
 else {
@@ -173,6 +345,6 @@ else {
     const mark = { pass: "通过", warn: "警告", fail: "失败", skip: "跳过" }[c.status] || c.status;
     console.log(`[${mark}] ${c.id}: ${c.detail}`);
   }
-  console.log(`\n通过=${summary.pass} 警告=${summary.warn} 失败=${summary.fail} 跳过=${summary.skip}`);
+  console.log(`\n模式=${mode}，通过=${summary.pass} 警告=${summary.warn} 失败=${summary.fail} 跳过=${summary.skip}`);
 }
-process.exit(summary.fail ? 1 : 0);
+process.exitCode = summary.fail ? 1 : 0;

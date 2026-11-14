@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `wrangler` 说未认证 | 没登录 / 没 Token | `npx wrangler login`，或设 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | `npx wrangler whoami` |
 | 所有路径 404 | 输出目录错 / 产物为空 | 检查产物；设置正确目录 | `curl -I https://site/` |
-| 所有路径都返回首页（200） | 缺顶层 `404.html`，Pages 当成 SPA | 加 `404.html`，或只对前端路由做 SPA 回退 | `curl -o /dev/null -w '%{http_code}' https://site/__missing__` |
+| 所有路径都返回首页（200） | 缺顶层 `404.html`，Pages 把未知路径回退到 `/` | 多页站补 `404.html`；SPA 确认这是预期回退 | `verify-deployment.mjs --mode static` 或 `--mode spa` |
 | 子页面点得开，刷新 404 | 缺 SPA 回退 | Pages 用 `_redirects`：`/* /index.html 200`；Workers 设 `not_found_handling` | 新标签页打开子路由 |
 | CSS/JS/图片 404 | 构建 base 是 `/repo/` 或其他前缀 | 用 `base: "/"` 重新构建；用相对路径 | DevTools Network |
 | `.html` 链接多一跳 | Pages 把 `.html` 308 到无扩展名 | 接受，或改内链（但 GitHub Pages 可能 404） | `curl -I https://site/page.html` |
@@ -42,7 +42,7 @@ gh auth status
 ## 2. 构建产物
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --spa
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --mode "<static|spa|ssg>"
 ```
 
 检查：
@@ -58,11 +58,12 @@ node "<技能目录>/scripts/check-build.mjs" --dir "<输出>" --spa
 
 ## 3. SPA 与 404
 
-缺 `404.html` 会让 Pages 对未知路径返回 `200` + `/`。这会掩盖坏链接，也可能给爬虫制造无限重复 URL。
+缺 `404.html` 时，Pages 会把未知路径回退到 `200` + `/`。**这对 SPA 是预期，对多页站是故障。** 先确定 `--mode`，再判断：
 
-- 多页站：保留 `404.html`。
-- SPA：用明确的回退，但排除 `/api/*` 和静态目录。
-- Workers：显式设置 `not_found_handling`，没有隐式 SPA 检测。
+- 多页站 / SSG：保留 `404.html`，未知路径必须 404。
+- SPA：接受回退，但确认返回的是 app shell；排除 `/api/*` 和静态目录。
+- Workers：显式设置 `not_found_handling`（`"404-page"` 或 `"single-page-application"`），没有隐式 SPA 检测。
+- 同一个站点用错模式，会得到相反结论；报告里写明用了哪个。
 
 ## 4. Base path
 

@@ -8,6 +8,7 @@
 |---|---|
 | 仓库 | {{repo_url}} |
 | 框架 / 类型 | {{framework}} / {{静态、SPA、SSR、API 或全栈}} |
+| 站点模式 | {{static / ssg / spa}}（构建检查和验收共用） |
 | 包管理器 / 运行时 | {{manager}} / Node {{version}} |
 | 构建命令 | `{{build_command}}` |
 | 输出目录 | `{{output_dir}}` |
@@ -48,7 +49,7 @@
 {{npm run build}}
 
 # 产物检查
-node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" {{--spa}}
+node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{static|ssg|spa}}"
 
 # 部署（先预览）
 {{npx wrangler pages deploy ... | npx wrangler deploy}}
@@ -66,8 +67,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" {{--spa}}
 ## 验收
 
 - [ ] 首页 200 + 标题正确
-- [ ] 未知路径 404（不是 200 首页）
-- [ ] 同源资源 200
+- [ ] 未知路径符合所选模式（static/ssg 为 404；spa 为 200 + app shell）
+- [ ] 同源资源 200（记录检查数量）
 - [ ] SPA 深链 + 刷新（如果是 SPA）
 - [ ] `_headers` / `_redirects` 生效（如果用了）
 - [ ] API / CORS / 登录（如果涉及）

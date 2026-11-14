@@ -14,7 +14,7 @@ node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 - 包管理器和锁文件
 - 构建命令、输出目录
 - 项目要求的 Node / Ruby 版本
-- 站点是 SPA、静态多页还是 SSR
+- 站点是 SPA、静态多页还是 SSR，以及对应的 `--mode`（`static` / `ssg` / `spa`）
 - `_headers` / `_redirects` 是否存在、从哪里复制
 - 自定义域名是否已经绑在别处
 

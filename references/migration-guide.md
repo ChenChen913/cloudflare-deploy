@@ -155,7 +155,7 @@ GitHub Pages 不认 `en.html` 的 `/en`；Cloudflare 把 `en.html` 308 到 `/en`
 
 正确策略：主站 self-canonical 可收录；备用站 `noindex, follow` 但可访问；只有自定义域名是主站时，`pages.dev` 才 noindex。
 
-**状态（2026-11-14）：未实施。** 指南改了，但 Jekyll 仓库不在当前工作区。待办：
+**状态（2026-11-14）：未实施。** 本文的策略已经改，但那个 Jekyll 仓库不在当前工作区，改动和复测都没做。待办：
 
 - [ ] 只给 GitHub 产物注入 robots meta；
 - [ ] 决定是否去掉 GitHub 侧 sitemap；
@@ -163,4 +163,4 @@ GitHub Pages 不认 `en.html` 的 `/en`；Cloudflare 把 `en.html` 308 到 `/en`
 - [ ] 验证主站 canonical 指向自己；
 - [ ] 接受两站 diff 多出一行 `robots`。
 
-完整长文指南在技能项目的上一级：`../cloudflare-migration-guide.md`（如果存在）。
+本文是自包含的：配置、数据、踩坑记录都写在这里，不依赖技能目录之外的任何文件。技能装到别的机器、别的目录，照样能读。

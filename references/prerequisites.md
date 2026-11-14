@@ -84,7 +84,7 @@ export CLOUDFLARE_API_TOKEN="..."
 
 | 工具 | 要求 | 检查 |
 |---|---|---|
-| Node.js | Current / Active / Maintenance；2026 年建议 22+ | `node -v` |
+| Node.js | 脚本最低 18；部署建议 22+（Wrangler 只支持 Current / Active / Maintenance） | `node -v` |
 | Wrangler | 项目内安装或用 `npx wrangler` | `npx wrangler --version` |
 | Git | 任意较新版本 | `git --version` |
 | GitHub CLI | 可选，仓库自动化才需要 | `gh --version` / `gh auth status` |

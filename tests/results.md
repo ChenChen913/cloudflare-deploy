@@ -4,82 +4,97 @@
 
 | 项目 | 值 |
 |---|---|
-| 操作系统 | Windows（win32），Git Bash |
+| 操作系统 | Windows 11（win32），Git Bash |
 | Node.js | v22.22.2 |
-| npm | 11.12.1 |
-| git | 可用 |
-| gh | 可用 |
+| Python | 3.13.14（只用于外部格式校验） |
+| git / gh | 可用 |
 | wrangler | 未安装 |
 | dig | 不可用（Windows 默认没有） |
-| openssl | 可用 |
 | Cloudflare 账号 / Token | 本环境没有 |
 
-## 实际执行了什么
+## 怎么复现
 
 ```bash
-node tests/run-tests.mjs
+node tests/run-tests.mjs     # 56 项：识别、产物检查、真实 HTTP 验收
+node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
-测试会在 `tests/.work` 下创建 6 个合成项目，分别运行 `detect-project.mjs`；再对两个产物运行 `check-build.mjs`；最后启动两个本地 HTTP 服务器，真实运行 `verify-deployment.mjs`。完整输出在 `tests/last-run.txt`。
+每次运行会在 `tests/.work/<时间戳>/` 下生成夹具，运行完不删除（该目录已 gitignore），避免与本机的安全删除钩子冲突。
 
-结果：**23/23 通过**。
+外部格式校验（可选）：WorkBuddy 内置 `skill-creator` 技能里的 `quick_validate.py`。本机这份是 2,229 字节、2026-10-27 的版本，用 Python 3.13.14 执行：
+
+```bash
+python <skill-creator>/scripts/quick_validate.py <技能目录>
+```
+
+这个脚本不在本仓库里，路径随安装位置变化；换台机器不一定有。所以仓库另带 `tests/check-skill.mjs`，覆盖 frontmatter、name/description 长度、引用路径、绝对路径残留、文件名 ASCII、空目录，**任何人都能复现**。
+
+## 结果
 
 ```text
-通过  Vite：框架/类型 — vite/spa
-通过  Vite：输出目录 + base — dist, /repo/
-通过  Vite：识别 GitHub Pages
-通过  Vite：推荐 Pages — pages
-通过  Jekyll：框架/静态 — jekyll/static
-通过  Jekyll：_site + CNAME — _site, www.example.com
-通过  Jekyll：构建命令 — bundle exec jekyll build
-通过  Supabase：SPA + 外部后端
-通过  Supabase：环境变量键名 — VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY
-通过  Supabase：不假设 Cloudflare 后端 — pages
-通过  Hono：API + Workers — hono/workers
-通过  Hono：D1 绑定 + 资源目录
-通过  重依赖：标记为 assess — assess
-通过  重依赖：原生依赖风险
-通过  重依赖：fs + 长驻进程风险
-通过  Next：SSR -> Workers — ssr/workers
-通过  Next：静态资源风险
-通过  产物：通过但有警告 — 警告=1
-通过  产物：发现坏资源
-通过  产物：缺 404 被标记 — Pages 会当成 SPA
-通过  验收：正常路径通过 — 失败=0
-通过  验收：canonical + 404 + 资源
-通过  验收：拒绝 301 备用站 — 备用站跳到主站
+node tests/run-tests.mjs     56/56 通过
+node tests/check-skill.mjs   通过（SKILL.md 273 行，引用路径 23 个，无绝对路径）
+quick_validate.py            Skill is valid!
 ```
 
-## 场景矩阵
+完整输出在 `tests/last-run.txt`。
 
-下面的“决策”由技能规则和识别结果推出；**部署结果是模拟的**，没有使用真实 Cloudflare 账号。
+## 覆盖范围
 
-| # | 测试项目 | 识别结果（实际） | 目标决策 | 需要确认的门槛 | 部署结果 |
-|---|---|---|---|---|---|
-| 1 | Vite + React SPA，`base: /repo/`，已有 Pages workflow | `vite/spa`，`dist`，`base=/repo/`，GH Pages 已配置 | Pages（零配置静态，已有 GH Pages） | 预览阶段无；正式域名后续确认 | 模拟：构建 → `check-build` → `wrangler pages deploy`；预期 `/index.html` 308，必须有 `404.html` |
-| 2 | Jekyll 博客，`CNAME=www.example.com`，Actions 发布 | `jekyll/static`，`_site`，CNAME，GH Pages | Pages，双构建（GH + CF） | **移除 GitHub Pages 自定义域名**；索引策略 | 模拟：两次 `jekyll build`，`_headers` 只进 CF 产物，备用站验证 200/无跳转 |
-| 3 | Vite + Supabase，有 `.env.example` | `vite/spa`，Supabase 键名，无 CF 后端 | 只迁前端到 Pages | Supabase Auth 回调；生产变量 | 模拟：前端部署；后端不动；CORS/OAuth 需验证 |
-| 4 | Hono API + `wrangler.toml` + D1 绑定 | `hono/api`，`workers`，D1 绑定，资源目录 `./public` | Workers | **D1 迁移/备份**；生产密钥 | 模拟：`wrangler deploy`；需要行数核对和写入测试 |
-| 5 | Express + sharp + puppeteer + better-sqlite3 + `fs` + `setInterval` | `express/api`，目标 `assess`，多个风险标记 | **不适合直接迁** | 无——停下来讨论 | 模拟：不部署；建议保留原主机/容器或替换依赖 |
-| 6（附加） | Next.js SSR | `nextjs/ssr`，`.next`，静态资源风险 | Workers + vinext/OpenNext | 依赖/适配器变更；预览构建 | 模拟：先 `npx vinext check`，不直接部署 |
+| # | 合成项目 | 识别结果（实际） | 目标输出 | 验证点 |
+|---|---|---|---|---|
+| 1 | Vite + React SPA，`base: /repo/`，已有 Pages workflow | `vite/spa`，`dist`，`base=/repo/` | `candidates=[pages,workers]`，`suggested=null` | 不再凭框架直接定 Pages；输出目录标 `confirmed` |
+| 2 | Jekyll 博客，`CNAME=www.example.com` | `jekyll/static`，`_site` | 两者皆可 | 双构建场景仍给候选 |
+| 3 | Vite + Supabase，`.env.example` | `vite/spa`，键名识别，无 CF 后端 | 两者皆可 | 不假设要迁后端 |
+| 4 | Hono + `wrangler.toml`（`main` + `assets` + D1） | `hono/api`，`./public` | `workers`，`confidence=high` | 依据写进 `target.basis` |
+| 5 | Express + sharp + puppeteer + better-sqlite3 + `fs` + `setInterval` | `express/api` | `assess` | 硬阻断，拒绝硬迁 |
+| 6 | Next.js SSR | `nextjs/ssr`，`.next` | `workers` | 静态资源风险提示 |
+| 7 | pnpm monorepo，`apps/web` + `apps/api` | `monorepo=true`，2 个子应用 | 候选 | 风险里点名两个子包 |
+| 8 | 同时有 `pnpm-lock.yaml` 和 `package-lock.json` | 2 个锁文件 | 包管理器降为 `inferred` | 不把推测当确认 |
+| 9 | 动态 Vite 配置（函数 + `loadEnv`） | `basePath` 标 `unknown` | 候选 | 风险提示构建后核对产物 |
+| 10 | 两个 `index.html`（site / docs） | 2 个入口，框架 unknown | `undetermined` | 要求确认站点根，不猜 |
+| 11 | 有 `functions/` 的静态站 | `vite/spa`，`functionsDir=true` | `pages`，`medium` | 已按 Pages Functions 组织，不因“全栈”改推 Workers |
+| 11 | 有 `functions/` 的静态站 | `vite/spa`，`functionsDir=true` | `pages`，`medium` | 已按 Pages Functions 组织，不因“全栈”改推 Workers |
+
+### 构建产物
+
+| 产物 | 断言 |
+|---|---|
+| 完整产物（index + 404 + `_headers` + 坏资源） | 通过但有警告；报告实际检查的资源数 |
+| 无 `404.html` | `static` 警告；`spa` 通过；`--spa` 与 `--mode spa` 等价 |
+| 60+ 文件的嵌套产物 | 递归统计 62 个文件；`assets/css/site.css` 能解析 |
+
+### HTTP 验收（真实服务器，不是 mock）
+
+| 场景 | 结果 |
+|---|---|
+| 静态站 + `static` | 首页/404/canonical/资源全部通过，退出码 0 |
+| 同一个静态站 + `spa` | 深链 404 → `warn`（不误判为失败） |
+| SPA 服务器 + `spa` | 未知路径 200 + app shell → 通过 |
+| SPA 服务器 + `static` | 未知路径 200 → `fail`，退出码 1（这就是原来的冲突点） |
+| HEAD 返回 405、GET 返回 200 | 自动用 GET 复核，资源判通过并记录 `method=GET` |
+| `--assets-limit 1` | 报告 `checked=1 / total=2 / limited=true` |
+| CORS 在独立端口（模拟独立子域） | `--cors-url` 指向 API 后通过，预检通过 |
+| 重复 `Access-Control-Allow-Origin` | 判 `fail` |
+| ACAO 与请求来源不匹配 | 判 `fail`（浏览器会拒绝） |
+| 重复 canonical 标签 | 判 `fail` |
+| 备用站 301 到主站 | 判 `fail` |
+| 站点挂在 `/repo/` 子路径 | 未知路径、`index.html`、相对资源都按 `/repo/` 解析，检查通过 |
 
 ## 真实项目探测（只读）
 
-另外对桌面上两个现有项目做了不部署的探测：
-
 | 项目 | 识别结果 | 解释 |
 |---|---|---|
-| `3D建模` | `unknown`，目标 `undetermined`，根目录和一层内没有 `index.html` | 正确拒绝猜测站点根目录；唯一的 HTML 是 `web/island_viewer.html` |
-| `网络测试` | `unknown`，目标 `undetermined`，提示“有 HTML 但没有 index.html” | 正确指出直接部署目录根会 404 |
-
-这是有意设计：入口不明确时，技能应该问，而不是编造构建/输出路径。
+| `3D建模` | `unknown`，目标待定，根目录和一层内没有 `index.html` | 拒绝猜站点根目录；唯一的 HTML 是 `web/island_viewer.html` |
+| `网络测试` | `unknown`，目标待定，提示“有 HTML 但没有 index.html” | 指出直接部署目录根会 404 |
 
 ## 测试证明了什么
 
-- 识别脚本不需要安装依赖，就能读出框架、构建命令、输出目录、base path、GitHub Pages 配置、Wrangler 配置、绑定、环境变量键名和风险信号。
-- 产物检查能发现缺失的 `404.html`、坏资源引用和限制超限。
-- 验收脚本会发真实 HTTP 请求，并正确拒绝“301 到主站”的假备用站。
-- 技能能区分“直接部署”“只迁前端”“Workers”“不适合”。
+- 识别脚本不需要安装依赖，就能读出框架、构建命令、输出目录、base path、GitHub Pages 配置、Wrangler 配置、绑定、环境变量键名、子应用、锁文件和风险信号。
+- 每个关键字段带 `confirmed` / `inferred` / `unknown`，推测不会被写成事实。
+- 部署目标只给候选；只有现有 Wrangler 配置或硬阻断才会给出高置信度结论。
+- 构建检查和验收用同一个 `--mode`，404 结论不会互相矛盾。
+- 验收脚本会发真实 HTTP 请求，能区分 SPA 回退、静态 404、重复 ACAO、重复 canonical 和假备用站。
 
 ## 没有测试什么
 
@@ -93,10 +108,11 @@ node tests/run-tests.mjs
 | Search Console canonical | 没有站点权限 | 部署后用“网址检查” |
 | GitHub Actions 部署 | 当前环境没有对应仓库/CI | 在测试仓库跑生成的 workflow |
 
-## 测试中发现的问题
+## 测试中发现并修复的问题
 
-1. `verify-deployment.mjs` 最初漏写 `async`，导致语法错误；已修，备用站 301 测试通过。
-2. `detect-project.mjs` 最初把带原生/重依赖的项目直接判成 Workers；现在返回 `assess`，强制停下来评估。
-3. `detect-project.mjs` 最初忽略 `wrangler.toml` 里的 `assets.directory`；现在会作为输出目录。
-4. `check-build.mjs` 把缺失顶层 `404.html` 当作警告而不是失败。这是有意的（SPA 可以没有），但报告必须点出来，因为 Pages 会把未知路径返回 200。
-5. 中文化测试时，源码扫描把 `tests/` 下的测试项目误判成噪声目录，导致 `fs`/长驻进程风险漏报；已改成按“相对项目根目录”判断。
+1. **附加字段覆盖检查状态。** `add(id, status, detail, extra)` 先展开 `extra` 再放核心字段，导致 `{status: 200}` 把 `"fail"` 覆盖成数字，`summary.fail` 统计不到，会输出“失败=0”的假结论。已改为核心字段最后写入，并加断言锁住。
+2. **Windows 上 `process.exit()` 偶发退出码 3221226505（0xC0000409）。** JSON 已完整输出，进程却以非 0 退出，CI 会误判失败。17 次连跑中复现 2 次；改用 `process.exitCode` 后连跑 3 轮全绿。
+3. **未识别框架 + 多个 `index.html` 时没有风险提示。** 之前只在 `static-html` 分支提示；已覆盖 `unknown`。
+4. **结构检查把运行期产物当成缺失路径。** `tests/.work` 只在测试运行时存在，已加入忽略列表。
+5. **测试夹具目录删除失败会中断整轮测试。** 本机的安全删除钩子把 `fs.rmSync(tests/.work)` 转成回收站操作，文件被占用时抛 `Some operations were aborted`，整套断言直接不执行。改为每次用 `tests/.work/<timestamp>/`，不删旧目录。
+6. 早前修复：`verify-deployment.mjs` 漏写 `async`；重依赖项目被误判成 Workers（改为 `assess`）；忽略 `wrangler` 的 `assets.directory`；源码扫描把 `tests/` 误当噪声目录。

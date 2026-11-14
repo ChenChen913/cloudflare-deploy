@@ -16,6 +16,26 @@ Cloudflare 的 Pages 文档顶部现在写着：
 
 不要把“纯静态 → Pages”说成平台规则。它只是一个取舍。
 
+### 1.1 识别脚本给的是候选，不是结论
+
+`detect-project.mjs` 输出的是 `target.candidates` 和 `confidence`，不是“必须用哪个”：
+
+- `confidence: high` 只来自现有 Wrangler 配置（已有 `main`/`assets` → Workers；已有 `pages_build_output_dir` → Pages）或硬阻断；
+- `confidence: medium` 是“按项目类型推断”，静态站和 SPA 通常同时给出 `pages` 和 `workers`；
+- `confidence: low` 表示没识别出来，先问清楚。
+
+框架名不能单独决定平台。Vite、React、Vue、Jekyll 的产物都是静态资源，两个产品都能托管；真正决定的是下面 1.2 的三个问题。
+
+### 1.2 三个问题定平台
+
+按顺序问，先有答案的优先：
+
+1. **域名的 NS 在不在 Cloudflare？** 不在，又要用 apex 域名 → 基本只能 Pages（Workers 要求 NS 托管；Pages 的子域可用外部 CNAME）。
+2. **要不要零配置 `git push`？** 要 → Pages 的 Git 集成更省事；不介意维护 Wrangler 配置 → Workers 也行。
+3. **以后要不要 Cloudflare 侧后端？** 要 D1/DO/Queues/Cron → 直接 Workers；后端在 Supabase/自建 API → 只迁前端，Pages 够用。
+
+三个都答不上来时，不要把候选写成结论；在计划里留“待确认”，先部署到预览地址验证。
+
 ## 2. 决策表
 
 | 情况 | 推荐 | 原因 |
@@ -61,7 +81,7 @@ Pages 付费档要启用 100,000 文件，需在项目设置里加 `PAGES_WRANGL
 | 请求 | 100,000/天 | 1,000 万/月，超出 $0.30/百万 |
 | 每次调用 CPU | 10 ms | 含 3,000 万 CPU 毫秒，超出 $0.02/百万；单次上限 5 分钟（默认 30 秒） |
 | Worker 包大小（未压缩） | 64 MiB | 64 MiB |
-| 每次调用子请求 | 50 | 1,000（默认，可配） |
+| 每次调用子请求 | 50 | 10,000（最高可配到 1,000 万） |
 | 每个 Worker 环境变量 | 64 | 128 |
 | 每个 isolate 内存 | 128 MB | 128 MB |
 

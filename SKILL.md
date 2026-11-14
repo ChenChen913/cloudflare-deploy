@@ -17,7 +17,7 @@ agent_created: true
 | Cloudflare 账号 | 必须 | 浏览器登录 `dash.cloudflare.com` | 去 `dash.cloudflare.com/sign-up` 注册；只需邮箱、密码、邮箱验证 |
 | 登录态 | 必须 | `npx wrangler whoami` | 本地 `npx wrangler login`；远程/容器用 `--device`；CI 用 API Token |
 | Account ID | API Token / CI 必须 | 控制台搜索 “Copy account ID”，或 Workers & Pages → Account Details | 复制后放进 `CLOUDFLARE_ACCOUNT_ID` |
-| Node.js | 必须 | `node -v` | 装 Node 22+；Wrangler 支持 Current / Active / Maintenance 版本 |
+| Node.js | 必须 | `node -v` | 脚本本身最低 Node 18；完整部署建议 **22+**（Wrangler 只支持 Current / Active / Maintenance，22 是当前仍在维护的最老 LTS） |
 | Wrangler | 必须 | `npx wrangler --version` | 项目内 `npm i -D wrangler@latest`，或直接用 `npx wrangler` |
 | Git | 必须 | `git --version` | 装 Git；Windows 推荐 Git for Windows（自带 Git Bash） |
 | 域名 / DNS | 只有绑自定义域名才需要 | 域名的 NS 在哪、是否有 CAA | Pages 的 apex 需要 NS 在 Cloudflare；子域可用外部 CNAME；Workers 必须 NS 在 Cloudflare |
@@ -103,11 +103,19 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 ```
 
-需要精确字段时用 `--json`。脚本会报告：框架、静态/SPA/SSR/API、包管理器、构建命令、输出目录、base path、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、风险、未知项。
+需要精确字段时用 `--json`。脚本会报告：框架、静态/SPA/SSR/API、包管理器、构建命令、输出目录、base path、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险、未知项。
+
+三个字段决定你怎么用它的结论：
+
+- `target.candidates`：候选产品，通常两个都列；
+- `target.confidence`：`high`（有 Wrangler 配置或硬阻断）、`medium`（按类型推断）、`low`（没识别出来）；
+- `evidence.*.confidence`：每个关键字段是 `confirmed`（直接读到）、`inferred`（按默认值推断）还是 `unknown`。
+
+**`suggested` 只是候选建议，不是部署决定。** 只有 `confidence: high` 且依据是现有 Wrangler 配置时，才可以照着做；`medium` 必须结合第 2 步的三个问题再定。
 
 同时按需读取：`package.json`、锁文件、框架配置、`.github/workflows/*`、`wrangler.*`、`_headers`、`_redirects`、`CNAME`、`.env.example`。**不要为了识别而安装依赖。**
 
-Monorepo 里如果有多个应用，先问清楚要部署哪个，不要猜。
+Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；先问清楚部署哪个，不要猜。多个锁文件、多个 `index.html`、动态框架配置都属于“需要人工确认”的情况，脚本会写进 `risks`。
 
 ### 2. 选择目标
 
@@ -120,7 +128,13 @@ Monorepo 里如果有多个应用，先问清楚要部署哪个，不要猜。
 - **Next.js SSR/ISR** → Workers + vinext/OpenNext，不能当纯静态上传。
 - **原生模块、`node:fs`、长驻进程、运行时不受支持** → 直接说明不适合，建议保留原主机或容器，不要硬迁。
 
-给出目标，并说明是哪一两个事实决定的。
+但**不要只凭框架名决定**。静态站（含 SPA）Pages 和 Workers 都能托管，真正决定的是三个问题：
+
+1. 域名的 NS 是否在 Cloudflare？（Workers 要求 NS 托管；Pages 的子域可用外部 CNAME）
+2. 是否要零配置 `git push` 部署？（Pages 的 Git 集成更省事）
+3. 以后是否要 Cloudflare 侧后端（D1/DO/Queues/Cron）？（要就直接 Workers）
+
+给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。
 
 ### 3. 写部署计划
 
@@ -149,10 +163,20 @@ node "<技能目录>/scripts/check-env.mjs"
 用项目自己的构建命令，然后检查产物：
 
 ```bash
-node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --spa
+node "<技能目录>/scripts/check-build.mjs" --dir "<输出目录>" --mode "<static|spa|ssg>"
 ```
 
-只有真正的 SPA 才加 `--spa`。部署前修掉阻断项（输出目录不存在、文件数 > 20,000、单文件 > 25 MiB）。缺少顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA。
+**先定站点模式，再构建检查，最后用同一个模式验收。** 中间换模式，前面的结论就作废：
+
+| 模式 | 用在 | 未知路径的期望 |
+|---|---|---|
+| `static` | 预渲染的多页站 | 404 |
+| `ssg` | Hugo / Jekyll / Astro 等生成的静态站 | 404 |
+| `spa` | 客户端路由（React/Vue/Vite SPA） | 200 + app shell |
+
+`--spa` 是 `--mode spa` 的旧写法，仍然可用。默认是 `static`，所以 SPA 项目**必须显式传 `--mode spa`**，否则会被当成“缺 404.html”的多页站。
+
+部署前修掉阻断项（输出目录不存在、文件数 > 20,000、单文件 > 25 MiB）。`static`/`ssg` 下缺顶层 `404.html` 是警告但影响很大：Pages 会把整站当成 SPA，验收时未知路径会返回 200。
 
 ### 5. 部署
 
@@ -177,12 +201,19 @@ npx wrangler deploy
 ### 6. 验收
 
 ```bash
-node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --json
+node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg>" --json
 ```
 
-用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`。
+用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。
 
-脚本检查：首页状态、404 行为、标题、canonical、meta robots、同源资源、响应头、`/index.html` 重定向、可选 CORS、备用站独立性。
+`--mode` 必须和第 4 步一致，否则 404 结论会互相矛盾：
+
+- `static`/`ssg`：未知路径**必须** 404。返回 200 判失败（SPA 回退或 rewrite 吞掉了未知路径）。
+- `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
+
+脚本检查：首页状态、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败会自动用 GET 复核）、响应头、`/index.html` 重定向、可选 CORS、备用站独立性。
+
+同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
 再按项目类型执行 `references/verification.md` 里的检查。纯静态站不要跑数据库和登录测试。每次修复后重新请求验证；没有新响应，就不能说“已修复”。
 
@@ -197,7 +228,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --jso
 - **`github.io` 301 到自定义域名，就不是备用站。** 必须直接请求确认。
 - **`noindex` 不影响访问。** 不要以“备用站要能用”为理由去掉它。
 - **Pages 静态资源默认 `Access-Control-Allow-Origin: *`。** 需要收紧时用 `_headers`；Functions 必须在代码里处理 CORS，包括 `OPTIONS`。
-- **缺少 `404.html` 会把 Pages 变成 SPA。** 一定探测一个不存在的路径。
+- **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
+- **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。
 - **不要随手加自定义缓存**，除非文件名带内容哈希且用户接受代价。
 
@@ -232,7 +264,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --jso
 
 模板：`templates/deployment-plan.md`、`templates/deployment-report.md`、`templates/wrangler.workers.jsonc`、`templates/wrangler.pages.toml`。
 
-脚本：`scripts/detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`。
+脚本：`scripts/detect-project.mjs`、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
 
 ## 八、输出要求
 

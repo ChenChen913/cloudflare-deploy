@@ -8,18 +8,18 @@
 
 ## 状态
 
-- 格式校验（`quick_validate.py`）：通过。
-- 本地测试：23/23 通过（`node tests/run-tests.mjs`）。
+- 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
+- 本地测试：56/56 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本环境没有执行**。没有 Cloudflare 账号/Token，Wrangler 也未安装。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
 
-1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、风险信号。
-2. **选型**：根据事实选 Pages 或 Workers，不套模板。
+1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险信号；每个关键字段标注 `confirmed` / `inferred` / `unknown`。
+2. **选型**：给出 Pages / Workers 候选和置信度，由 DNS、部署方式、未来后端需求决定，不凭框架名拍板。
 3. **计划**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。
-4. **构建检查**：部署前检查产物是否符合 Cloudflare 限制。
+4. **构建检查**：部署前按站点模式（`static` / `ssg` / `spa`）检查产物是否符合 Cloudflare 限制。
 5. **部署**：先到 `pages.dev` / `workers.dev` 或预览分支。
-6. **验收**：首页、404、资源、响应头、canonical/noindex、CORS、备用站独立性、DNS、数据、性能，按项目类型选择。
+6. **验收**：首页、按模式判定的 404/回退、资源、响应头、canonical/noindex、CORS、备用站独立性、DNS、数据、性能，按项目类型选择。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
 ## 目录
@@ -54,6 +54,8 @@ cloudflare-deploy/
 │   └── wrangler.pages.toml
 └── tests/
     ├── run-tests.mjs
+    ├── check-skill.mjs      # 结构自检：frontmatter、引用路径、绝对路径
+    ├── last-run.txt         # 最近一次测试输出
     └── results.md
 ```
 
@@ -64,7 +66,7 @@ cloudflare-deploy/
 | Cloudflare 账号 | 全部 | `dash.cloudflare.com` 注册，验证邮箱 |
 | Wrangler 登录 | 部署 | `npx wrangler whoami` |
 | Account ID | API Token / CI | Account Home → 搜索 “Copy account ID” |
-| Node.js 22+ | 构建和 Wrangler | `node -v` |
+| Node.js | 脚本最低 18；部署建议 22+ | `node -v` |
 | Git | 仓库操作 | `git --version` |
 | 域名 / DNS | 只有绑自定义域名 | NS 在哪、CAA 记录 |
 | R2 订阅 | 只有用 R2 | Storage & databases → R2 开通 |
@@ -105,31 +107,37 @@ Agent 会运行 `scripts/detect-project.mjs`，只读当前任务需要的 refer
 
 ## 脚本
 
-零依赖 Node 18+ ESM，只读：
+零依赖、只读的 Node 18+ ESM（部署本身仍建议 Node 22+）：
 
 ```bash
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs
-node scripts/check-build.mjs --dir dist --spa
-node scripts/verify-deployment.mjs --url https://site.example.com --json
+node scripts/check-build.mjs --dir dist --mode static   # 或 ssg / spa
+node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json
 ```
 
-检查备用站：
+`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell。构建检查和验收必须用同一个值。
+
+检查备用站与独立 API 的 CORS：
 
 ```bash
 node scripts/verify-deployment.mjs \
   --url https://site.example.com \
+  --mode static \
   --backup https://owner.github.io/repo/ \
+  --origin https://app.example.com \
+  --cors-url https://api.example.com/items \
   --json
 ```
 
 ## 测试
 
 ```bash
-node tests/run-tests.mjs
+node tests/run-tests.mjs        # 56 项：识别、产物检查、真实 HTTP 验收
+node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 ```
 
-测试会创建 6 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR），断言识别结果，检查两个产物，并用本地 HTTP 服务器真实运行验收脚本——包括一个 301 到主站的假备用站。
+测试会创建 11 个合成项目（Vite SPA、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions），断言识别结果和证据等级，检查 3 个构建产物（无 404 的产物按 static / spa 各查一次），并用本地 HTTP 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA 与静态站的 404 差异、独立 CORS 域、重复 canonical、301 假备用站。
 
 这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为。
 
@@ -137,6 +145,8 @@ node tests/run-tests.mjs
 
 - 渐进披露：`SKILL.md` 只放路由、流程、安全边界；细节按需读 `references/`。
 - 一个 reference 一个主题，不重复解释平台行为。
+- 识别结果分三层：`confirmed` / `inferred` / `unknown`；部署目标是候选，不是定论。
+- 同一个 `--mode` 贯穿构建检查和验收，避免 404 结论互相矛盾。
 - 脚本确定性执行并输出 JSON，人类摘要按需输出。
 - 不建空目录、不放占位资源。
 - 报告必须区分 已验证 / 失败 / 未验证。

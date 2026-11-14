@@ -51,13 +51,25 @@ function checkCommand(id, label, cmd, args, opts = {}) {
 
 const checks = [];
 
+// 三档标准，别混：
+//   本技能的脚本：最低 Node 18（ESM + 内置 fetch，零依赖）
+//   完整部署：建议 Node 22+（当前仍在维护的最老 LTS 线）
+//   Wrangler：只支持 Current / Active / Maintenance 三个分支
 const nodeMajor = Number(process.versions.node.split(".")[0]);
+const nodeEven = nodeMajor % 2 === 0;
+const nodeDetail = nodeMajor < 18
+  ? "脚本需要 Node 18+（ESM 与内置 fetch）；先升级 Node。"
+  : nodeMajor < 22
+    ? "脚本能跑（最低 Node 18），但 Node 18/20 已 EOL，Wrangler 只支持 Current/Active/Maintenance；部署前升级到 Node 22+。"
+    : !nodeEven
+      ? `Node ${nodeMajor} 是奇数版本，已结束支持；Wrangler 只支持 Current/Active/Maintenance，建议换到偶数 LTS（22/24/26）。`
+      : null;
 checks.push({
   id: "node",
   label: "Node.js",
-  status: nodeMajor >= 22 ? "pass" : nodeMajor >= 20 ? "warn" : "fail",
+  status: nodeMajor >= 22 && nodeEven ? "pass" : nodeMajor >= 18 ? "warn" : "fail",
   version: process.version,
-  detail: nodeMajor >= 22 ? null : "Wrangler 支持 Current / Active / Maintenance 的 Node 版本；Node 20 已 EOL，部署前升级到 Node 22+。",
+  detail: nodeDetail,
   required: true,
 });
 

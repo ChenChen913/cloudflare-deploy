@@ -1,25 +1,58 @@
 通过  Vite：框架/类型 — vite/spa
 通过  Vite：输出目录 + base — dist, /repo/
 通过  Vite：识别 GitHub Pages
-通过  Vite：推荐 Pages — pages
+通过  Vite：目标给候选而不是定论 — null/pages,workers
+通过  Vite：输出目录有证据等级 — confirmed
 通过  Jekyll：框架/静态 — jekyll/static
 通过  Jekyll：_site + CNAME — _site, www.example.com
 通过  Jekyll：构建命令 — bundle exec jekyll build
+通过  Jekyll：目标待定
 通过  Supabase：SPA + 外部后端
 通过  Supabase：环境变量键名 — VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY
-通过  Supabase：不假设 Cloudflare 后端 — pages
-通过  Hono：API + Workers — hono/workers
+通过  Supabase：不假设 Cloudflare 后端
+通过  Hono：明确 Workers — hono/workers
 通过  Hono：D1 绑定 + 资源目录
+通过  Hono：依据写明 wrangler 配置 — 现有 wrangler 配置已经是 Workers 形态（main 入口，assets.directory = ./public）
 通过  重依赖：标记为 assess — assess
-通过  重依赖：原生依赖风险 — 以下原生/重依赖可能无法在 Workers 上运行： sharp, puppeteer, better-sqlite3. | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
+通过  重依赖：原生依赖风险 — 以下原生/重依赖可能无法在 Workers 上运行：sharp, puppeteer, better-sqlite3。 | 源码引用了 node:fs；Workers 没有持久本地文件系统。把文件迁到 R2，或保留原主机。 | 检测到长驻服务模式（setInterval/createServer/while true）；Workers 是请求级的。考虑 Cron/Queues，或保留原主机。 | 服务端运行时需要适配 Workers；迁移前先检查 Node API 和数据库驱动。 | 输出目录未知；部署前先确认构建产物位置。
 通过  重依赖：fs + 长驻进程风险
 通过  Next：SSR -> Workers — ssr/workers
 通过  Next：静态资源风险
+通过  Monorepo：识别出两个子应用 — [{"path":"apps/api","name":"@mono/api","hasBuild":false},{"path":"apps/web","name":"@mono/web","hasBuild":true}]
+通过  Monorepo：风险提示指明子包 — 检测到 monorepo（apps/api、apps/web）；部署前确认要发布哪个子包及其输出路径。
+通过  多锁文件：列出全部 — pnpm-lock.yaml,package-lock.json
+通过  多锁文件：包管理器降为推断 — pnpm/inferred
+通过  多锁文件：风险提示
+通过  动态配置：base 标为未知 — unknown
+通过  动态配置：风险提示核对产物 — Vite 配置是动态的（函数或环境变量）；base 和输出目录无法静态确认，构建后必须核对产物路径。
+通过  Pages Functions：建议 Pages — pages/medium
+通过  Pages Functions：识别 functions 目录
+通过  多入口：列出 index.html — docs/index.html,site/index.html
+通过  多入口：要求确认站点根 — 没有检测到构建脚本；请手动生成输出目录，或补一个 build 脚本。 | 输出目录未知；部署前先确认构建产物位置。 | 发现 2 个 index.html（docs/index.html、site/index.html），但没有识别出框架；确认站点根目录，或补构建配置。
 通过  产物：通过但有警告 — 警告=1
 通过  产物：发现坏资源
-通过  产物：缺 404 被标记 — Pages 会当成 SPA
-通过  验收：正常路径通过 — 失败=0
+通过  产物：报告实际检查的资源数 — checked=2
+通过  产物：static 模式缺 404 被警告 — Pages 会当成 SPA
+通过  产物：spa 模式不要求 404 — spa
+通过  产物：--spa 与 --mode spa 等价
+通过  嵌套产物：递归统计文件 — files=62
+通过  嵌套产物：资源路径能解析
+通过  验收：静态站正常路径通过 — 失败=0
 通过  验收：canonical + 404 + 资源
+通过  验收：HEAD 405 时用 GET 兜底 — app.css 只支持 GET
+通过  验收：子路径站点查对地址 — exit=0
+通过  验收：未知路径留在 /repo/ 下 — /repo/ /repo/__cf_deploy_check_1794634550834/ /repo/assets/app.css /repo/index.html
+通过  验收：相对资源按站点根解析
+通过  验收：资源上限写进报告 — checked=1/2
+通过  验收：静态站按 SPA 模式判为“深链 404”警告
+通过  验收：SPA 深链回退通过 — 200 + app shell
+通过  验收：把 SPA 当静态站会判 404 失败 — 这正是原逻辑的冲突点
+通过  验收：CORS 可指向独立子域 API — http://127.0.0.1:40136/api/data
+通过  验收：预检通过
+通过  验收：重复 ACAO 判失败 — 两个 ACAO 值
+通过  验收：ACAO 与请求来源不匹配判失败 — 浏览器会拒绝
+通过  验收：重复 canonical 判失败
 通过  验收：拒绝 301 备用站 — 备用站跳到主站
+通过  结构检查：frontmatter / 路径 / 无绝对路径 — 结构检查：通过
 
-23/23 通过
+56/56 通过
