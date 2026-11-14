@@ -28,7 +28,7 @@ Windows 上如果只能用 PowerShell，Wrangler 命令本身可以跑；但本�
 | GitHub Codespaces | `--device` | 端口转发不一定覆盖 8976 |
 | CI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | 官方推荐，不需要交互 |
 
-`--device` 的验证地址是 `https://dash.cloudflare.com/oauth2/device`，验证码 5 分钟内有效。
+`--device` 的验证地址是 `https://dash.cloudflare.com/oauth2/device`，验证码 5 分钟内有效。需要较新的 Wrangler；如果命令不认识 `--device`，先升级 Wrangler，或直接用 API Token。
 
 ## 3. 终端语法差异
 
