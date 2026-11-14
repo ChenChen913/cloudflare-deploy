@@ -98,10 +98,15 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 
 脚本的 HTML 识别统一走 `scripts/html-scan.mjs`（显式状态机，零依赖），不是标签正则：
 
-- 只统计 DOM 中真实存在的元素。注释、bogus comment（`<!-->`、`<!DOCTYPE>`、`<?...>`、CDATA）、RAWTEXT（`script` / `style` / `xmp` / `iframe` / `noembed` / `noframes` / `noscript`）、RCDATA（`title` / `textarea`）、`template` 惰性内容、SVG/MathML 外部内容（`foreignObject` 内部恢复 HTML）、属性值和畸形/未闭合标签里的伪标签都不算。
+- 只统计 DOM 中真实存在的 HTML 命名空间元素。注释、bogus comment（`<!-->`、`<!DOCTYPE>`、`<?...>`、CDATA）、RAWTEXT（`script` / `style` / `xmp` / `iframe` / `noembed` / `noframes` / `noscript`）、RCDATA（`title` / `textarea`）、`template` 惰性内容、属性值和畸形/未闭合标签里的伪标签都不算。
+- **script data 是独立状态机**：`<!--` 进入 escaped，escaped 里的 `</script>` 照常关闭；`<!--<script>` 进入 double-escaped，其中的 `</script>` 只回到 escaped、不关闭；`-->` 回到 data。未闭合 script 会吞掉其后所有标记，所以 script 后面的伪 canonical 不会被识别（除非状态真的回到 data 并再次关闭 script）。
+- **DOCTYPE 的 public/system 标识符里的 `>` 会 abrupt 结束 DOCTYPE**（浏览器行为，引号不保护 `>`，并置 force-quirks）；残余文本继续按 HTML 解析，因此“引号内 `>` 之后的 `<link>`”在浏览器里可能真的成为元素。脚本不假装过滤它，避免与浏览器相反。
+- **SVG/MathML 用显式命名空间栈**：嵌套 svg、`foreignObject` / `desc` / `title` 集成点、MathML 文本集成点（`mi/mo/mn/ms/mtext`）、`mglyph/malignmark` 例外、annotation-xml 的 encoding 分支、HTML breakout 开始标签、跨命名空间结束标签、HTML 祖先结束标签（`<div><svg></div>`）、`</p>`/`</br>` breakout、CDATA、template 隔离都按栈状态处理；集成点内部开始的 HTML 元素才计入 HTML 元素。
+- **HTML 结束标签的属性状态**：只有属性名之后的 `=` 才进入属性值；结束标签里游离的 `=` / 引号不会保护 `>`，不会吞掉后面的真实标签。EOF 处不完整的开始标签不并入可见文本。
 - 属性支持单/双引号、无引号、属性值里的 `>`、重复属性（第一个生效）和字符引用（`&amp;`、数字引用等，含缺分号的数字引用与 C1 字符的 windows-1252 映射）；标签名/属性名 ASCII 大小写归一。
 - 相对 URL 按 `<base href>`（第一个带 href 的 base）解析；没有 base 时按**文档 URL**解析（与浏览器一致，例如最终页面 `/sub` 里的 `app.js` 解析为 `/app.js`，不会强行补成 `/sub/app.js`）。根路径有同源重定向时，404 / API / CORS / `/index.html` / 资源 / canonical 都基于**最终页面 URL**。
-- 资源引用只取真实元素上的子资源属性：`src`、`srcset`、`poster`、`<object data>`、`<link href>`。`srcset` 按「逗号 + 空白」拆候选（URL 里的逗号不误拆）；`<a href>` 导航链接、canonical、`<base>` 不是资源；跨源 / 畸形引用只记进 `ignored`，不发请求。
+- 资源引用只取真实元素上的子资源属性：`src`（img/script/iframe/embed/video/audio/source/track/input）、`poster`（video）、`srcset`（img/source）、`<object data>`、`<link href>`。`srcset` 按 WHATWG 解析算法拆候选（URL 可含逗号、data URI、逗号后无空格、尾随逗号、畸形/重复 descriptor）；`<a href>` 导航链接、canonical、`<base>` 不是资源；跨源 / 畸形引用只记进 `ignored`，不发请求。
+- **HTML5 oracle 差分**：`tests/fixtures/html5-oracle.json` 记录了 Chrome/Edge 真实解析器的 62 个 DOM facts（按 `namespaceURI === XHTML` 过滤 canonical/title/script/img/base）；默认测试逐项对照。装有 Chrome/Edge 时可用 `node tests/browser-diff.mjs` 现场重跑真实浏览器差分（Node 22+，不参与默认套件）。独立第三方一次性随机差分（550 例、3 组固定种子、真实 Chromium 157；脚本/种子未纳入仓库）在最终快照上 549/550 一致，唯一差异是已声明的 foster parenting（不建树），未发现状态机 bug。它只证明这些边界与 Chromium 一致，不证明完整 HTML5 tree construction。
 - `probed[].finalUrl` 只表示最后真正请求过的地址；没跟随的目标在 `redirectTarget`，超过跳数在 `limitReached`。不要再把 `finalUrl` 当成「期望跟随到的目标」。
 - 只有最终 200 的首页才做 title/canonical/资源/可见文本检查；4xx/5xx 错误页的内容不作为站点证据。
 

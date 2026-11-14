@@ -1,0 +1,1084 @@
+{
+  "_provenance": "Recorded from a real Chromium HTML5 parser (Chrome 157.0.8103.52 headless via CDP Runtime.evaluate; facts filtered by namespaceURI === http://www.w3.org/1999/xhtml). Edge 157 produced identical facts for these cases. Regenerate with: node tests/browser-diff.mjs --record (requires Chrome/Edge and Node 22+ for the global WebSocket); run-tests.mjs only reads this JSON, so the default test suite stays browser-free. Additional cases F1-F15 recorded from Chrome/157.0.8103.52 and merged. Additional cases G1-G8 recorded from Chrome/157.0.8103.52 (fuzz-derived state leaks) and merged. Additional cases H1-H8 recorded from Chrome/157.0.8103.52 and merged (script <!-->, integration exit, annotation encoding, image alias).",
+  "_browser": "Chrome/157.0.8103.52",
+  "_recordedAt": "2026-11-14T13:05:38.098Z",
+  "cases": [
+    {
+      "id": "A1",
+      "html": "<script><!--<script></script>--></script><link rel=\"canonical\" href=\"/after\"><link rel=\"canonical\" href=\"/fake\">",
+      "expect": {
+        "canonical": [
+          "/after",
+          "/fake"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 24,
+            "text": "<!--<script></script>-->"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A2",
+      "html": "<script><!--</script><link rel=\"canonical\" href=\"/fake\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/fake",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 4,
+            "text": "<!--"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A3",
+      "html": "<script><!--<script>--></script><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 15,
+            "text": "<!--<script>-->"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A4",
+      "html": "<script><!--<script></script></script><link rel=\"canonical\" href=\"/real\"><link rel=\"canonical\" href=\"/fake2\">",
+      "expect": {
+        "canonical": [
+          "/real",
+          "/fake2"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 21,
+            "text": "<!--<script></script>"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A5",
+      "html": "<script>var x = \"<link rel='canonical' href='/fake'>\";</script><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 46,
+            "text": "var x = \"<link rel='canonical' href='/fake'>\";"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A6",
+      "html": "<script><!--<script>--><link rel='canonical' href='/fake'>--></script><link rel='canonical' href='/real'>",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 53,
+            "text": "<!--<script>--><link rel='canonical' href='/fake'>-->"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "A7",
+      "html": "<script>\n<link rel=canonical href=/real>",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 32,
+            "text": "\n<link rel=canonical href=/real>"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "B1",
+      "html": "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "B2",
+      "html": "<!DOCTYPE html SYSTEM \"http://example.com/a>b\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "B3",
+      "html": "<!DOCTYPE html PUBLIC \"a>b\" \"c>d\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "B4",
+      "html": "<!DOCTYPE html PUBLIC \"unclosed><link rel='canonical' href='/fake'>\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/fake",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "B5",
+      "html": "<!doctype html><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "C1",
+      "html": "<svg><link rel=\"canonical\" href=\"/fake\"></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C2",
+      "html": "<svg><svg><link rel=\"canonical\" href=\"/fake\"></svg></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C3",
+      "html": "<svg><foreignObject><link rel=\"canonical\" href=\"/html\"></foreignObject></svg>",
+      "expect": {
+        "canonical": [
+          "/html"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C4",
+      "html": "<svg><foreignObject><svg><link rel=\"canonical\" href=\"/fake\"></svg></foreignObject></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C5",
+      "html": "<svg><foreignObject><div><link rel=\"canonical\" href=\"/html\"></div></foreignObject></svg>",
+      "expect": {
+        "canonical": [
+          "/html"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C6",
+      "html": "<math><link rel=\"canonical\" href=\"/fake\"></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C7",
+      "html": "<math><svg><link rel=\"canonical\" href=\"/fake\"></svg></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C8",
+      "html": "<svg><title>SVG-T</title></svg><title>HTML-T</title>",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [
+          "HTML-T"
+        ],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C9",
+      "html": "<svg><foreignObject><svg><foreignObject><link rel=\"canonical\" href=\"/nested-html\"></foreignObject></svg></foreignObject></svg>",
+      "expect": {
+        "canonical": [
+          "/nested-html"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "C10",
+      "html": "<svg><![CDATA[> <link rel='canonical' href='/fake'> ]]></svg><link rel='canonical' href='/real'>",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "D1",
+      "html": "<!DOCTYPE html PUBLIC \"combo>fake\" \"sys>id\"><script><!--<script></script></script><link rel=\"canonical\" href=\"/after-script\"><svg><title>SVG-T</title><foreignObject><svg><foreignObject><link rel=\"canonical\" href=\"/nested-html\"></foreignObject></svg></foreignObject></svg><script>var fake = '<link rel=\"canonical\" href=\"/in-script\">';</script><link rel=\"canonical\" href=\"/real\"><title>HTML-T</title>",
+      "expect": {
+        "canonical": [
+          "/after-script",
+          "/nested-html",
+          "/real"
+        ],
+        "htmlTitles": [
+          "HTML-T"
+        ],
+        "scripts": [
+          {
+            "len": 21,
+            "text": "<!--<script></script>"
+          },
+          {
+            "len": 54,
+            "text": "var fake = '<link rel=\"canonical\" href=\"/in-script\">';"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": false
+    },
+    {
+      "id": "E1",
+      "html": "<svg><title><link rel=\"canonical\" href=\"/t\"></title></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/t",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E2",
+      "html": "<svg><desc><link rel=\"canonical\" href=\"/d\"></desc></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/d",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E3",
+      "html": "<math><mtext><link rel=\"canonical\" href=\"/m\"></mtext></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/m",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E4",
+      "html": "<math><mi><link rel=\"canonical\" href=\"/mi\"></mi></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/mi",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E5",
+      "html": "<math><mglyph><link rel=\"canonical\" href=\"/g\"></mglyph></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E6",
+      "html": "<script><!--<script></script>--></script><link rel=\"canonical\" href=\"/after\">",
+      "expect": {
+        "canonical": [
+          "/after"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 24,
+            "text": "<!--<script></script>-->"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E7",
+      "html": "<script><!--<script>--></script><link rel=\"canonical\" href=\"/after\">",
+      "expect": {
+        "canonical": [
+          "/after"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 15,
+            "text": "<!--<script>-->"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "E8",
+      "html": "<script><!--<script></script></script><link rel=\"canonical\" href=\"/after\"><link rel=\"canonical\" href=\"/after2\">",
+      "expect": {
+        "canonical": [
+          "/after",
+          "/after2"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 21,
+            "text": "<!--<script></script>"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F1",
+      "html": "<math><annotation-xml encoding=\"text/html\"><link rel=\"canonical\" href=\"/ax-html\"></annotation-xml></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/ax-html",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F2",
+      "html": "<math><annotation-xml><link rel=\"canonical\" href=\"/ax-foreign\"></annotation-xml></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F3",
+      "html": "<math><annotation-xml><svg><link rel=\"canonical\" href=\"/inline-svg\"></svg></annotation-xml></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F4",
+      "html": "<svg><g><title><link rel=\"canonical\" href=\"/g-title\"></title></g></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/g-title",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F5",
+      "html": "<svg><foreignObject><title><link rel=\"canonical\" href=\"/fo-title\"></title></foreignObject></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [
+          "<link rel=\"canonical\" href=\"/fo-title\">"
+        ],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F6",
+      "html": "<math><mtext><mglyph><link rel=\"canonical\" href=\"/mglyph\"></mglyph></mtext></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F7",
+      "html": "<svg><foreignObject><div><link rel=\"canonical\" href=\"/in-div\"></foreignObject><link rel=\"canonical\" href=\"/after-div\">",
+      "expect": {
+        "canonical": [
+          "/in-div",
+          "/after-div"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F8",
+      "html": "<div><svg></div><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F9",
+      "html": "<template><svg></template><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F10",
+      "html": "<div></div =\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F11",
+      "html": "<svg></p><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F12",
+      "html": "<math><annotation-xml encoding=\"application/xhtml+xml\"><link rel=\"canonical\" href=\"/ax-xhtml\"></annotation-xml></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/ax-xhtml",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F13",
+      "html": "<script>x</script =\"><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 1,
+            "text": "x"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F14",
+      "html": "<svg><foreignObject><svg></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "F15",
+      "html": "<math><mi><link rel=\"canonical\" href=\"/mi\"></mi></math><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/mi",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G1",
+      "html": "<math><mi><mglyph><img src=\"/html-img.png\"></mi><link rel=\"canonical\" href=\"/x\">",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 1,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G2",
+      "html": "<svg><foreignObject><svg><br></foreignObject><script>x</script>",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G3",
+      "html": "<math><mi><b><mglyph><title>t</title>",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [
+          "t"
+        ],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G4",
+      "html": "<math><mn><b><mglyph><link rel=\"canonical\" href=\"/x\">",
+      "expect": {
+        "canonical": [
+          "/x"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G5",
+      "html": "<svg><foreignObject><![CDATA[x> <link rel=\"canonical\" href=\"/fake\">]]></foreignObject><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G6",
+      "html": "<math><mtext><![CDATA[><img src=\"/fake.png\">",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G7",
+      "html": "<svg><desc><![CDATA[> <title>FAKE</title>]]></desc></svg><title>REAL</title>",
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [
+          "REAL"
+        ],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "G8",
+      "html": "<svg><title><![CDATA[> <link rel=\"canonical\" href=\"/fake\">]]></title></svg><link rel=\"canonical\" href=\"/real\">",
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      },
+      "wrappedDoctype": true
+    },
+    {
+      "id": "H1",
+      "html": "<script><!--><script></script><link rel=\"canonical\" href=\"/fake\"></script><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/fake",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 13,
+            "text": "<!--><script>"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H2",
+      "html": "<svg><foreignObject><div><svg></div><link rel=\"canonical\" href=\"/x\"></foreignObject></svg><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/x",
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H3",
+      "html": "<svg><foreignObject><span><div></span></foreignObject><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H4",
+      "html": "<math><annotation-xml encoding=\" text/html \"><link rel=\"canonical\" href=\"/fake\"></annotation-xml></math><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H5",
+      "html": "<math><annotation-xml encoding=\"text/html\"><link rel=\"canonical\" href=\"/real\"></annotation-xml></math>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H6",
+      "html": "<image src=\"/alias.png\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 1,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H7",
+      "html": "<svg><foreignObject><image src=\"/alias2.png\"></foreignObject></svg>",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [],
+        "htmlTitles": [],
+        "scripts": [],
+        "htmlCounts": {
+          "img": 1,
+          "base": 0
+        }
+      }
+    },
+    {
+      "id": "H8",
+      "html": "<script><!---><script></script></script><link rel=\"canonical\" href=\"/real\">",
+      "wrappedDoctype": true,
+      "expect": {
+        "canonical": [
+          "/real"
+        ],
+        "htmlTitles": [],
+        "scripts": [
+          {
+            "len": 14,
+            "text": "<!---><script>"
+          }
+        ],
+        "htmlCounts": {
+          "img": 0,
+          "base": 0
+        }
+      }
+    }
+  ],
+  "_schema": 1,
+  "_doctypePrefixRule": "Per-case wrappedDoctype: true means the recorder prepends <!doctype html>; false means the case HTML already contains its own DOCTYPE.",
+  "_edgeBrowser": "Edge/157.0.4341.46"
+}

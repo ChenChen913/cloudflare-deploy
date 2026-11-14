@@ -10,6 +10,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import { spawn, spawnSync } from "node:child_process";
@@ -17,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { resolvePlan, evaluateFileCount, parseVersion, compareVersions } from "../scripts/check-build.mjs";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
 import { classifyRedirect } from "../scripts/redirect-policy.mjs";
-import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, decodeCharacterReferences, resourceReferences } from "../scripts/html-scan.mjs";
+import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, decodeCharacterReferences, resourceReferences, parseSrcset, scanScriptData } from "../scripts/html-scan.mjs";
 import { classifyWranglerWhoami, extractAccountId } from "../scripts/wrangler-auth.mjs";
 import { TLS_KEY, TLS_CERT } from "./fixtures/loopback-tls.mjs";
 
@@ -589,6 +590,12 @@ const staticServer = http.createServer((req, res) => {
     res.end(`<!doctype html><html><head><title>noscript assets</title><noscript><base href="https://evil.example/"><link rel="canonical" href="https://evil.example/"></noscript><link rel="stylesheet" href="/assets/app.css"></head><body>ok</body></html>`);
     return;
   }
+  // srcset 候选分隔：逗号后无空格也要拆成两个资源。
+  if (p === "/srcset/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>srcset</title></head><body><img srcset="/assets/app.css 1x,/assets/app.js 2x"></body></html>`);
+    return;
+  }
   if (p === "/index.html") { res.writeHead(308, { location: "/" }); res.end(); return; }
   res.writeHead(404, { "content-type": "text/html" }); res.end("not found");
 });
@@ -692,6 +699,16 @@ const canonicalHrefCases = {
   "/svg-cdata/": "svg-cdata",
   "/svg-title/": "svg-title",
   "/in-endtag-quote/": "in-endtag-quote",
+  "/in-script-double/": "in-script-double",
+  "/script-double-real/": "script-double-real",
+  "/in-doctype-public/": "in-doctype-public",
+  "/in-doctype-system/": "in-doctype-system",
+  "/doctype-abrupt-real/": "doctype-abrupt-real",
+  "/svg-nested-close/": "svg-nested-close",
+  "/svg-fo-nested/": "svg-fo-nested",
+  "/svg-breakout/": "svg-breakout",
+  "/svg-title-link/": "svg-title-link",
+  "/math-mtext-link/": "math-mtext-link",
   // URL 解析矩阵：相对 canonical / <base href>
   "/relative-canonical/": "relative-canonical",
   "/base-tag-canonical/": "base-tag-canonical",
@@ -738,6 +755,16 @@ const canonicalHrefServer = http.createServer((req, res) => {
   else if (kind === "svg-cdata") tag = `<svg><![CDATA[> <link rel="canonical" href="https://evil.example/"> ]]></svg><link rel="canonical" href="${self}">`;
   else if (kind === "svg-title") tag = `<svg><title>SVG-ONLY</title></svg>`;
   else if (kind === "in-endtag-quote") tag = `</a "><link rel="canonical" href="${self}">`;
+  else if (kind === "in-script-double") tag = `<script><!--<script></script><link rel='canonical' href='${self}fake'>--></script>`;
+  else if (kind === "script-double-real") tag = `<script><!--<script></script>--></script><link rel="canonical" href="${self}">`;
+  else if (kind === "in-doctype-public") tag = `<!DOCTYPE html PUBLIC "<link rel='canonical' href='${self}fake'>">`;
+  else if (kind === "in-doctype-system") tag = `<!DOCTYPE html SYSTEM "<link rel='canonical' href='${self}fake'>">`;
+  else if (kind === "doctype-abrupt-real") tag = `<!DOCTYPE html PUBLIC "x>fake"><link rel="canonical" href="${self}">`;
+  else if (kind === "svg-nested-close") tag = `<svg><svg><link rel='canonical' href='${self}fake'></svg></svg><link rel="canonical" href="${self}">`;
+  else if (kind === "svg-fo-nested") tag = `<svg><foreignObject><svg><foreignObject></foreignObject></svg></foreignObject></svg><link rel="canonical" href="${self}">`;
+  else if (kind === "svg-breakout") tag = `<svg><img src="/assets/app.css"><link rel="canonical" href="${self}"></svg>`;
+  else if (kind === "svg-title-link") tag = `<svg><title><link rel='canonical' href='${self}'></title></svg>`;
+  else if (kind === "math-mtext-link") tag = `<math><mtext><link rel='canonical' href='${self}'></mtext></math>`;
   else if (kind === "relative-canonical") tag = `<link rel="canonical" href="./">`;
   else if (kind === "base-tag-canonical") tag = `<base href="${canonicalHrefBase}/"><link rel="canonical" href="base-tag-canonical/">`;
   else if (kind === "real-plus-fakes") {
@@ -1495,7 +1522,7 @@ assert("canonical href：无法解析判失败，不回退到当前站点",
 
 // ---------------------------------------------------------------- canonical rel 识别矩阵
 // 只认真正的 <link> 标签 + 真正的 rel 属性 + 按 HTML 空白分隔的 canonical token。
-const canonicalRelPass = ["/rel-double/", "/rel-single/", "/rel-unquoted/", "/href-first/", "/rel-multi-token/", "/real-plus-comment/", "/in-endtag-quote/"];
+const canonicalRelPass = ["/rel-double/", "/rel-single/", "/rel-unquoted/", "/href-first/", "/rel-multi-token/", "/real-plus-comment/", "/in-endtag-quote/", "/script-double-real/", "/svg-nested-close/", "/svg-fo-nested/", "/svg-title-link/", "/math-mtext-link/", "/doctype-abrupt-real/"];
 for (const p of canonicalRelPass) {
   const r = await canonicalHrefCase(p);
   assert(`canonical rel：${p} 正常识别为指向自身`,
@@ -1518,6 +1545,7 @@ const canonicalContextSkip = [
   "/in-comment/", "/in-script-raw/", "/in-style/", "/in-textarea/", "/in-title/",
   "/in-iframe/", "/in-xmp/", "/in-noembed/", "/in-noframes/", "/in-plaintext/",
   "/in-template/", "/attr-value/", "/incomplete/", "/in-noscript/", "/in-svg/",
+  "/in-script-double/", "/in-doctype-public/", "/in-doctype-system/",
 ];
 for (const p of canonicalContextSkip) {
   const r = await canonicalHrefCase(p);
@@ -1537,6 +1565,12 @@ const iSvgTitle = await canonicalHrefCase("/svg-title/");
 assert("canonical 上下文：SVG title 不成为文档 title",
   iSvgTitle.title?.status === "pass" && !/SVG-ONLY/.test(iSvgTitle.title?.detail || ""),
   JSON.stringify(iSvgTitle.title), "adversarial");
+// SVG 的 HTML integration point（title/desc/foreignObject）与 MathML 文本集成点里的
+// <link> 在浏览器里是 HTML 元素；不能因为“在 svg 里”就一律忽略。
+const iSvgBreakout = await canonicalHrefCase("/svg-breakout/");
+assert("SVG：breakout 开始标签（img）退回 HTML 后 canonical 仍按 HTML 识别",
+  iSvgBreakout.canonical?.status === "pass",
+  JSON.stringify({ canonical: iSvgBreakout.canonical, assets: iSvgBreakout.assets }), "adversarial");
 
 // ---------------------------------------------------------------- canonical URL 解析（组合层）
 // 相对 canonical 按最终页面 URL 解析；<base href> 按 HTML 语义改变解析基准。
@@ -1890,6 +1924,15 @@ assert("noscript：伪 base/canonical 不生效，资源仍按站点根解析",
     && noscriptAssets.probed?.[0]?.finalUrl === `${staticBase}/assets/app.css`
     && noscriptCanonical?.status === "skip",
   JSON.stringify({ assets: noscriptAssets, canonical: noscriptCanonical }), "adversarial");
+// srcset：逗号后无空格也必须拆成两个候选资源并都探测。
+const rSrcset = await runVerify(["--url", `${staticBase}/srcset/`, "--mode", "static", "--json"]);
+const rSrcsetJ = JSON.parse(rSrcset.out);
+const rSrcsetAssets = rSrcsetJ.checks.find((c) => c.id === "assets");
+assert("srcset：逗号后无空格的候选都进入资源检查",
+  rSrcset.code === 0 && rSrcsetAssets?.status === "pass" && rSrcsetAssets.checked === 2
+    && rSrcsetAssets.probed?.some((p) => p.url === "/assets/app.css")
+    && rSrcsetAssets.probed?.some((p) => p.url === "/assets/app.js"),
+  JSON.stringify(rSrcsetAssets), "adversarial");
 // 备用站与主站同源不构成独立入口。
 const rBackupSame = await runVerify(["--url", staticBase, "--mode", "static", "--backup", `${staticBase}/`, "--json"]);
 const rBackupSameCheck = JSON.parse(rBackupSame.out).checks.find((c) => c.id === "backup");
@@ -2330,6 +2373,320 @@ assert("HTML 资源引用：只取子资源属性，排除导航/canonical/base"
     && !refValues.includes("/nav") && !refValues.includes("/canonical") && !refValues.includes("/assets/"),
   refValues.join(","), "unit");
 
+// ---------------------------------------------------------------- HTML5 状态机专项（第二轮）
+// 期望值来自真实 Chromium 解析器（tests/fixtures/html5-oracle.json，Chrome/Edge 交叉验证），
+// 不是本实现自己算出来的。fixtures 由 tests/browser-diff.mjs --record 生成。
+const canonHrefs = (htmlText) => canonElements(htmlText).map((el) => getAttribute(el, "href").value);
+const scriptContent = (htmlText) => parseHtml(htmlText).elements.find((el) => el.name === "script")?.content ?? null;
+
+// 1) script data：escaped / double-escaped / `-->` 回 data / EOF。
+const scriptDataCases = [
+  ["double-escaped 里的 </script> 不关闭", `<script><!--<script></script>--></script><link rel="canonical" href="/after"><link rel="canonical" href="/fake">`, ["/after", "/fake"], "<!--<script></script>-->"],
+  ["escaped 里的 </script> 关闭", `<script><!--</script><link rel="canonical" href="/fake"><link rel="canonical" href="/real">`, ["/fake", "/real"], "<!--"],
+  ["double-escaped 的 --> 回到 data 后关闭", `<script><!--<script>--></script><link rel="canonical" href="/real">`, ["/real"], "<!--<script>-->"],
+  ["double-escaped 两次 </script>：第二次关闭", `<script><!--<script></script></script><link rel="canonical" href="/real"><link rel="canonical" href="/fake2">`, ["/real", "/fake2"], "<!--<script></script>"],
+  ["script 字符串里的伪标签", `<script>var x = "<link rel='canonical' href='/fake'>";</script><link rel="canonical" href="/real">`, ["/real"], `var x = "<link rel='canonical' href='/fake'>";`],
+  ["double-escaped 中的伪标签+注释", `<script><!--<script>--><link rel='canonical' href='/fake'>--></script><link rel='canonical' href='/real'>`, ["/real"], `<!--<script>--><link rel='canonical' href='/fake'>-->`],
+  ["未闭合 script 吞到 EOF", `<script>\n<link rel=canonical href=/real>`, [], `\n<link rel=canonical href=/real>`],
+];
+for (const [label, htmlText, expectedCanon, expectedContent] of scriptDataCases) {
+  assert(`script data：${label}`,
+    JSON.stringify(canonHrefs(htmlText)) === JSON.stringify(expectedCanon) && scriptContent(htmlText) === expectedContent,
+    JSON.stringify({ canonical: canonHrefs(htmlText), script: scriptContent(htmlText) }), "adversarial");
+}
+{
+  const sample = `<script>abc</script>tail`;
+  const scan = scanScriptData(sample, 8);
+  assert("script data：scanScriptData 返回内容边界与结束标签之后位置",
+    scan.contentEnd === 11 && scan.next === 20,
+    JSON.stringify(scan), "unit");
+}
+
+// 2) DOCTYPE：public/system 标识符里的 `>` 按规范 abrupt 结束 DOCTYPE（引号不保护），
+//    之后的字符按普通 HTML 继续解析；必要时置 force-quirks（tokenizer 不建树，不跟踪）。
+const doctypeCases = [
+  ["标准 public/system DOCTYPE 不吞后续标签", `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd"><link rel="canonical" href="/real">`, ["/real"], null],
+  ["system 标识符里的 > 提前结束 DOCTYPE", `<!DOCTYPE html SYSTEM "http://example.com/a>b"><link rel="canonical" href="/real">`, ["/real"], `b">`],
+  ["public 标识符里的 > 提前结束 DOCTYPE", `<!DOCTYPE html PUBLIC "a>b" "c>d"><link rel="canonical" href="/real">`, ["/real"], `b" "c>d">`],
+  ["引号里的伪 link 因 DOCTYPE 提前结束而不成为元素", `<!DOCTYPE html PUBLIC "unclosed><link rel='canonical' href='/fake'>"><link rel="canonical" href="/real">`, ["/fake", "/real"], `">`],
+  ["普通 doctype 不影响后续", `<!doctype html><link rel="canonical" href="/real">`, ["/real"], null],
+];
+for (const [label, htmlText, expectedCanon, expectedText] of doctypeCases) {
+  const actualText = expectedText == null ? null : parseHtml(htmlText).text.trim();
+  assert(`DOCTYPE：${label}`,
+    JSON.stringify(canonHrefs(htmlText)) === JSON.stringify(expectedCanon)
+      && (expectedText == null || actualText === expectedText),
+    JSON.stringify({ canonical: canonHrefs(htmlText), text: actualText }), "adversarial");
+}
+
+// 3) SVG/MathML 命名空间栈：嵌套、集成点、breakout、结束后恢复 HTML、无状态泄漏。
+const namespaceCases = [
+  ["svg 嵌套 svg 里的伪 link", `<svg><svg><link rel="canonical" href="/fake"></svg></svg><link rel="canonical" href="/real">`, ["/real"], null],
+  ["foreignObject 内的 link 是 HTML", `<svg><foreignObject><link rel="canonical" href="/html"></foreignObject></svg>`, ["/html"], null],
+  ["foreignObject 内嵌套 svg/foreignObject", `<svg><foreignObject><svg><foreignObject><link rel="canonical" href="/nested"></foreignObject></svg></foreignObject></svg>`, ["/nested"], null],
+  ["</svg> 出现在 foreignObject 内会退出整个 svg", `<svg><foreignObject></svg><svg><link rel="canonical" href="/fake"></svg><link rel="canonical" href="/real">`, ["/real"], null],
+  ["多层 foreignObject 关闭后不泄漏外域状态", `<svg><foreignObject><svg><foreignObject></foreignObject></svg></foreignObject></svg><link rel="canonical" href="/real">`, ["/real"], null],
+  ["嵌套 foreignObject 内部的 link 是 HTML", `<svg><foreignObject><svg><foreignObject><link rel="canonical" href="/nested"></foreignObject></svg></foreignObject></svg><link rel="canonical" href="/real">`, ["/nested", "/real"], null],
+  ["math 里的 svg 伪 link", `<math><svg><link rel="canonical" href="/fake"></svg></math><link rel="canonical" href="/real">`, ["/real"], null],
+  ["svg title 是 HTML 集成点", `<svg><title><link rel="canonical" href="/t"></title></svg><link rel="canonical" href="/real">`, ["/t", "/real"], null],
+  ["svg desc 是 HTML 集成点", `<svg><desc><link rel="canonical" href="/d"></desc></svg><link rel="canonical" href="/real">`, ["/d", "/real"], null],
+  ["math mtext 是文本集成点", `<math><mtext><link rel="canonical" href="/m"></mtext></math><link rel="canonical" href="/real">`, ["/m", "/real"], null],
+  ["math mi 是文本集成点", `<math><mi><link rel="canonical" href="/mi"></mi></math><link rel="canonical" href="/real">`, ["/mi", "/real"], null],
+  ["math mglyph 不是集成点", `<math><mglyph><link rel="canonical" href="/g"></mglyph></math><link rel="canonical" href="/real">`, ["/real"], null],
+  ["svg CDATA 里的伪 link", `<svg><![CDATA[> <link rel='canonical' href='/fake'> ]]></svg><link rel='canonical' href='/real'>`, ["/real"], null],
+  ["template 内外域状态隔离", `<template><svg><link rel="canonical" href="/fake"></template><svg><link rel="canonical" href="/fake2"></svg><link rel="canonical" href="/real">`, ["/real"], null],
+];
+for (const [label, htmlText, expectedCanon] of namespaceCases) {
+  assert(`命名空间：${label}`,
+    JSON.stringify(canonHrefs(htmlText)) === JSON.stringify(expectedCanon),
+    JSON.stringify({ canonical: canonHrefs(htmlText), elements: parseHtml(htmlText).elements.map((el) => el.name) }), "adversarial");
+}
+
+// 3b) 结束标签/HTML 祖先/集成点边界的浏览器实测用例（F1-F15，见 oracle fixture）。
+const stateEdgeCases = [
+  ["HTML 结束标签弹掉未闭合的外域（div）", `<div><svg></div><link rel="canonical" href="/real">`, ["/real"]],
+  ["HTML 结束标签弹掉未闭合的外域（p/select）", `<p><svg></p><select><svg></select><link rel="canonical" href="/real">`, ["/real"]],
+  ["template 里的 svg 不泄漏到 template 之后", `<template><svg></template><link rel="canonical" href="/real">`, ["/real"]],
+  ["结束标签里的 = 与引号不吞后续标签", `<div></div ="><link rel="canonical" href="/real">`, ["/real"]],
+  ["RAWTEXT 结束标签里的 = 与引号不吞后续标签", `<script>x</script ="><link rel="canonical" href="/real">`, ["/real"]],
+  ["外域里的 </p> breakout 结束", `<svg></p><link rel="canonical" href="/real">`, ["/real"]],
+  ["MathML annotation-xml encoding=text/html 是集成点", `<math><annotation-xml encoding="text/html"><link rel="canonical" href="/ax"></annotation-xml></math><link rel="canonical" href="/real">`, ["/ax", "/real"]],
+  ["MathML annotation-xml encoding=application/xhtml+xml 是集成点", `<math><annotation-xml encoding="application/xhtml+xml"><link rel="canonical" href="/ax"></annotation-xml></math>`, ["/ax"]],
+  ["默认 annotation-xml 里的 link 是 MathML 外域", `<math><annotation-xml><link rel="canonical" href="/ax"></annotation-xml></math><link rel="canonical" href="/real">`, ["/real"]],
+  ["MathML annotation-xml 上的 svg 走 HTML 规则进入 SVG", `<math><annotation-xml><svg><link rel="canonical" href="/svg"></svg></annotation-xml></math><link rel="canonical" href="/real">`, ["/real"]],
+  ["SVG g 里的 title 是集成点", `<svg><g><title><link rel="canonical" href="/g-title"></title></g></svg>`, ["/g-title"]],
+  ["foreignObject 里的 title 是 HTML RCDATA", `<svg><foreignObject><title><link rel="canonical" href="/fo-title"></title></foreignObject></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["mtext 里的 mglyph 仍按 MathML 外域", `<math><mtext><mglyph><link rel="canonical" href="/mg"></mglyph></mtext></math><link rel="canonical" href="/real">`, ["/real"]],
+  ["foreignObject 内的未闭合 HTML 子元素会忽略 </foreignObject>", `<svg><foreignObject><div><link rel="canonical" href="/a"></foreignObject><link rel="canonical" href="/b">`, ["/a", "/b"]],
+  ["foreignObject 关闭后下面的 link 仍是外域", `<svg><foreignObject></foreignObject><link rel="canonical" href="/fake"></svg><link rel="canonical" href="/real">`, ["/real"]],
+  ["breakout 只弹到 MathML 文本集成点（不弹 mi）", `<math><mi><mglyph><img src="/real-img.png"></mi><link rel="canonical" href="/x">`, []],
+  ["集成点内已有 HTML 子元素时 mglyph 按 HTML", `<math><mn><b><mglyph><link rel="canonical" href="/x">`, ["/x"]],
+  ["foreignObject 内 CDATA 吞掉伪 link", `<svg><foreignObject><![CDATA[x> <link rel="canonical" href="/fake">]]></foreignObject><link rel="canonical" href="/real">`, []],
+  ["mtext 内 CDATA 吞掉伪 img", `<math><mtext><![CDATA[><img src="/fake.png">`, []],
+  ["script 里的 <!--> 回到 data 不吞后续标签", `<script><!--><script></script><link rel="canonical" href="/fake"></script><link rel="canonical" href="/real">`, ["/fake", "/real"]],
+  ["script 里的 <!---> 回到 data", `<script><!---><script></script></script><link rel="canonical" href="/real">`, ["/real"]],
+  ["集成点内 HTML 元素后嵌套 svg：HTML 结束标签退出", `<svg><foreignObject><div><svg></div><link rel="canonical" href="/x"></foreignObject></svg><link rel="canonical" href="/real">`, ["/x", "/real"]],
+  ["集成点内 special 元素阻止错误结束标签", `<svg><foreignObject><span><div></span></foreignObject><link rel="canonical" href="/real">`, ["/real"]],
+  ["annotation-xml encoding 前后有空格不算集成点", `<math><annotation-xml encoding=" text/html "><link rel="canonical" href="/fake"></annotation-xml></math><link rel="canonical" href="/real">`, ["/real"]],
+];
+for (const [label, htmlText, expectedCanon] of stateEdgeCases) {
+  assert(`状态边界：${label}`,
+    JSON.stringify(canonHrefs(htmlText)) === JSON.stringify(expectedCanon),
+    JSON.stringify(canonHrefs(htmlText)), "adversarial");
+}
+{
+  // EOF 处的不完整开始标签不是文本；不完整结束标签 `</` 按浏览器行为输出为文本。
+  assert("状态边界：EOF 处不完整开始标签不并入可见文本",
+    !parseHtml(`text <link rel="canonical" href="/a"`).text.includes("<link")
+      && parseHtml(`text <link rel="canonical" href="/a"`).text.trim() === "text",
+    JSON.stringify(parseHtml(`text <link rel="canonical" href="/a"`).text), "boundary");
+  assert("状态边界：EOF 处的 </ 按文本输出",
+    parseHtml(`abc</`).text.includes("</"),
+    JSON.stringify(parseHtml(`abc</`).text), "boundary");
+  // 浏览器输入预处理：CR/CRLF → LF；NUL → U+FFFD。
+  const crTitle = parseHtml("<title>a\r\nb</title>").elements.find((el) => el.name === "title")?.content;
+  assert("状态边界：CRLF 归一化为 LF（title 内容）", crTitle === "a\nb", JSON.stringify(crTitle), "unit");
+  // legacy 命名实体（不带分号）：文本解码；属性里后接字母/等号时保留。
+  const legacyText = parseHtml("<p>&AMP &frac34; &amp</p>").text;
+  assert("字符引用：legacy 命名实体按浏览器规则解码", legacyText.includes("¾") && legacyText.includes("&"),
+    JSON.stringify(legacyText), "unit");
+  assert("字符引用：无分号命名实体在属性里后接字母/等号时保留",
+    decodeCharacterReferences("&ampx", true) === "&ampx" && decodeCharacterReferences("&amp", true) === "&",
+    JSON.stringify([decodeCharacterReferences("&ampx", true), decodeCharacterReferences("&amp", true)]), "unit");
+}
+{
+  // 资源属性白名单：<div src/poster/srcset> 不会触发浏览器加载，不能成为待探测资源。
+  const resourceCases = [
+    [`<div src="/missing.png" poster="/p.png" srcset="/s.png 1x"></div>`, []],
+    [`<video poster="/p.png"></video>`, ["video:poster=/p.png"]],
+    [`<img src="/i.png" srcset="/a.png 1x,/b.png 2x">`, ["img:src=/i.png", "img:srcset=/a.png", "img:srcset=/b.png"]],
+    [`<link rel="stylesheet" href="/app.css"><a href="/nav">x</a>`, ["link:href=/app.css"]],
+    [`<image src="/alias.png">`, ["img:src=/alias.png"]],
+    [`<input src="/not-image.png">`, []],
+    [`<input type="image" src="/is-image.png">`, ["input:src=/is-image.png"]],
+  ];
+  for (const [htmlText, expected] of resourceCases) {
+    const actual = resourceReferences(parseHtml(htmlText).elements).map((r) => `${r.element}:${r.attr}=${r.value}`);
+    assert(`资源属性白名单：${htmlText.slice(0, 40)}`, JSON.stringify(actual) === JSON.stringify(expected), JSON.stringify(actual), "unit");
+  }
+}
+{
+  // breakout 开始标签（img）会退回 HTML：它真的会被浏览器加载，资源提取必须包含它。
+  const breakoutHtml = `<svg><img src="/fake.svg"><link rel="canonical" href="/real"></svg>`;
+  const breakoutFacts = {
+    canonical: canonHrefs(breakoutHtml),
+    imgs: parseHtml(breakoutHtml).elements.filter((el) => el.name === "img").length,
+    resources: resourceReferences(parseHtml(breakoutHtml).elements).map((r) => r.value),
+  };
+  assert("命名空间：breakout img 退回 HTML 并进入资源引用",
+    JSON.stringify(breakoutFacts.canonical) === JSON.stringify(["/real"])
+      && breakoutFacts.imgs === 1 && breakoutFacts.resources.includes("/fake.svg"),
+    JSON.stringify(breakoutFacts), "adversarial");
+}
+{
+  // 未闭合外域不能在文档结束后造成泄漏（后续 HTML 仍要被识别）。
+  const leakHtml = `<svg><foreignObject><svg><foreignObject><link rel="canonical" href="/fake"></foreignObject></svg></foreignObject></svg><link rel="canonical" href="/real">`;
+  // 注意：嵌套 foreignObject 内部的 link 在浏览器里是 HTML 元素，所以 /fake 会被计数；
+  // 这里只验证“关闭后”的 /real 被计数，以及不会出现额外的伪元素。
+  assert("命名空间：嵌套外域关闭后恢复 HTML（集成点内部 link 按 HTML 处理）",
+    JSON.stringify(canonHrefs(leakHtml)) === JSON.stringify(["/fake", "/real"]),
+    JSON.stringify(canonHrefs(leakHtml)), "adversarial");
+}
+
+// 4) srcset：URL 可含逗号；候选由「URL + 空白 + descriptor + 逗号」切分。
+const srcsetCases = [
+  ["a.png 1x,b.png 2x", ["a.png", "b.png"]],
+  ["a.png 1x, b.png 2x", ["a.png", "b.png"]],
+  ["data:image/png;base64,AAA 1x, b.png 2x", ["data:image/png;base64,AAA", "b.png"]],
+  ["data:image/svg+xml,%3Csvg%3E 1x, b.png 2x", ["data:image/svg+xml,%3Csvg%3E", "b.png"]],
+  ["a.png", ["a.png"]],
+  ["a.png, b.png,", ["a.png", "b.png"]],
+  ["a.png 1x, b.png 2x, ", ["a.png", "b.png"]],
+  ["a.png,b.png", ["a.png,b.png"]],
+  [", , a.png 2x, ,", ["a.png"]],
+  ["a.png 100w 50h, b.png 2x", ["a.png", "b.png"]],
+  ["a.png 1.5x, b.png .5x", ["a.png", "b.png"]],
+  ["a.png 0w, b.png 2x", ["b.png"]],
+  ["a.png 50h, b.png 2x", ["b.png"]],
+  ["a.png 1x 2x, b.png 2x", ["b.png"]],
+  ["a.png 100w 1h, b.png 2x", ["a.png", "b.png"]],
+  ["a.png 1w 2x, b.png 2x", ["b.png"]],
+  ["a.png 1x 1h, b.png 2x", ["b.png"]],
+  ["a.png 1x b.png 2x", []],
+  ["a.png 2q", []],
+  ["a.png -1x", []],
+  ["a.png, 2x", ["a.png", "2x"]],
+  ["a.png 100w, 200w", ["a.png", "200w"]],
+  ["a.png,", ["a.png"]],
+  ["a.png 1.5w", []],
+  ["a.png 1.0w", []],
+  ["a.png 1.5x, b.png .5x", ["a.png", "b.png"]],
+  ["a.png 1X", []],
+  ["a.png 2W", []],
+  ["a.png 1e2x", ["a.png"]],
+  ["a.png 1E2x", ["a.png"]],
+  ["a.png 1e+2x", ["a.png"]],
+  ["a.png 1e-2x", ["a.png"]],
+  ["a.png -0x", ["a.png"]],
+  ["a.png (x, 1x), b.png", ["b.png"]],
+];
+for (const [value, expected] of srcsetCases) {
+  assert(`srcset：${JSON.stringify(value)}`,
+    JSON.stringify(parseSrcset(value)) === JSON.stringify(expected),
+    JSON.stringify(parseSrcset(value)), "unit");
+}
+
+// 5) 真实浏览器差分：31 个用例的 DOM facts 与本地 tokenizer 逐项比较。
+const oracleFixture = JSON.parse(fs.readFileSync(path.join(here, "fixtures", "html5-oracle.json"), "utf8"));
+const html5LocalFacts = (htmlText) => {
+  const parsed = parseHtml(htmlText);
+  return {
+    canonical: parsed.elements
+      .filter((el) => el.name === "link" && relTokens(el).includes("canonical"))
+      .map((el) => getAttribute(el, "href").value),
+    htmlTitles: parsed.elements.filter((el) => el.name === "title").map((el) => el.content),
+    scripts: parsed.elements.filter((el) => el.name === "script").map((el) => (el.content.length <= 200
+      ? { len: el.content.length, text: el.content }
+      : { len: el.content.length, containsLink: el.content.includes("<link") })),
+    htmlCounts: {
+      img: parsed.elements.filter((el) => el.name === "img").length,
+      base: parsed.elements.filter((el) => el.name === "base").length,
+    },
+  };
+};
+const normalizeOracleScripts = (scripts) => scripts.map((s) => (s.text !== undefined
+  ? { len: s.len, text: s.text }
+  : { len: s.len, containsLink: s.containsLink }));
+let oracleBad = 0;
+for (const oracleCase of oracleFixture.cases) {
+  const actual = html5LocalFacts(oracleCase.html);
+  const expected = {
+    canonical: oracleCase.expect.canonical,
+    htmlTitles: oracleCase.expect.htmlTitles,
+    scripts: normalizeOracleScripts(oracleCase.expect.scripts),
+    htmlCounts: oracleCase.expect.htmlCounts,
+  };
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  if (!ok) oracleBad++;
+  assert(`HTML5 浏览器 oracle：${oracleCase.id}`, ok,
+    JSON.stringify({ expected, actual, html: oracleCase.html }), "adversarial");
+}
+assert("HTML5 浏览器 oracle：fixture 用例数不少于 62 且结构完整",
+  oracleFixture.cases.length >= 62 && /Chrome|Edge|Chromium/i.test(oracleFixture._browser || "")
+    && typeof oracleFixture._provenance === "string" && oracleFixture._provenance.length > 80
+    && typeof oracleFixture._recordedAt === "string" && oracleFixture._schema === 1
+    && new Set(oracleFixture.cases.map((c) => c.id)).size === oracleFixture.cases.length
+    && oracleFixture.cases.every((c) => typeof c.id === "string" && typeof c.html === "string"
+      && typeof c.wrappedDoctype === "boolean" && c.expect
+      && Array.isArray(c.expect.canonical) && Array.isArray(c.expect.htmlTitles)
+      && Array.isArray(c.expect.scripts) && c.expect.htmlCounts
+      && Number.isInteger(c.expect.htmlCounts.img) && Number.isInteger(c.expect.htmlCounts.base)),
+  `${oracleFixture.cases.length} cases / ${oracleFixture._browser}`, "unit");
+
+// 6) 组合：四类问题同时出现时互不干扰。
+{
+  const combo = `<script><!--<script></script><link rel="canonical" href="/fake-script">--></script>`
+    + `<!DOCTYPE html PUBLIC "<link rel='canonical' href='/fake-doctype'>">`
+    + `<svg><foreignObject></svg><svg><link rel="canonical" href="/fake-svg"></svg></svg>`
+    + `<link rel="canonical" href="/real">`;
+  assert("组合：script + DOCTYPE + SVG 状态泄漏 + 伪 canonical 同时出现",
+    JSON.stringify(canonHrefs(combo)) === JSON.stringify(["/real"]),
+    JSON.stringify(canonHrefs(combo)), "adversarial");
+  const comboIntegration = `<script><!--<script>--></script><svg><title><link rel='canonical' href='/t'></title></svg><math><mtext><link rel='canonical' href='/m'></mtext></math><link rel='canonical' href='/real'>`;
+  assert("组合：script 关闭 + 集成点 HTML link + 真实 link 全部识别",
+    JSON.stringify(canonHrefs(comboIntegration)) === JSON.stringify(["/t", "/m", "/real"]),
+    JSON.stringify(canonHrefs(comboIntegration)), "adversarial");
+}
+
+// 7) 随机组合：伪 canonical 出现在各状态里不能被识别；集成点里的必须被识别。
+{
+  let comboBad = 0;
+  let comboDetail = null;
+  for (let n = 0; n < 300; n++) {
+    const real = `<link rel="canonical" href="/real-${n}">`;
+    const fake = `<link rel="canonical" href="/fake-${n}">`;
+    const hiddenContexts = [
+      `<!-- ${fake} -->`,
+      `<template>${fake}</template>`,
+      `<svg>${fake}</svg>`,
+      `<svg><svg>${fake}</svg></svg>`,
+      `<script>${fake}</script>`,
+      `<script><!--${fake}--></script>`,
+      `<script><!--<script>${fake}--></script>`,
+      `<!DOCTYPE html PUBLIC "${fake}">`,
+      `<!DOCTYPE html SYSTEM "${fake}">`,
+      `<style>${fake}</style>`,
+      `<textarea>${fake}</textarea>`,
+      `<title>${fake}</title>`,
+      `<noscript>${fake}</noscript>`,
+    ];
+    const integrationContexts = [
+      [`<svg><foreignObject>${fake}</foreignObject></svg>`, ["/fake-" + n]],
+      [`<svg><title>${fake}</title></svg>`, ["/fake-" + n]],
+      [`<svg><desc>${fake}</desc></svg>`, ["/fake-" + n]],
+      [`<math><mtext>${fake}</mtext></math>`, ["/fake-" + n]],
+      [`<math><mi>${fake}</mi></math>`, ["/fake-" + n]],
+    ];
+    const pick = n % (hiddenContexts.length + integrationContexts.length);
+    let htmlText;
+    let expected = ["/real-" + n];
+    if (pick < hiddenContexts.length) {
+      htmlText = `${hiddenContexts[pick]}${real}`;
+    } else {
+      const [context, fakeExpected] = integrationContexts[pick - hiddenContexts.length];
+      htmlText = `${context}${real}`;
+      expected = [...fakeExpected, "/real-" + n];
+    }
+    const got = canonHrefs(htmlText);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) {
+      comboBad++;
+      if (!comboDetail) comboDetail = { html: htmlText, expected, got };
+    }
+  }
+  assert("HTML5 状态随机组合：隐藏上下文与集成点 300 组", comboBad === 0,
+    JSON.stringify(comboDetail || {}), "adversarial");
+}
+
 // 确定性伪随机组合：真实标签必须识别，任意上下文里的伪标签必须不识别。
 let rngState = 0x2f6e2b1;
 const rand = () => ((rngState = (rngState * 1103515245 + 12345) >>> 0) / 0x100000000);
@@ -2363,7 +2720,7 @@ const malformedBig = "</>".repeat(5000) + "<div></div>".repeat(1000) + "<link re
 const startedAt = Date.now();
 const malformedResult = parseHtml(malformedBig);
 assert("HTML tokenizer：大量畸形/重复片段后仍能解析出真实标签且不超时",
-  malformedResult.elements.some((el) => el.name === "link" && relTokens(el).includes("canonical")) && Date.now() - startedAt < 10000,
+  malformedResult.elements.some((el) => el.name === "link" && relTokens(el).includes("canonical")) && Date.now() - startedAt < 2000,
   `ms=${Date.now() - startedAt}`, "adversarial");
 
 // ---------------------------------------------------------------- 技能结构
@@ -2392,11 +2749,21 @@ for (const r of results) layers[r.layer] = (layers[r.layer] || 0) + 1;
 const layerLine = `分层覆盖：${Object.entries(layers).map(([k, v]) => `${k}=${v}`).join("，")}`;
 const passed = results.length - failed.length;
 
+const fileSha16 = (filePath) => {
+  try { return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").slice(0, 16); } catch { return "n/a"; }
+};
+const fixturePath = path.join(here, "fixtures", "html5-oracle.json");
+const fixtureCaseCount = (() => {
+  try { return JSON.parse(fs.readFileSync(fixturePath, "utf8")).cases.length; } catch { return 0; }
+})();
+
 // 自动化维护 tests/last-run.txt：报告不再依赖人工复制终端输出，也不会出现
 // 「文档说这是最近一次结果、文件却停留在旧版本」的漂移。
+// 头部带 run-tests.mjs / oracle fixture 的 hash 与用例数，便于判断 last-run 是否过期。
 const lastRunText = [
   `# 本文件由 node tests/run-tests.mjs 自动生成，请勿手工编辑`,
   `# ${new Date().toISOString()} / node ${process.version} / ${process.platform}`,
+  `# run-tests.mjs sha256:${fileSha16(fileURLToPath(import.meta.url))} / html5-oracle.json sha256:${fileSha16(fixturePath)} (${fixtureCaseCount} cases)`,
   ...results.map((r) => {
     const detail = String(r.detail ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
     return `${r.ok ? "通过" : "失败"}  ${r.name}${detail ? ` — ${detail}` : ""}`.trimEnd();

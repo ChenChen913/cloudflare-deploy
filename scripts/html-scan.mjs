@@ -1,38 +1,81 @@
 #!/usr/bin/env node
 /**
- * html-scan.mjs — 共用的极简 HTML tokenizer（显式状态机，零依赖）。
+ * html-scan.mjs — 共用的极简 HTML tokenizer + 局部状态机（零依赖）。
  *
  * 为什么不用正则：verify-deployment.mjs 和 check-build.mjs 都需要从响应 HTML 里
- * 找「真实的元素/属性/文本」。用 `/<link[^>]*rel=canonical/` 这类正则模拟 HTML
- * 解析会反复在相邻场景出错：注释、script/style/textarea/title 里的伪标签、属性值
- * 里的 `>`、大小写、无引号值、字符引用……每补一个正则就漏掉下一类。
+ * 找「真实的 HTML 元素/属性/文本」。用 `/<link[^>]*rel=canonical/` 这类正则模拟
+ * HTML 解析会反复在相邻场景出错：注释、script/style/textarea/title 里的伪标签、
+ * 属性值里的 `>`、大小写、无引号值、字符引用、DOCTYPE 引号……每补一个正则就漏掉
+ * 下一类。
  *
  * 为什么不引入 parse5：本技能以「复制目录即可使用、`node scripts/*.mjs` 直接运行」
  * 的方式分发，仓库没有 package.json / npm install 步骤，测试也要求零安装可复现。
- * 引入运行期依赖会破坏这个分发模型，所以这里实现一个范围明确、状态受控的
- * tokenizer；它不是完整 HTML5 tree builder，但覆盖本技能需要的元素/属性/文本识别。
+ * 引入运行期依赖会破坏这个分发模型。这里实现的是**针对本技能需求**的 tokenizer：
+ * 它只输出 HTML 命名空间的开始标签、文本和资源引用，不做完整 HTML5 tree
+ * construction；但对会影响 canonical/资源/可见文本识别的状态机（script data、
+ * RCDATA/RAWTEXT、注释/DOCTYPE、SVG/MathML 外部内容、template、属性语法、字符
+ * 引用）按规范状态转换处理。
  *
  * 支持：
- *   - 开始/结束标签、自闭合写法、属性顺序、单/双引号与无引号属性值、属性值里的 ">"
- *   - 标签名 / 属性名 ASCII 大小写归一（HTML 语义）
- *   - 注释、`<!DOCTYPE>`、`<?...>`、bogus comment、HTML 中的 `<![CDATA[`（按 bogus comment 处理）
- *   - RCDATA：title / textarea（内容按文本处理，不再识别标签）
- *   - RAWTEXT：script / style / xmp / iframe / noembed / noframes / noscript
- *   - plaintext：之后全部是文本
+ *   - 开始/结束标签、自闭合、属性顺序/引号/无引号、属性值里的 ">"、重复属性
+ *   - script data 的 escaped / double-escaped 状态（`<!--<script></script>-->`）
+ *   - 注释、`<!DOCTYPE>`（public/system 标识符里的 `>` 按规范 abrupt 结束 DOCTYPE，
+ *     force-quirks；之后的文本继续按 HTML 解析，不假装引号能保护 `>`）、
+ *     `<?...>`、bogus comment、HTML 中的 `<![CDATA[`（按 bogus comment 处理）
+ *   - RCDATA：title / textarea
+ *   - RAWTEXT：style / xmp / iframe / noembed / noframes / noscript
+ *   - plaintext
  *   - template：内容属于惰性文档片段，不计入本文档的元素
- *   - SVG / MathML 外部内容：其中的 `<link>` 等按命名空间处理，不计入 HTML 元素；
- *     外域里的 `<![CDATA[` 跳到 `]]>`，`<foreignObject>` 内部恢复 HTML 解析
- *   - 数字字符引用（含缺分号情形）与常用命名字符引用（大小写敏感，C1 控制字符按 windows-1252）
+ *   - SVG / MathML 外部内容：命名空间状态栈；`foreignObject` / `desc` / `title` /
+ *     MathML 文本集成点内部的 HTML 开始标签；外域 CDATA；HTML breakout 开始标签；
+ *     外域结束后恢复 HTML
+ *   - 数字字符引用（含缺分号）与常用命名字符引用（大小写敏感、windows-1252 C1）
+ *   - srcset 候选解析（含 data: URI 里的逗号、无空格逗号、尾随逗号、畸形候选）
  *
- * 已知限制（刻意不做，需人工/DOM 级验证时另行处理）：
- *   - 不做完整 HTML5 tree construction（如隐式闭合、foster parenting）
- *   - script data 的 double-escaped 状态（`<!--<script></script>-->`）不做特殊处理
- *   - 命名实体只覆盖常用集合；URL 中出现冷门命名实体的概率极低
+ * 已知限制（刻意不做，需 DOM 级精确结论时用浏览器复核）：
+ *   - 不做完整 HTML5 tree construction（隐式闭合、foster parenting、活动格式化
+ *     元素重建、adoption agency 等）；只输出 HTML 命名空间里“序列化文本中真实
+ *     出现的”开始标签
+ *   - 外域内容用命名空间状态栈覆盖 svg/math 根、SVG 集成点、MathML 文本集成点、
+ *     annotation-xml 的 encoding 分支、breakout 标签与 HTML 祖先结束标签；但不做
+ *     完整集成点/foreign content 树构建（如 annotation-xml 内更复杂的树规则）
+ *   - 命名实体只覆盖常用集合；legacy（无分号）实体只覆盖常见子集
+ *   - DOCTYPE 只保证 token 边界正确；不暴露 force-quirks/compatMode
+ *   - 输入预处理只做 CR/CRLF→LF 与 NUL→U+FFFD，不做完整 UTF-8 解码错误替换
+ *   - textarea 内容计入本模块的“可见文本”（浏览器 innerText 口径可能不同）
+ *   - 属性重复时按“第一个生效”处理（与浏览器一致）
  */
 
 export const RAWTEXT_ELEMENTS = new Set(["script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"]);
 export const RCDATA_ELEMENTS = new Set(["title", "textarea"]);
 const FOREIGN_ROOTS = new Set(["svg", "math"]);
+// SVG 的 HTML 集成点：这些元素内部的开始标签按 HTML 规则解析。
+const SVG_INTEGRATION_POINTS = new Set(["foreignobject", "desc", "title"]);
+// MathML 文本集成点：子开始标签（除 mglyph/malignmark）按 HTML 规则解析。
+const MATHML_TEXT_INTEGRATION_POINTS = new Set(["mi", "mo", "mn", "ms", "mtext"]);
+// HTML 空元素（开始标签后立即结束，没有结束标签；用于集成点内的 HTML 子节点栈）。
+const VOID_ELEMENTS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+  "param", "source", "track", "wbr",
+]);
+// HTML 规范中的 special 元素（用于近似“any other end tag”在 special 元素处停止的规则）。
+const HTML_SPECIAL_ELEMENTS = new Set([
+  "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote",
+  "body", "br", "button", "caption", "center", "col", "colgroup", "dd", "details", "dir", "div",
+  "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset",
+  "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe", "img",
+  "input", "keygen", "li", "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed",
+  "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script", "section",
+  "select", "source", "style", "summary", "table", "tbody", "td", "template", "textarea", "tfoot",
+  "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp",
+]);
+// 外域内容里会“打破”命名空间、退回 HTML 处理的开始标签（WHATWG 规范列表）。
+const FOREIGN_BREAKOUT_TAGS = new Set([
+  "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
+  "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li",
+  "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span",
+  "strike", "strong", "sub", "sup", "table", "tt", "u", "ul", "var",
+]);
 // xmp 虽然按 RAWTEXT 解析，但浏览器会把内容当可见文本渲染。
 const VISIBLE_RAWTEXT = new Set(["xmp"]);
 
@@ -46,6 +89,17 @@ const NAMED_ENTITIES = new Map([
   ["mdash", "\u2014"], ["ndash", "\u2013"], ["lsquo", "\u2018"], ["rsquo", "\u2019"],
   ["ldquo", "\u201c"], ["rdquo", "\u201d"], ["laquo", "\u00ab"], ["raquo", "\u00bb"],
   ["middot", "\u00b7"], ["times", "\u00d7"], ["divide", "\u00f7"],
+  // URL / 文本里常见的标点与分数实体。
+  ["colon", ":"], ["semi", ";"], ["comma", ","], ["period", "."], ["sol", "/"],
+  ["quest", "?"], ["num", "#"], ["dollar", "$"], ["percnt", "%"], ["plus", "+"],
+  ["equals", "="], ["lpar", "("], ["rpar", ")"], ["ast", "*"], ["lowbar", "_"],
+  ["hyphen", "-"], ["frac12", "\u00bd"], ["frac14", "\u00bc"], ["frac34", "\u00be"],
+]);
+// HTML 允许不带分号的 legacy 命名引用（浏览器在文本里会解码；属性里后接
+// 字母数字/等号时按原文保留，见 decodeCharacterReferences）。
+const LEGACY_NAMED_ENTITIES = new Map([
+  ["amp", "&"], ["lt", "<"], ["gt", ">"], ["quot", "\""], ["nbsp", "\u00a0"],
+  ["copy", "\u00a9"], ["reg", "\u00ae"], ["times", "\u00d7"], ["divide", "\u00f7"],
 ]);
 
 // windows-1252 对 C1 控制字符（0x80-0x9F）的映射；浏览器按此替换。
@@ -85,8 +139,14 @@ export function decodeCharacterReferences(input, inAttribute = false) {
       }
       return codePointToString(code);
     }
-    // 命名实体只认带分号且大小写完全匹配的常用集合。
-    if (!semi) return whole;
+    // 命名实体只认常用集合；不带分号的 legacy 实体按浏览器规则处理。
+    if (!semi) {
+      if (inAttribute) {
+        const next = s[offset + whole.length];
+        if (next && /[a-zA-Z0-9=]/.test(next)) return whole;
+      }
+      return LEGACY_NAMED_ENTITIES.get(named) ?? whole;
+    }
     return NAMED_ENTITIES.get(named) ?? whole;
   });
 }
@@ -122,9 +182,9 @@ function parseStartTag(html, start) {
       i++;
       continue; // 游离的 "/" 是解析错误，忽略
     }
-    // 属性名：到空白、"/"、"=""、">" 为止
+    // 属性名：HTML tokenizer 在属性名前允许 "=" 作为名字的一部分（parse error 但保留）。
     let attrName = "";
-    if (html[i] === "=") { attrName = "="; i++; } // 属性名以 "=" 开头：parse error，但浏览器保留
+    if (html[i] === "=") { attrName = "="; i++; }
     while (i < n && !isWs(html[i]) && html[i] !== "/" && html[i] !== "=" && html[i] !== ">") { attrName += html[i]; i++; }
     if (!attrName) { i++; continue; }
     attrName = lower(attrName);
@@ -165,26 +225,49 @@ function findEndTag(html, from, name) {
 }
 
 /**
- * 跳过标签到 ">" 之后。只有属性值位置（前一个非空白字符是 "="）的引号才保护 ">"；
- * 结束标签里游离的引号（如 `</a ">`）不会吞掉后面的真实标签。
+ * 跳过标签到 ">" 之后。按 tokenizer 的属性状态处理引号：只有「属性名之后、
+ * 等号之后」的引号才进入属性值并保护 ">"；结束标签里游离的 `=` / 引号只是
+ * 属性名或解析错误字符，不会吞掉后面的真实标签。
  */
 function skipTagToGt(html, from) {
+  let state = "beforeAttrName"; // beforeAttrName | attrName | afterAttrName | beforeValue | quoted | unquoted
   let quote = null;
-  let lastNonWs = "";
   for (let i = from; i < html.length; i++) {
     const ch = html[i];
-    if (quote) {
-      if (ch === quote) quote = null;
-      lastNonWs = ch;
+    if (state === "quoted") {
+      if (ch === quote) { state = "beforeAttrName"; quote = null; }
       continue;
     }
-    if ((ch === "\"" || ch === "'") && lastNonWs === "=") {
-      quote = ch;
-      lastNonWs = ch;
+    if (state === "beforeValue") {
+      if (isWs(ch)) continue;
+      if (ch === ">") return i + 1;
+      if (ch === "\"" || ch === "'") { state = "quoted"; quote = ch; continue; }
+      state = "unquoted";
       continue;
     }
+    if (state === "unquoted") {
+      if (ch === ">") return i + 1;
+      if (isWs(ch)) state = "beforeAttrName";
+      continue;
+    }
+    if (state === "beforeAttrName") {
+      if (isWs(ch)) continue;
+      if (ch === ">") return i + 1;
+      // before-attribute-name 里的 "=" 是属性名首字符，不是赋值。
+      state = "attrName";
+      continue;
+    }
+    if (state === "attrName") {
+      if (ch === ">") return i + 1;
+      if (isWs(ch)) { state = "afterAttrName"; continue; }
+      if (ch === "=") { state = "beforeValue"; continue; }
+      continue;
+    }
+    // afterAttrName
+    if (isWs(ch)) continue;
     if (ch === ">") return i + 1;
-    if (!isWs(ch)) lastNonWs = ch;
+    if (ch === "=") { state = "beforeValue"; continue; }
+    state = "attrName";
   }
   return html.length;
 }
@@ -199,31 +282,267 @@ function parseEndTag(html, start) {
   return { name: lower(name), next: skipTagToGt(html, i) };
 }
 
+/** 从已知的结束标签起点返回标签之后的位置。 */
+function afterEndTag(html, start) {
+  const endTag = parseEndTag(html, start);
+  return endTag ? endTag.next : skipTagToGt(html, start + 2);
+}
+
+/** 判断从 pos 开始是否是 `</script` 且后面是合法的结束标签分隔符。 */
+function isScriptEndTagAt(html, pos) {
+  return /^<\/script(?=[\t\n\f\r />])/i.test(html.slice(pos, pos + 9));
+}
+
 /**
- * 扫描 HTML，返回真实元素（文档顺序）和可见文本。
+ * 扫描 script data 直到真正的 `</script>`。
+ *
+ * 这不是「找第一个 </script>」：HTML 的 script data 有 escaped / double-escaped
+ * 子状态。典型 `<!--<script></script>-->` 里的第一个 `</script>` 只让状态从
+ * double-escaped 回到 escaped，**不关闭** script；只有 script data / escaped
+ * 状态下的 `</script>` 才关闭。
+ *
+ * @param {string} html 完整输入
+ * @param {number} from script 开始标签之后的位置
+ * @returns {{contentEnd:number, next:number}} contentEnd 是 `</script` 的起始位置
+ *   （未闭合时为 html.length），next 是结束标签之后（未闭合为 html.length）
+ */
+export function scanScriptData(html, from) {
+  const n = html.length;
+  let i = from;
+  let state = "data"; // data | escaped | double
+  while (i < n) {
+    if (state === "data") {
+      // `<!--` 进入 script data escaped 前的 dash-dash 状态；紧跟的 `>`（或再若干
+      // `-` 后跟 `>`）会退回 script data，例如 `<!-->` / `<!--->`。
+      if (html.startsWith("<!--", i)) {
+        let j = i + 4;
+        while (j < n && html[j] === "-") j++;
+        if (j < n && html[j] === ">") { i = j + 1; state = "data"; continue; }
+        i = j;
+        state = "escaped";
+        continue;
+      }
+      if (html[i] === "<" && isScriptEndTagAt(html, i)) {
+        return { contentEnd: i, next: afterEndTag(html, i) };
+      }
+      i++;
+      continue;
+    }
+    if (state === "escaped") {
+      if (html[i] === "<") {
+        // escaped 状态下的 `</script>` 仍然关闭 script。
+        if (isScriptEndTagAt(html, i)) {
+          return { contentEnd: i, next: afterEndTag(html, i) };
+        }
+        // `<!--...` 之后的 `<script ...>` 进入 double-escaped；只对 ASCII 字母
+        // 起头的标签名做 buffer 判断，其他情况保持 escaped。
+        if (i + 1 < n && TAG_OPEN_ALPHA.test(html[i + 1])) {
+          let j = i + 1;
+          while (j < n && TAG_OPEN_ALPHA.test(html[j])) j++;
+          const name = html.slice(i + 1, j);
+          if (j < n && /[\t\n\f\r \/>]/.test(html[j]) && lower(name) === "script") {
+            i = j + 1;
+            state = "double";
+            continue;
+          }
+          // 不匹配的标签名：继续按 escaped 扫描（`<` 之后的字符照常是文本）。
+        }
+        i++;
+        continue;
+      }
+      // escaped dash dash 的 `>` 回到 data（即 `-->` 结束转义注释）。
+      if (html.startsWith("-->", i)) { i += 3; state = "data"; continue; }
+      i++;
+      continue;
+    }
+    // state === "double"
+    if (html[i] === "<" && html[i + 1] === "/" && i + 2 < n && TAG_OPEN_ALPHA.test(html[i + 2])) {
+      let j = i + 2;
+      while (j < n && TAG_OPEN_ALPHA.test(html[j])) j++;
+      const name = html.slice(i + 2, j);
+      if (j < n && /[\t\n\f\r \/>]/.test(html[j]) && lower(name) === "script") {
+        // double-escaped 里的 `</script>` 只回到 escaped，不关闭元素。
+        i = j + 1;
+        state = "escaped";
+        continue;
+      }
+    }
+    // double escaped dash dash 的 `>` 与 escaped 一样回到 script data 状态。
+    if (html.startsWith("-->", i)) { i += 3; state = "data"; continue; }
+    i++;
+  }
+  return { contentEnd: n, next: n };
+}
+
+/**
+ * 跳过 DOCTYPE 到结束的 ">"。
+ *
+ * 按 WHATWG tokenizer 的 DOCTYPE 状态机：`public` / `system` 标识符虽然用引号
+ * 包围，但标识符状态遇到 `>` 会 **abruptly** 结束 DOCTYPE 并置 force-quirks，
+ * 引号并不会保护 `>`。因此这里与浏览器一致：从 `<!DOCTYPE` 之后找第一个 `>`
+ * （标识符里的 `>` 会让 DOCTYPE 提前结束，其后的文本按 HTML 继续解析）。
+ * 这与“剔除注释/伪标签”的目标一致：既不把伪标签当 DOCTYPE 内容吞掉，也不
+ * 假装引号能保护 `>` 而偏离浏览器实际解析。
+ */
+function skipDoctype(html, start) {
+  const end = html.indexOf(">", start + 2);
+  return end === -1 ? html.length : end + 1;
+}
+
+/**
+ * 校验 srcset candidate 的 descriptor 列表。
+ * 规则（WHATWG）：
+ *   - 没有 descriptor 合法；
+ *   - `Nw` / `Nx` / `Nh`（N 为非负数），同一种 descriptor 只能出现一次；
+ *   - `h` 只能和 `w` 一起出现；`w` / `h` 必须大于 0。
+ */
+function validSrcsetDescriptors(tokens) {
+  if (!tokens.length) return true;
+  let hasWidth = false;
+  let hasHeight = false;
+  let hasDensity = false;
+  for (const token of tokens) {
+    // w/h 必须是非负整数且单位小写（`1.5w`/`1.0w`/`1X` 都是非法 descriptor）。
+    let m = /^([0-9]+)([wh])$/.exec(token);
+    if (m) {
+      const value = Number(m[1]);
+      if (!Number.isFinite(value)) return false;
+      if (m[2] === "w") {
+        if (hasWidth || value <= 0) return false;
+        hasWidth = true;
+      } else {
+        if (hasHeight || value <= 0) return false;
+        hasHeight = true;
+      }
+      continue;
+    }
+    // x 是 valid floating-point number（支持指数/`.5`/`-0`；负密度仅 `-0` 算 0 合法）。
+    m = /^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(x)$/.exec(token);
+    if (!m) return false;
+    const density = Number(m[1]);
+    if (!Number.isFinite(density) || density < 0 || hasDensity) return false;
+    hasDensity = true;
+  }
+  if (hasHeight && !hasWidth) return false;
+  if (hasWidth && hasDensity) return false; // width 与 density 互斥
+  return true;
+}
+
+/**
+ * 解析 srcset 属性，返回候选 URL 列表（按出现顺序）。
+ *
+ * 依据 WHATWG HTML 的 srcset 解析算法（简化 descriptor 校验，但保留 URL/逗号
+ * 边界语义）：
+ *   - URL 是「直到空白」的一串字符，URL 里可以包含逗号（data: URI、文件名）；
+ *   - URL 若以逗号结尾，去掉尾随逗号，该候选没有 descriptor；
+ *   - 否则跳过空白，读取 descriptor 直到逗号；
+ *   - `a.png 1x,b.png 2x` 与 `a.png 1x, b.png 2x` 都得到两个候选；
+ *   - 尾随逗号、空候选、畸形或重复 descriptor 的候选不产生 URL。
+ *
+ * @param {string} value
+ * @returns {string[]}
+ */
+export function parseSrcset(value) {
+  const s = String(value ?? "");
+  const n = s.length;
+  let i = 0;
+  const out = [];
+  while (i < n) {
+    while (i < n && (isWs(s[i]) || s[i] === ",")) i++;
+    if (i >= n) break;
+    // URL：一直取到空白；HTML 允许 URL 本身含逗号。
+    const urlStart = i;
+    while (i < n && !isWs(s[i])) i++;
+    let url = s.slice(urlStart, i);
+    if (!url) break;
+    // URL 以逗号结尾：去掉尾随逗号，没有 descriptor。
+    const trimmedUrl = url.replace(/,+$/, "");
+    if (trimmedUrl !== url) {
+      if (trimmedUrl) out.push(trimmedUrl);
+      continue;
+    }
+    // descriptor tokenizer：空白结束一个 descriptor；逗号结束候选；`(`...`)` 里的
+    // 空白/逗号属于同一个 descriptor（通常随后被判非法而丢弃整个候选）。
+    const descriptors = [];
+    let token = "";
+    let inParens = false;
+    while (i < n) {
+      const dch = s[i];
+      if (inParens) {
+        token += dch;
+        if (dch === ")") inParens = false;
+        i++;
+        continue;
+      }
+      if (isWs(dch)) {
+        if (token) { descriptors.push(token); token = ""; }
+        i++;
+        continue;
+      }
+      if (dch === ",") {
+        if (token) { descriptors.push(token); token = ""; }
+        i++;
+        break;
+      }
+      if (dch === "(") { token += "("; inParens = true; i++; continue; }
+      token += dch;
+      i++;
+    }
+    if (token) descriptors.push(token);
+    if (validSrcsetDescriptors(descriptors)) out.push(url);
+  }
+  return out;
+}
+
+/** 当前是否处于外域内容（非集成点）。 */
+function isForeignStartBreakout(tag) {
+  if (FOREIGN_BREAKOUT_TAGS.has(tag.name)) return true;
+  if (tag.name === "font") {
+    return tag.attrs.some((a) => a.name === "color" || a.name === "face" || a.name === "size");
+  }
+  return false;
+}
+
+/**
+ * 扫描 HTML，返回 HTML 命名空间的真实元素（文档顺序）和文本。
  *
  * 返回：
- *   elements[]  开始标签，按文档顺序；template 内容不计入
+ *   elements[]  开始标签，按文档顺序；template 内容与 SVG/MathML 元素不计入
  *     { name, attrs: [{name, value}], selfClosing, raw, content? }
- *     content 仅 RCDATA（title/textarea）元素有：解码后的文本内容
- *   text        可见文本（不含注释、script/style 等 RAWTEXT、template 内容；含 title/textarea）
+ *     content 仅 RCDATA（title/textarea）与 script 元素有：解码后的文本内容
+ *   text        可见文本（不含注释、RAWTEXT（xmp 除外）、template、外域内容、
+ *               title；含 textarea 与普通文本）
  *
  * @param {string} input
  * @returns {{elements: object[], text: string}}
  */
 export function parseHtml(input) {
-  // HTML 输入预处理：NUL 替换为 U+FFFD（与浏览器一致），避免出现在文件路径里。
-  const html = String(input ?? "").replace(/\0/g, "\uFFFD");
+  // HTML 输入预处理：CRLF/CR 归一化为 LF，NUL 替换为 U+FFFD（与浏览器一致）。
+  const html = String(input ?? "").replace(/\r\n?/g, "\n").replace(/\0/g, "\uFFFD");
   const n = html.length;
   const elements = [];
   const textParts = [];
   let textBuf = "";
   let i = 0;
   let templateDepth = 0;
-  // SVG / MathML 外部内容：其中的元素不是 HTML 元素；foreignObject 内部恢复 HTML。
-  let foreignDepth = 0;
-  let foreignObjectDepth = 0;
-  const inForeign = () => foreignDepth > 0 && foreignObjectDepth === 0;
+  // 外域命名空间状态栈。frame: {name, ns, integration, kind, textVisible, htmlStack, annotationXml}
+  // 用显式栈而不是 depth 计数器：嵌套 svg / foreignObject / MathML 混合时，
+  // 退出顺序和“退到哪一层”由栈精确表达，不会出现计数器错配导致状态泄漏。
+  let foreign = [];
+  // HTML 上下文里已开始但未结束的元素名（仅用于“外域结束标签碰到 HTML 祖先”时
+  // 该退到哪一层；不用于构建完整 DOM）。template 内容单独隔离，不参与。
+  let htmlOpenStack = [];
+  const templateForeignStack = [];
+  const templateHtmlStack = [];
+  const currentForeign = () => (foreign.length ? foreign[foreign.length - 1] : null);
+  const inForeignContent = () => {
+    const frame = currentForeign();
+    return Boolean(frame) && !frame.integration;
+  };
+  const inIntegrationContent = () => {
+    const frame = currentForeign();
+    return Boolean(frame) && Boolean(frame.integration);
+  };
 
   const pushText = (raw) => {
     const decoded = decodeCharacterReferences(raw);
@@ -236,34 +555,109 @@ export function parseHtml(input) {
   };
   const inTemplate = () => templateDepth > 0;
 
+  // 集成点内的 HTML 子元素栈：只有当前 frame 是集成点时才跟踪，
+  // 这样 `</foreignObject>` 在 HTML 子元素未闭合时会被忽略（与浏览器一致）。
+  const trackHtmlChildStart = (tag) => {
+    if (inTemplate()) return;
+    const frame = currentForeign();
+    if (!frame || !frame.integration) {
+      // 普通 HTML 元素：记入全局栈，供外域结束标签找到 HTML 祖先。
+      if (!VOID_ELEMENTS.has(tag.name) && !tag.selfClosing && tag.name !== "template") {
+        htmlOpenStack.push(tag.name);
+      }
+      return;
+    }
+    if (VOID_ELEMENTS.has(tag.name) || tag.selfClosing || tag.name === "template") return;
+    frame.htmlStack.push(tag.name);
+  };
+  // 返回 true 表示该结束标签由集成点内的 HTML 子元素栈消费（含“应忽略”）。
+  // 按 HTML “any other end tag” 近似：从栈顶向下，遇到 special 元素且名字不匹配则
+  // 忽略（不能把 special 元素及其下面的节点一起弹掉）。
+  const applyHtmlEndRule = (stack, name) => {
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      if (top === name) { stack.length -= 1; return true; }
+      if (HTML_SPECIAL_ELEMENTS.has(top)) return true; // ignore
+      stack.pop();
+    }
+    return true;
+  };
+  const handleIntegrationHtmlEnd = (name) => {
+    const top = currentForeign();
+    if (top && top.integration && top.htmlStack.length) {
+      applyHtmlEndRule(top.htmlStack, name);
+      return true;
+    }
+    // 集成点上方可能又嵌套了 svg/math：在更深的集成点帧里找 HTML 子元素。
+    for (let k = foreign.length - 1; k >= 0; k--) {
+      const frame = foreign[k];
+      if (!frame.integration || frame.htmlStack.length === 0) continue;
+      const stackBefore = frame.htmlStack.slice();
+      applyHtmlEndRule(frame.htmlStack, name);
+      // 只有真的匹配/消费了 HTML 元素才弹掉它上面的外域帧；special 忽略时保留。
+      const changed = frame.htmlStack.length !== stackBefore.length;
+      if (changed && k + 1 < foreign.length) foreign.length = k + 1;
+      return true;
+    }
+    return false;
+  };
+  const popForeignToHtmlContext = () => {
+    // 外域 breakout/结束标签只弹到最近的 HTML integration point 或 HTML 祖先，
+    // 不能一次清空整个外域栈（否则 `<math><mi><mglyph><img>` 会把 mi 也弹掉）。
+    while (foreign.length && !currentForeign().integration) foreign.pop();
+  };
+  const popHtmlAncestor = (name) => {
+    const idx = htmlOpenStack.lastIndexOf(name);
+    if (idx < 0) return false;
+    htmlOpenStack.length = idx;
+    return true;
+  };
+
   while (i < n) {
     const ch = html[i];
     if (ch !== "<") {
-      // 外部命名空间（SVG/MathML）里的文本不计入 HTML 可见文本。
-      if (!inForeign()) textBuf += ch;
+      // 外域内容里的文本不计入 HTML 可见文本；集成点按 frame.textVisible 决定。
+      const frame = currentForeign();
+      const textVisible = !frame ? true : !frame.integration ? false : Boolean(frame.textVisible);
+      if (textVisible) textBuf += ch;
       i++;
       continue;
     }
 
     const next = html[i + 1];
+    if (next === undefined) {
+      if (!inForeignContent()) textBuf += ch;
+      i++;
+      continue;
+    }
 
-    // SVG/MathML 里的 CDATA 一直读到 "]]>"（不是 bogus comment）。
-    if (inForeign() && html.startsWith("<![CDATA[", i)) {
+    // 外域里的 CDATA 一直读到 "]]>"（不是 bogus comment）。文本 tokenizer 的
+    // CDATA 判定取决于 adjusted current node 是否在 HTML 命名空间：集成点元素
+    // 本身是外域元素（CDATA 识别），但集成点内已有 HTML 子元素时当前节点是 HTML，
+    // 此时 `<![CDATA[` 按 bogus comment 处理。
+    const currentFrameForCdata = currentForeign();
+    const cdataAllowed = Boolean(currentFrameForCdata)
+      && (!currentFrameForCdata.integration || currentFrameForCdata.htmlStack.length === 0);
+    if (cdataAllowed && html.startsWith("<![CDATA[", i)) {
       const end = html.indexOf("]]>", i + 9);
       i = end === -1 ? n : end + 3;
       continue;
     }
 
-    // 注释 / DOCTYPE / bogus comment / CDATA（HTML 中按 bogus comment 处理）
+    // 注释 / DOCTYPE / bogus comment
     if (next === "!") {
       if (html.startsWith("<!--", i)) {
         // `<!-->` 是 abrupt closing of empty comment；`--!>` 也是合法结束。
-        // 从 i+3 开始找：`<!--->` 的结束序列是 opener 的最后一个 "-" + "->"。
         if (html[i + 4] === ">") { i += 5; continue; }
         const close = /--!?>/.exec(html.slice(i + 3));
         i = close ? i + 3 + close.index + close[0].length : n;
         continue;
       }
+      if (/^<!doctype(?=[\t\n\f\r >])/i.test(html.slice(i, i + 10))) {
+        i = skipDoctype(html, i);
+        continue;
+      }
+      // 其他 `<!...>`（含 HTML 里的 `<![CDATA[`）按 bogus comment 处理到第一个 ">"。
       const end = html.indexOf(">", i + 2);
       i = end === -1 ? n : end + 1;
       continue;
@@ -279,55 +673,170 @@ export function parseHtml(input) {
       flushText();
       const endTag = parseEndTag(html, i);
       if (!endTag) {
-        // "</" 后不是标签名：按 bogus comment 处理到下一个 ">"
+        // `</` 后面直接 EOF：按浏览器行为输出 "<" "/" 两个字符；否则按 bogus comment。
+        if (i + 2 >= n) {
+          if (!inForeignContent()) textBuf += html.slice(i);
+          i = n;
+          break;
+        }
         const end = html.indexOf(">", i + 2);
         i = end === -1 ? n : end + 1;
         continue;
       }
-      if (inForeign()) {
-        // 外部命名空间的结束标签：维护深度，不参与 HTML 元素判定。
-        if (endTag.name === "foreignobject" && foreignObjectDepth > 0) foreignObjectDepth--;
-        else if (FOREIGN_ROOTS.has(endTag.name) && foreignDepth > 0) foreignDepth--;
-        i = endTag.next;
-        continue;
-      }
-      if (foreignDepth > 0 && endTag.name === "foreignobject" && foreignObjectDepth > 0) {
-        foreignObjectDepth--;
-        i = endTag.next;
-        continue;
-      }
-      if (endTag.name === "template" && templateDepth > 0) templateDepth--;
       i = endTag.next;
+
+      // 1) 集成点里未闭合的 HTML 子元素：结束标签先按 HTML 规则处理；
+      //    `</foreignObject>` 等在外域子元素未闭合时会被浏览器忽略，不能直接弹栈。
+      const topAtEnd = currentForeign();
+      if (topAtEnd && topAtEnd.integration && topAtEnd.htmlStack.length > 0) {
+        handleIntegrationHtmlEnd(endTag.name);
+        if (endTag.name === "template" && templateDepth > 0) {
+          templateDepth--;
+          foreign = templateForeignStack.pop() || [];
+          htmlOpenStack = templateHtmlStack.pop() || [];
+        }
+        continue;
+      }
+
+      // 2) 外域结束标签：从栈顶向下找同名 frame，找到就弹到它。
+      let matched = -1;
+      for (let k = foreign.length - 1; k >= 0; k--) {
+        if (foreign[k].name === endTag.name) { matched = k; break; }
+      }
+      if (matched >= 0) {
+        foreign.length = matched;
+        if (endTag.name === "template" && templateDepth > 0) {
+          templateDepth--;
+          foreign = templateForeignStack.pop() || [];
+          htmlOpenStack = templateHtmlStack.pop() || [];
+        }
+        continue;
+      }
+
+      // 2b) 集成点上方又嵌套了 svg/math 时，结束标签可能匹配更深的 HTML 子元素
+      //     （`<svg><foreignObject><div><svg></div>`）。匹配到才弹掉上方的外域帧。
+      if (handleIntegrationHtmlEnd(endTag.name)) continue;
+
+      // 3) 没有匹配的外域 frame：如果这个结束标签匹配 HTML 祖先元素，
+      //    浏览器会退回到 HTML 规则并弹掉外域内容（例如 `<div><svg></div>`）。
+      if (foreign.length > 0 && popHtmlAncestor(endTag.name)) {
+        foreign = [];
+        continue;
+      }
+
+      // `</p>` / `</br>` 在外域内容里是 breakout 结束标签：退回 HTML 上下文。
+      if (foreign.length > 0 && (endTag.name === "p" || endTag.name === "br")) {
+        popForeignToHtmlContext();
+        continue;
+      }
+
+      if (endTag.name === "template" && templateDepth > 0) {
+        templateDepth--;
+        foreign = templateForeignStack.pop() || [];
+        htmlOpenStack = templateHtmlStack.pop() || [];
+        continue;
+      }
+      // 4) 普通 HTML 结束标签：只维护 HTML 祖先栈，弹到匹配元素。
+      popHtmlAncestor(endTag.name);
       continue;
     }
 
     // 开始标签
     if (next !== undefined && TAG_OPEN_ALPHA.test(next)) {
       flushText();
-      const wasForeign = inForeign();
       const parsed = parseStartTag(html, i);
       if (!parsed) {
-        // 不完整的标签：按文本吃掉剩余内容，不产生元素（安全默认）
-        textBuf += html.slice(i);
+        // EOF 在不完整开始标签里：该标签 token 不会被浏览器发出，标签内容也不是文本。
         i = n;
         break;
       }
       const tag = parsed.tag;
       i = parsed.next;
-      if (FOREIGN_ROOTS.has(tag.name)) {
-        // SVG/MathML 根：进入外部命名空间；它本身不是 HTML 元素（但保留以便调试/定位）。
-        if (!tag.selfClosing) foreignDepth++;
-        if (!inTemplate() && !wasForeign) elements.push(tag);
+      const topBefore = currentForeign();
+      // MathML 文本集成点里，mglyph/malignmark 仍按 MathML 外域元素处理；
+      // 但当前节点已是集成点内的 HTML 子元素时（htmlStack 非空），token 走 HTML 规则。
+      const mathTextForeign = Boolean(topBefore && topBefore.integration && topBefore.kind === "math-text"
+        && topBefore.htmlStack.length === 0 && (tag.name === "mglyph" || tag.name === "malignmark"));
+      // MathML annotation-xml 上的 <svg> 走特殊派发：按 HTML 规则插入真正的 SVG 元素。
+      const annotationSvg = Boolean(topBefore && topBefore.annotationXml && tag.name === "svg" && !tag.selfClosing);
+      const wasForeign = inForeignContent() && !mathTextForeign && !annotationSvg;
+
+      if (mathTextForeign) {
+        if (!tag.selfClosing) {
+          foreign.push({
+            name: tag.name, ns: topBefore.ns, integration: false, kind: null,
+            textVisible: false, htmlStack: [],
+          });
+        }
         continue;
       }
+
       if (wasForeign) {
-        // 外域内的元素（link/title 等）不参与 HTML 判定；foreignObject 恢复 HTML 解析。
-        if (tag.name === "foreignobject" && !tag.selfClosing) foreignObjectDepth++;
+        if (isForeignStartBreakout(tag)) {
+          // HTML breakout 开始标签：只弹到最近的 HTML integration point/HTML 祖先，
+          // 再按 HTML 规则处理这个标签（不能把 integration point 本身弹掉）。
+          popForeignToHtmlContext();
+          // fall through 到下面的 HTML 处理
+        } else {
+          // 外域开始标签：只维护命名空间栈，不产生 HTML 元素。
+          if (!tag.selfClosing) {
+            const frame = currentForeign();
+            const ns = frame ? frame.ns : "svg";
+            if (FOREIGN_ROOTS.has(tag.name)) {
+              foreign.push({ name: tag.name, ns, integration: false, kind: null, textVisible: false, htmlStack: [] });
+            } else if (frame && frame.ns === "svg" && SVG_INTEGRATION_POINTS.has(tag.name)) {
+              // foreignObject 内的文本是 HTML 文本；desc/title 的文本不渲染。
+              foreign.push({
+                name: tag.name, ns: "svg", integration: true, kind: "html-integration",
+                textVisible: tag.name === "foreignobject", htmlStack: [],
+              });
+            } else if (frame && frame.ns === "math" && MATHML_TEXT_INTEGRATION_POINTS.has(tag.name)) {
+              foreign.push({
+                name: tag.name, ns: "math", integration: true, kind: "math-text",
+                textVisible: true, htmlStack: [],
+              });
+            } else if (frame && frame.ns === "math" && tag.name === "annotation-xml") {
+              // annotation-xml 只有 encoding 是 text/html 或 application/xhtml+xml 时
+              // 才是 HTML integration point；否则是普通 MathML 外域元素。
+              const encoding = lower(getAttribute(tag, "encoding").value || "");
+              const htmlChildren = encoding === "text/html" || encoding === "application/xhtml+xml";
+              foreign.push({
+                name: tag.name, ns: "math", integration: htmlChildren, kind: "html-integration",
+                textVisible: false, htmlStack: [], annotationXml: !htmlChildren,
+              });
+            } else {
+              foreign.push({
+                name: tag.name, ns, integration: false, kind: null,
+                textVisible: false, htmlStack: [],
+              });
+            }
+          }
+          continue;
+        }
+      }
+
+      // HTML 上下文（含集成点内部）：`<image>` 是 `<img>` 的历史别名。
+      if (!wasForeign && tag.name === "image") tag.name = "img";
+
+      // HTML 上下文（含集成点内部）：`<svg>` / `<math>` 进入外域命名空间。
+      if (!wasForeign && FOREIGN_ROOTS.has(tag.name)) {
+        if (!tag.selfClosing) {
+          foreign.push({
+            name: tag.name, ns: tag.name === "math" ? "math" : "svg", integration: false,
+            kind: null, textVisible: false, htmlStack: [],
+          });
+        }
         continue;
       }
+
       if (tag.name === "template") {
-        // template 元素本身属于文档；它的内容不属于
+        // template 元素本身属于文档；它的内容不属于。外域/HTML 状态随 template 隔离，
+        // 防止 template 内未闭合的 svg 泄漏到 template 之后。
         if (!inTemplate()) elements.push(tag);
+        templateForeignStack.push(foreign);
+        templateHtmlStack.push(htmlOpenStack);
+        foreign = [];
+        htmlOpenStack = [];
         templateDepth++;
         continue;
       }
@@ -338,13 +847,19 @@ export function parseHtml(input) {
         i = n;
         break;
       }
+      if (tag.name === "script") {
+        const script = scanScriptData(html, i);
+        tag.content = html.slice(i, script.contentEnd);
+        i = script.next;
+        continue;
+      }
       if (RAWTEXT_ELEMENTS.has(tag.name)) {
         const closeAt = findEndTag(html, i, tag.name);
         const contentEnd = closeAt === -1 ? n : closeAt;
         tag.content = html.slice(i, contentEnd);
         // xmp 虽然是 RAWTEXT，但浏览器会把内容按文本渲染；其余 RAWTEXT 不进可见文本。
         if (!inTemplate() && VISIBLE_RAWTEXT.has(tag.name) && tag.content) textParts.push(tag.content);
-        i = closeAt === -1 ? n : skipTagToGt(html, closeAt);
+        i = closeAt === -1 ? n : afterEndTag(html, closeAt);
         continue;
       }
       if (RCDATA_ELEMENTS.has(tag.name)) {
@@ -353,9 +868,11 @@ export function parseHtml(input) {
         tag.content = decodeCharacterReferences(html.slice(i, contentEnd));
         // title 是文档标题，不是「可见文本」；textarea 的内容则属于可见文本。
         if (!inTemplate() && tag.content && tag.name !== "title") textParts.push(tag.content);
-        i = closeAt === -1 ? n : skipTagToGt(html, closeAt);
+        i = closeAt === -1 ? n : afterEndTag(html, closeAt);
         continue;
       }
+      // 普通 HTML 元素：记录到 HTML 祖先/集成点 HTML 子元素栈。
+      trackHtmlChildStart(tag);
       continue;
     }
 
@@ -389,14 +906,21 @@ export function relTokens(element) {
  * 避免两个脚本各自维护一套「哪些属性算资源」的规则而给出相反结论。
  *
  * 规则（保守、与浏览器资源加载语义对齐）：
- *   - `src` / `poster`：任意元素
- *   - `srcset`：拆出每个候选 URL（逗号分隔、首个 token 是 URL）
+ *   - `src`：只有会加载资源的元素（img/script/iframe/embed/video/audio/source/
+ *     track/input）；`<div src>` 这类非资源属性不探测
+ *   - `poster`：仅 `<video>`
+ *   - `srcset`：仅 `<img>` / `<source>`，按 WHATWG srcset 解析算法拆出候选 URL
  *   - `data`：仅 `<object>`
  *   - `href`：仅 `<link>`，且排除 rel token 含 canonical 的 link（canonical 是文档关系，不是资源）
  * 不包含 `<a href>`（导航链接不是子资源）、`<base href>`（解析基准）和 `data:` 等内联内容。
  *
  * @returns {{element:string, attr:string, value:string}[]} 按文档与属性顺序
  */
+const SRC_RESOURCE_ELEMENTS = new Set([
+  "img", "script", "iframe", "embed", "video", "audio", "source", "track", "input",
+]);
+const SRCSET_RESOURCE_ELEMENTS = new Set(["img", "source"]);
+
 export function resourceReferences(elements) {
   const out = [];
   const push = (el, attr, value) => {
@@ -405,13 +929,15 @@ export function resourceReferences(elements) {
   };
   for (const el of elements) {
     for (const attr of el.attrs) {
-      if (attr.name === "src" || attr.name === "poster") { push(el, attr.name, attr.value); continue; }
-      if (attr.name === "srcset") {
-        // srcset 候选以「逗号 + 空白」分隔；URL 本身可以含逗号（如 data: URI）。
-        for (const candidate of String(attr.value).split(/,(?=\s)/)) {
-          const url = candidate.trim().split(/\s+/)[0].replace(/,$/, "");
-          if (url) push(el, "srcset", url);
-        }
+      if (attr.name === "src") {
+        const inputIsImage = el.name === "input"
+          && String(getAttribute(el, "type").value || "").trim().toLowerCase() === "image";
+        if (SRC_RESOURCE_ELEMENTS.has(el.name) && (el.name !== "input" || inputIsImage)) push(el, attr.name, attr.value);
+        continue;
+      }
+      if (attr.name === "poster" && el.name === "video") { push(el, attr.name, attr.value); continue; }
+      if (attr.name === "srcset" && SRCSET_RESOURCE_ELEMENTS.has(el.name)) {
+        for (const url of parseSrcset(attr.value)) push(el, "srcset", url);
         continue;
       }
       if (attr.name === "data" && el.name === "object") { push(el, attr.name, attr.value); continue; }

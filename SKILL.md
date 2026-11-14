@@ -255,7 +255,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 **HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON 且（给了 `--expect-json` 时）符合期望的 JSON 子集；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。CORS 预检 `notChecked` 里的项同样要写成「未验证」，不要写成「已通过」。
 
-同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。资源属性规则与 check-build 共用：只取真实元素上的 `src` / `srcset` / `poster` / `<object data>` / `<link href>`；`srcset` 按「逗号 + 空白」拆候选；`<a href>` 导航链接、canonical、`<base>` 不算资源；相对地址按 `<base href>`，没有 base 时按文档 URL（不强行补尾斜杠），根路径有同源重定向时按最终页面 URL。结果里的 `probed` 保留每个资源的原始地址、`chain` 重定向链、`finalUrl` / `finalStatus` 和 `crossHost`；`finalUrl` 只表示**最后真正请求过**的地址，没跟随的目标在 `redirectTarget`，超限在 `limitReached`。只要收到带有效 Location 的 3xx 就记进 `redirects`（同主机与跨主机都算），`probed` / `warnings` / `redirects` 三处一致。跨源 / 畸形引用（包括反斜杠伪装的跨源 URL）只记进 `ignored`，不请求。重定向、循环、最终 4xx/5xx 都不会被当成正常；**304 不是重定向，也不代表资源可用**，不进入 `redirects` 且判失败。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
+同源资源默认只查首页引用的前 20 个（`--assets-limit` 可调）。资源属性规则与 check-build 共用：`src` 只对 img/script/iframe/embed/video/audio/source/track/input，`poster` 只对 video，`srcset` 只对 img/source（按 WHATWG 算法拆候选，URL 里逗号、data URI、逗号后无空格都正确处理）；`<a href>` 导航链接、canonical、`<base>` 不算资源；相对地址按 `<base href>`，没有 base 时按文档 URL（不强行补尾斜杠），根路径有同源重定向时按最终页面 URL。结果里的 `probed` 保留每个资源的原始地址、`chain` 重定向链、`finalUrl` / `finalStatus` 和 `crossHost`；`finalUrl` 只表示**最后真正请求过**的地址，没跟随的目标在 `redirectTarget`，超限在 `limitReached`。只要收到带有效 Location 的 3xx 就记进 `redirects`（同主机与跨主机都算），`probed` / `warnings` / `redirects` 三处一致。跨源 / 畸形引用（包括反斜杠伪装的跨源 URL）只记进 `ignored`，不请求。重定向、循环、最终 4xx/5xx 都不会被当成正常；**304 不是重定向，也不代表资源可用**，不进入 `redirects` 且判失败。**报告里要写“检查了 N 个 / 共 M 个”，不能写成“全站资源正常”。**
 
 再按项目类型执行 `references/verification.md` 里的检查。纯静态站不要跑数据库和登录测试。每次修复后重新请求验证；没有新响应，就不能说“已修复”。
 
@@ -284,7 +284,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **canonical 必须协议、主机、规范化路径全部一致才算指向自身。** `https` 页面上写 `http` canonical 判 `warn` 并点名协议不一致，不能算通过；跨主机、跨路径、多个标签的原有判定不变。canonical 的 `href` 缺失、为空或无法解析都判 `fail`（`hrefState` 分别为 `missing` / `empty` / `invalid`），不会被空值回退成当前站点；相对 href 按 `<base href>` / 最终页面 URL 解析。只统计真正的 `<link rel=canonical>`：注释、RAWTEXT/RCDATA、template、畸形标签里的伪标签与 `data-rel`/`aria-rel`/`canonicalized` 都不算。
 - **HTML、配置、命令行输出都必须有明确的解析/判定权威。** HTML 用 `scripts/html-scan.mjs`，配置用 `scripts/config-scan.mjs`，登录态用 `scripts/wrangler-auth.mjs`；不允许在调用方再写「标签正则 / 注释扫描 / 字符串包含」来模拟解析，改规则只改权威实现并补回归测试。
 - **退出码 0 不等于成功，缺证据不等于通过。** 登录态、部署验证、CORS 预检、SPA 回退、资源引用都按 fail-closed 处理：没有可验证证据时最多 `warn`，不能判 `pass`；`canDeploy`/`ready` 只认正向证据。
-- **资源引用只认子资源属性。** `src` / `srcset` / `poster` / `<object data>` / `<link href>` 才是资源；导航链接、canonical、`<base>` 不探测。`finalUrl` 不能指向从未请求过的地址；跨源目标只记录不请求。
+- **资源引用只认子资源属性。** `src`（只对 img/script/iframe/embed/video/audio/source/track/input）、`poster`（只对 video）、`srcset`（只对 img/source，按 WHATWG 算法拆候选）、`<object data>`、`<link href>` 才是资源；导航链接、canonical、`<base>` 不探测。`finalUrl` 不能指向从未请求过的地址；跨源目标只记录不请求。
+- **HTML 的状态有明确边界，不能靠“看起来像”判断。** script data 有 escaped/double-escaped（`<!--<script></script>-->` 内层 `</script>` 不关闭）；DOCTYPE public/system 标识符里的 `>` 按规范 abrupt 结束 DOCTYPE；SVG/MathML 用命名空间栈（foreignObject/desc/title/MathML 文本集成点、annotation-xml、breakout、HTML 祖先结束标签、template 隔离）；集成点内部的 `<link>` 才是 HTML 元素。`tests/fixtures/html5-oracle.json` 用真实 Chrome/Edge DOM facts 锁这些边界，有浏览器时可跑 `node tests/browser-diff.mjs`。
 - **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
 - **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。

@@ -12,11 +12,12 @@
 | dig | 不可用（Windows 默认没有） |
 | Cloudflare 账号 / Token | 本环境没有 |
 | 本地 HTTPS 验收夹具 | `tests/fixtures/loopback-tls.mjs` 自签回环证书（仅用于 canonical 协议矩阵，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启） |
+| 浏览器（可选差分） | Chrome 157.0.8103.52 / Edge 157.0.4341.46 headless，经 CDP `Runtime.evaluate` 取真实 DOM；仅用于录制/复核 `tests/fixtures/html5-oracle.json` 与可选 `tests/browser-diff.mjs`，默认套件不依赖浏览器 |
 
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 439 项，分层覆盖 core 278 / adversarial 62 / boundary 22 / combination 5 / unit 72：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 615 项，分层覆盖 core 284 / adversarial 184 / boundary 24 / combination 5 / unit 118：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -35,8 +36,9 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     439/439 通过（分层：core 278 / adversarial 62 / boundary 22 / combination 5 / unit 72）
-node tests/check-skill.mjs   通过（SKILL.md 332 行，引用路径 29 个，无绝对路径）
+node tests/run-tests.mjs     615/615 通过（分层：core 284 / adversarial 184 / boundary 24 / combination 5 / unit 118）
+node tests/check-skill.mjs   通过（SKILL.md 333 行，引用路径 31 个，无绝对路径）
+node tests/browser-diff.mjs  62/62 一致（可选，真实 Chrome 157；无浏览器时退出码 2 跳过）
 quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执行）
 ```
 
@@ -130,7 +132,7 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | 备用站 304 / 少见 3xx（2 例） | 304 判 `fail` + `not-modified` 且不写「重定向未完成验证」；300 判 `fail` + `unexpected-3xx`，均不判通过 |
 | SPA 回退 304 / 少见 3xx（2 例） | 304 / 300 判 `fail`，不写成重定向式回退，也不判通过 |
 | `--expect-json` 结构化比较（7 例） | 键顺序与空白不影响；字段缺失、类型不符、数组长度不符、嵌套数组子集、无效预期 JSON、非法响应 JSON 都给出明确原因 |
-| HTML tokenizer（unit 层 72 例 + 随机组合） | 注释 / bogus comment（含 `<!-->`、`<!--->`、`--!>`、`<?...>`、DOCTYPE）/ CDATA / RAWTEXT（script/style/xmp/iframe/noembed/noframes/noscript）/ RCDATA / plaintext / template / SVG、MathML 外域 / foreignObject / 属性值 / 不完整标签 / 重复属性 / 字符引用（缺分号、大小写、windows-1252、NUL）/ `<base href>` / 结束标签游离引号 / 可见文本边界；300 组确定性随机上下文组合只识别真实标签；大量畸形片段线性结束不超时。直接 import `scripts/html-scan.mjs`，不是匹配源码文本 |
+| HTML tokenizer（unit 层 + 确定性组合） | 注释 / bogus comment（含 `<!-->`、`<!--->`、`--!>`、`<?...>`、DOCTYPE）/ CDATA / RAWTEXT（script/style/xmp/iframe/noembed/noframes/noscript）/ RCDATA / plaintext / template / SVG、MathML 外域 / foreignObject / 属性值 / 不完整标签 / 重复属性 / 字符引用（缺分号、大小写、windows-1252、NUL）/ `<base href>` / 结束标签游离引号 / 可见文本边界；300 组确定性随机上下文组合只识别真实标签；大量畸形片段线性结束不超时。直接 import `scripts/html-scan.mjs`，不是匹配源码文本 |
 | canonical 上下文隔离矩阵（14 例） | 注释 / script / style / textarea / title / iframe / xmp / noembed / noframes / plaintext / template / 属性值 / 不完整标签里的伪 canonical 都判 `skip`；title 文本里的 `<link>` 不产生 canonical 也不破坏 title；真实 + 注释/script/textarea 伪标签组合只算 1 个并判 `pass` |
 | 元数据隔离（2 例） | 注释 / script 里的伪 `<title>`、`<meta name=robots>` 不参与识别，真实元素优先 |
 | HTML tokenizer 集成（资源） | 注释 / RAWTEXT / RCDATA / 属性值里的伪资源引用零请求；跨源 `<base href>` 下相对引用只记 `ignored`；`<base href>` 决定资源解析基准；`javascript:`/绝对外链不探测；`srcset` 逗号 URL 与预加载 link 正确处理 |
@@ -148,6 +150,15 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | 重定向后最终 URL（2 例） | 根 301→`/final/` 后 canonical 按最终 URL 判自身、相对资源解析到 `/final/final.css`；Location 含 userinfo 分类为 `invalid-location` 且不请求 |
 | CLI / 模式矩阵（12 例） | 非法 `--url`/`--mode`/`--cors-url`/`--origin`/CORS 参数缺 origin/数值参数 → 退出码 2；`--url` 带 query 保留路径；`ssg` 与 `static` 判定一致；check-build 非法 `--mode` / 缺 `--dir` / 目录不存在都给出正确退出码与 JSON |
 | 分层统计 | 每轮输出 `core / boundary / adversarial / combination / unit` 的断言数，防止只堆同类 happy-path 测试 |
+| HTML5 状态机：script data（unit/adversarial） | escaped / double-escaped / `</script>` 在不同状态是否关闭 / `-->` 回 data / 未闭合 EOF / `</scriptx>` / `</script =">`；断言 script.content 精确值与后续伪 canonical |
+| HTML5 状态机：DOCTYPE（adversarial） | public/system 标识符里的 `>` abrupt 结束（引号不保护）、残余 `<link>` 可能成为真实元素、unclosed quote EOF、bogus DOCTYPE；期望来自 Chrome 实测 |
+| HTML5 状态机：SVG/MathML 命名空间栈（adversarial） | 嵌套 svg、foreignObject/desc/title、g 内 title、MathML mi/mtext/mglyph、annotation-xml encoding 两种取值与未编码、annotation-xml 上的 svg、breakout img、`</p>` 结束、HTML 祖先结束标签（div/p/select）、template 隔离、foreignObject 内未闭合 HTML 子元素、关闭后恢复；无状态泄漏 |
+| HTML5 状态机：结束标签属性 / EOF 文本（boundary） | 结束标签游离 `=`/引号不吞后续标签（含 RAWTEXT 结束标签）、EOF 不完整开始标签不并入文本、`</` EOF 按文本、可见文本边界 |
+| srcset 解析（unit） | 40+ 组：逗号后无空格、data URI、URL 含逗号、尾随逗号、空候选、无 descriptor、畸形/重复/互斥 descriptor（w/h/x 冲突）、`a.png, 2x` 等规范边角 |
+| 资源属性白名单（unit） | `src` 仅对 img/script/iframe/embed/video/audio/source/track/input，`poster` 仅 video，`srcset` 仅 img/source；`<div src/poster/srcset>` 不进入资源探测 |
+| 浏览器差分（adversarial，默认套件） | `html5-oracle.json` 62 个 Chrome/Edge 真实 DOM facts：HTML 命名空间 canonical 列表、HTML title、script 数量/精确 textContent、HTML img/base 数量；逐项比较本地 tokenizer |
+| 浏览器差分（可选，开发期） | `node tests/browser-diff.mjs` 用本机 Chrome/Edge CDP 现场重跑 62 例，并同时报告“fixture 是否过期”和“parser 与浏览器是否一致”；无浏览器/Node<22 时跳过 |
+| 组合与随机状态（adversarial） | 四类问题同时出现；300 组确定性状态组合（注释/template/script 三态/DOCTYPE/SVG 外域隐藏 fake；foreignObject/title/desc/mtext/mi 集成点必须识别 fake 为 HTML）+ 旧 300 组 canonical 上下文 fuzz |
 
 ### 部署探针（纯逻辑 + 本地假 wrangler，不接触真实账号）
 
@@ -199,6 +210,9 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 - 相对 URL 按文档 URL 解析（无 base 时不强行补尾斜杠）：根 302→`/noslash` 与 `--url .../subpage.html` 两种真实服务器场景都证明浏览器同款解析；重定向后 canonical/资源/CORS 默认目标都基于最终页面 URL。
 - check-build 与 verify 对同一 HTML 的 `<base href>`（含跨源）、srcset、顶层大小写、symlink/junction 产物给出一致结论；测试目录里的 junction 指向 work 内技能副本，不会让备份沿链接递归。
 - `tests/last-run.txt` 由测试脚本自动生成，测试计数、分层统计、results.md/README 的最近一次结果不再靠人工同步。
+- **HTML5 状态机与真实浏览器一致**：script data 的 escaped/double-escaped、DOCTYPE 标识符里的 `>` abrupt 结束、SVG/MathML 命名空间栈（含 annotation-xml、集成点、breakout、HTML 祖先结束标签、template 隔离、无状态泄漏）、结束标签属性引号、srcset 规范边角，都有独立回归；62 个用例的期望来自 Chrome/Edge 真实 DOM facts，而不是本实现自证。
+- **资源提取不再被非资源属性误导**：`<div src>` 等不会触发探测；srcset 的 URL/data URI/逗号后无空格/畸形 descriptor 按规范处理，不会漏候选或误探测。
+- **差分可复现**：默认套件只需 Node + fixture；有浏览器时可用可选脚本现场重跑真实 Chromium 差分，二者分离，不破坏零安装分发。
 - 配置读取有独立权威 `scripts/config-scan.mjs`：JS/TOML/JSONC/YAML 注释与字符串不会冒充配置值；JSONC 结构化解析、TOML section、workflow 注释、`node --inspect`、`.env export/小写键`、Nuxt `ssr:false`、`public/index.html` 都有真实夹具。
 - 登录判定 fail-closed 且 `check-env` / `probe` 同一权威：没有正向证据时最多 warn/blocked，不允许 `canDeploy`；执行失败与未登录分开报告。
 - 根路径同源重定向后，404/API/CORS/`/index.html`/资源/canonical 都基于最终页面 URL；资源/canonical 的相对地址按 `<base href>` 或最终 URL 解析，测试用 `/case/same301/ → /final/` 夹具证明。
@@ -219,7 +233,8 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | GitHub Actions 部署 | 当前环境没有对应仓库/CI | 在测试仓库跑生成的 workflow |
 | 链路探针 `--deploy` 的真实写入/删除 | 没有 Cloudflare 账号，且属于写操作 | 获用户同意后在小规模测试账号跑一次，核对临时 Worker 被删除 |
 | 真实账号的套餐 / R2 / Containers 可用性 | 没有账号与 Token | 用 API Token 查订阅，或在控制台 Billing 核对 |
-| 完整 HTML5 DOM / tree construction | `html-scan.mjs` 是有明确边界的 tokenizer，不是完整 HTML5 parser：不建模隐式闭合、foreign content、script double-escaped、完整命名实体表 | 需要 DOM 级结论时用浏览器或 parse5 等外部工具另行核对 |
+| 完整 HTML5 DOM / tree construction | `html-scan.mjs` 是有明确边界的 tokenizer/局部状态机，不是完整 HTML5 parser：不建模隐式闭合、foster parenting、活动格式化元素重建/adoption agency；SVG/MathML 只做命名空间栈（含 annotation-xml encoding 分支），不做完整树构建 | 需要 DOM 级结论时用浏览器或 parse5 等外部工具另行核对；独立 550 例随机差分唯一不一致是 foster parenting（另有已知命名实体子集限制） |
+| 全部命名实体 | 只覆盖常用集合；legacy（无分号）实体仅常见子集（`&notit;` 等仍是原文） | 不影响 script/DOCTYPE/命名空间状态机；需要完整实体表时用浏览器或外部库 |
 | 真实浏览器 CORS 判定 | 脚本只发 GET/HEAD/OPTIONS 并检查响应头，不执行浏览器同源策略 | 用浏览器 DevTools 或端到端测试确认 |
 | 真实用户登录态的多账号/本地化输出 | 假 wrangler 只覆盖常见英文/JSON 形态 | 用真实 `wrangler whoami` 各版本、多账号环境采样 |
 
@@ -273,6 +288,13 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 46. **登录判定的两个小漏洞（方向仍是 fail-closed）。** 多账号 whoami 表格只返回第一个 Account ID（可能查错账号），现多个候选返回 null；`You are logged in … Warning: no account selected` 被「未登录」正则抢先判成 logged-out，现只有「无正向证据」时才采用未登录结论；`not logged in` 也不会再因为包含 `logged in` 子串被当成已登录。测试空转也一并修正：`--assets-limit 1` 让反斜杠跨源引用从未进入探测阶段（现 limit 10 并断言 checked=1），以及「无断言时 OPTIONS 恒 403」的路径补了真实用例。
 47. **独立复审又发现 8 类 HTML 边界（第二轮修复）。** (a) `<noscript>` 在脚本启用时是 RAWTEXT，伪 canonical/base 曾被计数；(b) `srcset` 盲拆逗号，`data:`/含逗号 URL 产生伪资源；(c) 同源重定向到无尾斜杠路径后资源基准被强行补 `/`（`/sub` 页面里浏览器请求 `/app.js`，脚本请求 `/sub/app.js`）；(d) 结束标签里的游离引号被当成属性值引号，吞掉后续真实标签；(e) SVG/MathML 外域里的 `<link>`/`<title>`/CDATA 被当成 HTML；(f) 字符引用边界：命名实体大小写、缺分号、C1 windows-1252、属性名以 `=` 开头、NUL 输入；(g) xmp 内容被排除但浏览器会渲染；(h) check-build 对跨源 `<base href>` 与 verify 结论相反。已逐项修复并补单测/真实 HTTP 用例；测试从 405 增到 439。
 48. **测试基础设施自身的漂移与递归风险（第二轮修复）。** `tests/last-run.txt` 一直是旧文件、靠人工复制，results/README 却称其为「最近一次结果」；测试在 `.work` 里建指向仓库根的 junction 且不清理，备份/复制会沿链接递归膨胀。现在 run-tests 每次自动以 UTF-8 覆盖 `last-run.txt`；junction 指向 `.work` 内的技能副本，不再形成仓库递归；`runVerify`/`detect`/`checkBuild` 有超时，畸形输入阈值放宽到慢机也稳定。
+49. **script data 的 double-escaped 状态未实现（第二轮专项）。** 旧实现用 `findEndTag()` 找第一个 `</script`：`<script><!--<script></script>--></script><link ...>` 会在内层 `</script>` 提前关闭，后面的 script 文本被当成真实 HTML，可能产生伪 canonical；`<!-->` / `<!--->` 也缺少「escaped dash dash 遇 `>` 回 data」的转换。现在 `scanScriptData()` 实现 data / escaped / double-escaped 状态（含 `<!-->`/`<!--->` 回 data、escaped 里的 `</script>` 关闭、double-escaped 里的 `</script>` 只回 escaped、EOF 截断）；期望值来自 Chrome 实测的 script textContent 长度/精确字符串与 HTML canonical（H1/H8 等 fixture）。
+50. **DOCTYPE 的 public/system 标识符引号内 `>`：实际浏览器语义是 abrupt 结束，不是保护。** 按 WHATWG tokenizer，引号状态遇到 `>` 会 parse error → force-quirks → 立即 emit DOCTYPE，之后文本重新按 HTML 解析；因此“引号内 `<link ...>` 的 `>`”会把标签前缀吞进 identifier，而紧随其后的 `<link>` **可能真的成为 HTML 元素**（B2/B3/B4、Chrome `--dump-dom`/CDP 实测）。旧实现 `indexOf(">")` 恰好符合该行为；一次“用引号保护 >”的重写反而偏离浏览器，现已回退并用浏览器 facts 锁住（含残余文本、伪 link 是否计数、force-quirks 记录在 case 注释中）。
+51. **SVG/MathML 用 depth 计数器无法表达嵌套（第二轮专项重写）。** 旧版 `foreignDepth` + `foreignObjectDepth` 会出现：`<div><svg></div>` 后全文档被当外域（canonical 静默漏检）；foreignObject 内再进 svg 时 link 被当 HTML；`</svg>` 不弹 foreignDepth；math/svg 交叉关闭错配；template 内未闭合 svg 泄漏；集成点判断只看 foreignObject。现改为显式命名空间栈（frame 带 name/ns/integration/kind/htmlStack），并处理：SVG foreignObject/desc/title、SVG g 内 title、MathML mi/mtext 文本集成点与 mglyph/malignmark 例外、annotation-xml encoding 分支（不做 trim，前后空格不算集成点）与 annotation-xml 上的 `<svg>`、breakout 开始标签（只弹到最近集成点/HTML 祖先）、`</p>`/`</br>` breakout、HTML 祖先结束标签、集成点内 HTML 子元素栈（含 special 元素阻止错误结束标签、嵌套 svg 时 HTML 结束标签退出）、template 隔离、CDATA（集成点元素本身仍按外域 tokenizer 识别）、外域结束标签。独立审查用 Chrome 对照确认这些输入现在与浏览器一致。
+52. **srcset 旧的 `split(/,(?=\s)/)` 既漏候选又误拆 URL。** 改为按 WHATWG 算法：URL 取到空白（可含逗号/data URI）；URL 以逗号结尾则剥尾逗号且无 descriptor；否则读取 descriptor 到逗号，descriptor tokenizer 处理括号（括号里的空白/逗号属于同一 token，随后按非法丢弃）；descriptor 校验 w/h 为小写单位的非负整数、x 为 valid floating-point（支持指数/`.5`/`-0`），互斥/重复/冲突（w+density、h 无 w）都丢弃候选。`a.png 1x,b.png 2x`、`a.png,b.png 2x`、`data:...`、`a.png, 2x`、`a.png 100w, 200w`、`a.png 1.5x`、`a.png 1.5w`、`a.png (x, 1x), b.png` 等都有测试。
+53. **结束标签/EOF 文本的 tokenizer 边界。** 旧 `skipTagToGt()` 用“前一非空白字符是 `=`”判引号，遇到 `</div ="><link>` 会把引号当属性值、吞到 EOF；`<div></div =">...`、`</script =">...` 同理。现在用完整属性状态机（before-attr-name/attr-name/after-name/before-value/quoted/unquoted），`=` 出现在属性名前时只是名字字符；EOF 处不完整开始标签不再并入可见文本，`</`+EOF 按浏览器输出为文本。
+54. **资源属性对任意元素生效的误报。** 旧 `resourceReferences()` 把 `<div src>`、`<div poster>`、`<div srcset>` 都当资源，verify 会探测不存在的地址并判 `assets fail`。现在按元素白名单：`src` 仅 img/script/iframe/embed/video/audio/source/track/input（input 还要求 type=image），`poster` 仅 video，`srcset` 仅 img/source；`<image>` 按浏览器别名成 img；`<link href>` 规则不变。
+55. **差分测试依赖自证 / 测试无法发现偏差。** 新增 `tests/fixtures/html5-oracle.json`：62 个用例的 HTML 命名空间 canonical/title/script/img/base 事实来自 Chrome 157 + Edge 157 两个真实引擎（CDP `namespaceURI` 过滤；两引擎结果逐字段一致）。默认套件直接对照 fixture（零依赖可复现）；另有 `tests/browser-diff.mjs` 在装有 Chrome/Edge 时现场重跑，并检测 fixture 是否过期。独立审查（一次性，脚本/种子未纳入仓库）另用固定种子做 550 例随机浏览器差分（真实 Chromium 157）：最终快照 549/550 一致，唯一差异是已声明的 foster parenting（不建树），未再发现状态机 bug；剩余不一致另有命名实体子集限制（`&notit;` 等）。差分只证明这些边界与 Chromium 一致，不证明完整 tree construction 或真实部署。
 
 ## CLI / JSON 兼容性
 
@@ -281,6 +303,9 @@ quick_validate.py            Skill is valid!（Windows 下用 python -X utf8 执
 | `--plan` / `--wrangler-version` / `--pages-wrangler-major`、`--cors-method` / `--cors-headers` / `--cors-credentials` | 新增可选参数 | 不传时行为与旧版一致（默认 Free 20,000）；预检不再用默认方法/请求头探针（见下方 CORS 行为变化） |
 | `--expect-json` 从「字符串包含」改为「JSON 子集比较」 | **行为变化（必须）** | 字符串包含无法判断 JSON 结构，且会因格式/顺序误判；现在要求合法 JSON，失败时给出字段路径和原因。旧的非 JSON 片段用法不再支持 |
 | `cors-preflight` 断言不成立时从 `warn` 变 `fail` | **行为变化（必须）** | 原来只要 OPTIONS 2xx + 有 ACAO 就通过，会把配置错误的接口判成可用 |
+| `tests/` 新增 `browser-diff.mjs` + `fixtures/html5-oracle.json` | 新增可选的开发期差分工具 | 默认测试仍是 `node tests/run-tests.mjs` 零依赖；`browser-diff` 需要本机 Chrome/Edge 与 Node 22+（全局 WebSocket），找不到浏览器时退出码 2 跳过。fixture 的期望值来自真实浏览器，不是自制 parser |
+| `resourceReferences()` 改为元素白名单；`srcset` 按 WHATWG 算法 | **行为变化（必须）** | 非资源属性（`<div src>` 等）不再被探测；srcset 的 data URI/逗号/畸形 descriptor 不再误拆或漏候选；影响 verify 的 `assets` 与 check-build 的资源检查 |
+| `canonical` 的 HTML 命名空间判定扩展 | **行为变化（必须）** | SVG `title`/`desc`/`foreignObject`、MathML `mi`/`mtext`、annotation-xml encoding=text/html 等集成点内部的 `<link>` 在浏览器里是 HTML 元素，必须计数；相反 SVG/MathML 外域里的 `<link>` 不能计数 |
 | `check-build.mjs` 新增 `plan` / `summary.fileLimit` / `summary.effectivePlan`；`verify-deployment.mjs` 新增 `corsOptions` / `expectJsonMode` / `jsonComparison` / `expectedJsonError` / `httpStatus` 等字段 | 只增字段，向后兼容 | 原字段名、类型与 `schemaVersion` 保持不变；`expectedFound`、`status`、`checks`、`summary` 均保留原语义 |
 | `probe.mjs --deploy` 的 `deploy` 检查新增 `verified` / `http` | 只增字段，向后兼容 | 让「部署成功但没做线上验证」可被机器识别 |
 | `check-build.mjs` 把输出 JSON 后的 `process.exit()` 换成 `process.exitCode` + 主模块守卫 | 内部实现 | 规避 Windows 上偶发的 0xC0000409；退出码语义不变。参数校验的早退路径仍用 `process.exit(2)`，在 Windows 连跑 5 次稳定返回 2 |
