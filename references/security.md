@@ -80,6 +80,7 @@ Workers 部署通常 `contents: read` 就够。
 
 - 跨源（`127.0.0.1`、内网 IP、别的主机或端口、HTTP ↔ HTTPS 协议变化）不请求目标，只记录 Location、状态码和重定向链；主站标 `warn` + `verified: false`，资源标 `warn`。
 - `file:` / `data:` / `ftp:` 等非 HTTP(S) 目标直接拒绝。
+- 主站、资源与 `--backup` 共用 `MAX_REDIRECTS=5`：最多跟随 5 次同源重定向并额外请求一次最终地址；最终地址仍返回 3xx（第 6 次重定向）才判超限，且不请求它的目标。跨源恰好发生在边界时仍按跨源分类、不跟随。
 - Location 缺失或无法解析、重定向循环 / 超过跳数，各自单独分类并判失败，详见 `references/verification.md` 的 `redirectOutcome`。
 - 备用站是否跳到主站只靠解析 `hops[].location` 判断，不需要为了识别去请求主站。
 

@@ -11,11 +11,12 @@
 | wrangler | 未安装 |
 | dig | 不可用（Windows 默认没有） |
 | Cloudflare 账号 / Token | 本环境没有 |
+| 本地 HTTPS 验收夹具 | `tests/fixtures/loopback-tls.mjs` 自签回环证书（仅用于 canonical 协议矩阵，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启） |
 
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 198 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检与简单请求、主站/资源重定向、JSON 结构、链路探针
+node tests/run-tests.mjs     # 210 项：识别、套餐与产物、真实 HTTP 验收、CORS 预检与简单请求、主站/资源重定向、跳数边界与 canonical 协议、JSON 结构、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -32,8 +33,8 @@ python <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     198/198 通过
-node tests/check-skill.mjs   通过（SKILL.md 321 行，引用路径 26 个，无绝对路径）
+node tests/run-tests.mjs     210/210 通过
+node tests/check-skill.mjs   通过（SKILL.md 323 行，引用路径 27 个，无绝对路径）
 quick_validate.py            Skill is valid!
 ```
 
@@ -99,6 +100,8 @@ quick_validate.py            Skill is valid!
 | 重定向策略纯函数（8 例） | 相对 Location 同源可跟随；HTTP→HTTPS、HTTPS→HTTP 判跨源并标 `protocolChanged`；端口 / 主机 / `127.0.0.1` 变化判跨源；非 HTTP(S) 协议直接拒绝；空 / 无法解析 Location；始终约束到起始源 |
 | 主站重定向矩阵（9 例） | 同源 301→200 → `pass` + `same-origin-verified`；同源 302→404 → `fail` + `same-origin-final-failed`；跨主机 / `127.0.0.1` / HTTP→HTTPS 都 `warn` + `cross-origin-unverified` 且目标服务器零请求；循环 / 无效 Location / 非 HTTP(S) 各自单独分类；跨源目标返回 200 不会给原站点判 `pass` |
 | 备用站跳主站（2 例） | 只解析 `hops[].location` 识别跳主站并判 `fail`；跨源目标服务器全程未收到 landing 请求 |
+| 主站 / 备用站跳数边界（7 例） | 连续 5 次同源重定向 → 最终 200 判 `pass` + `same-origin-verified`，链 6 跳、服务器收到 6 个链跳请求；最终 404 判 `fail` + `same-origin-final-failed`（不是超限）；第 6 次重定向判 `loop-or-limit`，`limitHop.followed=false`，第 7 个地址零请求；5 次同源后跨源仍 `warn` 且跨源目标零请求；原有循环用例恰好 6 次请求；`--backup` 的 5 次 → 200 判 `pass`、6 次判超限 |
+| canonical 协议矩阵（5 例，真实本地 HTTPS 站点） | HTTPS + HTTPS 自身 canonical → `pass`（`sameProtocol/sameHost/samePath` 全 true）；HTTPS + HTTP canonical → `warn` 且 detail 点名「协议不一致」；其他主机 / 其他路径 → 原有 `warn`；多个标签 → 原有 `fail`。全部执行脚本并断言 JSON，不是读代码或匹配文案 |
 | `--expect-json` 结构化比较（7 例） | 键顺序与空白不影响；字段缺失、类型不符、数组长度不符、嵌套数组子集、无效预期 JSON、非法响应 JSON 都给出明确原因 |
 
 ### 部署探针（纯逻辑 + 本地假 wrangler，不接触真实账号）
@@ -129,8 +132,10 @@ quick_validate.py            Skill is valid!
 - `ssr` 模式不会把静态产物检查套到 SSR 项目上；未知路径返回 200 只警告，不误判为失败。
 - `--api` 能区分 JSON / 非 JSON / 期望内容不匹配；`--expect-json` 缺 `--api` 会警告。期望值按 JSON 子集比较，字段顺序与空白不影响结论。
 - 文件数上限按「套餐 + 部署目标」判定：Pages 需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 需完整版本 Wrangler >= 4.34.0；目标未知、非法版本或证据不足一律退回 Free 20,000 并给 `warn`。
-- 资源 3xx 不再算通过：同源最多跟随 5 跳并验最终 2xx，跨主机记录最终地址并 `warn`，循环 / 缺 `Location` / 非 HTTP(S) 目标 / 最终 4xx/5xx 判 `fail`；只要收到带有效 Location 的 3xx 就进 `redirects`，`probed` / `warnings` / `redirects` 三处一致，报告保留 `chain` / `finalUrl` / `finalStatus` / `crossHost`。
+- 资源 3xx 不再算通过：同源按 `MAX_REDIRECTS=5` 跟随并验最终 2xx，跨主机记录最终地址并 `warn`，循环 / 缺 `Location` / 非 HTTP(S) 目标 / 最终 4xx/5xx 判 `fail`；只要收到带有效 Location 的 3xx 就进 `redirects`，`probed` / `warnings` / `redirects` 三处一致，报告保留 `chain` / `finalUrl` / `finalStatus` / `crossHost`。
+- 主站、资源、`--backup` 共用同一跳数语义：最多跟随 5 次同源重定向并额外请求最终地址（共最多 6 次请求）；最终地址再返回 3xx 才判 `loop-or-limit`，`limitHop` 留证据且不请求它的目标。测试用服务器收到的路径数证明真的请求了最终地址、没有请求第 7 个地址，并覆盖「5 次后 404 不是超限」「边界处跨源仍不跟随」。
 - 主站只自动跟随同源（协议 + 主机 + 端口）重定向；跨源、协议变化（含 HTTP↔HTTPS、HTTPS→HTTP）、非 HTTP(S)、无效 Location、循环都用 `redirectOutcome` 单独分类，跨源标 `warn` + `verified=false`，不请求目标，别的站点返回 200 不会给原站点判 `pass`。
+- canonical 指向自身要求协议、主机、规范化路径三者一致；本地 HTTPS 站点上的 `http` canonical 实测判 `warn` 并点名协议不一致，结果带 `sameProtocol` / `sameHost` / `samePath`，跨主机 / 跨路径 / 多标签判定保持原样。
 - CORS 预检不把 `OPTIONS` 2xx 当通过；只断言用户显式提供的实际方法 / 请求头 / 凭据，其余写进 `notChecked`。按 Fetch 规范处理 `*` × 凭据、`Authorization` 非通配、`GET/HEAD/POST` 安全列表方法与方法名大小写。简单请求的凭据模式只由 `--cors-credentials` 声明，响应里的 `ACAC: true` 不会把无凭据请求判成带凭据。
 - 部署探针把「命令成功」和「线上验证成功」分开，清理失败单独告警。
 - 链路探针在 `whoami --json` 调用失败时仍判定为已登录（该 flag 是官方能力，纯文本判定只是跨版本更稳），能从纯文本提取 Account ID；明确未登录时返回 `blocked` + 退出码 2。
@@ -142,6 +147,7 @@ quick_validate.py            Skill is valid!
 |---|---|---|
 | 真实 Pages/Workers 部署 | 没有 Cloudflare 账号/Token，wrangler 未安装 | `wrangler login` 后部署一个测试项目到预览地址 |
 | 自定义域名 + TLS | 没有域名控制权 | 绑定测试子域，`openssl s_client` 检查 |
+| 真实站点的证书链 / HSTS / 混合内容 | 本地 HTTPS 服务器用自签回环证书，只是为了让脚本以 `https://` URL 真正跑起来、验证 canonical 协议判定 | 部署后用浏览器和 SSL Labs 等外部工具检查 |
 | DNS 切换 | 没有 DNS 权限 | 降低 TTL，切换后用 1.1.1.1 / 8.8.8.8 查询 |
 | D1 迁移/读写 | 没有 D1 数据库 | 建测试库，导入后核对行数和写入 |
 | GitHub Pages 自定义域名移除 | 没有仓库管理员权限 | 按 `github-pages-backup.md` 操作后 curl `github.io` |
@@ -162,10 +168,12 @@ quick_validate.py            Skill is valid!
 8. **探针用 `includes("ok")` 校验响应体。** `"not ok".includes("ok")` 为 `true`，会把错误响应当成部署成功的线上证据。改成 `trim() === "ok"` 全等比较并加断言。另有一条 `nextSteps` 断言的正则与文案不符，属于测试写错，已修正断言而非改产品文案。
 9. **Paid 文件数放宽把 Pages 专属条件套到了 Workers。** 旧 `resolvePlan()` 一律要求 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，且只取主版本号（`4`），无法比较 `4.34.0`。官方 Workers Limits 要求的是 **Wrangler >= 4.34.0**、不需要 Pages 变量。改为按 `--target` 分流 + 点分数字完整比较，目标未知、非法版本、只给主版本都退回 Free。
 10. **CORS `hasToken()` 见 `*` 就判通过。** 带凭据时 `Allow-Methods: *` / `Allow-Headers: *` 是字面值，`Authorization` / `Range` 是 non-wildcard header（`*` 永不覆盖），`GET/HEAD/POST` 是 CORS-safelisted method。改为按凭据与方法规范分别判定，简单请求的 `ACAO` 也改用 `--cors-credentials` 判定。原有两个用 `POST` 断言「缺 Allow-Methods 判失败」的测试本身不符合规范，改用 `DELETE` 保留场景，并新增 safelisted 通过用例。
-11. **资源 3xx 被默默当成正常。** 旧的「请求失败或 `status >= 400` 才判坏」在 `redirect: "manual"` 下把 301/302/307/308 全算通过。改为独立跟随（同主机最多 5 跳）、验证最终 2xx，报告保留重定向链与最终状态；跨主机 `warn`、循环与最终 4xx/5xx `fail`。
+11. **资源 3xx 被默默当成正常。** 旧的「请求失败或 `status >= 400` 才判坏」在 `redirect: "manual"` 下把 301/302/307/308 全算通过。改为独立跟随（同主机按跳数上限，现为主站 / 资源共用的 `MAX_REDIRECTS=5`，见第 15 条）、验证最终 2xx，报告保留重定向链与最终状态；跨主机 `warn`、循环与最终 4xx/5xx `fail`。
 12. **主站重定向链会被 3xx 带到任意地址（SSRF 面）。** 旧 `chain()` 无条件解析 Location 并继续请求：`127.0.0.1`、内网 IP、云元数据端点、协议变化、非 HTTP(S) 协议都可能被访问；跨站最终 200 还会让 `root` 判 `pass`；非法 `Location` 会让 `new URL` 抛异常。抽出零依赖纯函数 `scripts/redirect-policy.mjs`，按 `URL.origin`（协议 + 主机 + 端口）判定同源，主站与资源共用；非同源只记录 Location / 状态码 / 链，不请求目标。`root` 用 `redirectOutcome` 分五类，跨源 `warn` + `verified=false`；`backup` 只解析 `hops[].location` 识别跳主站，不为识别而请求主站。
 13. **CORS 简单请求把 ACAC 响应头当成请求凭据模式。** 旧判断 `acao === "*" && (acac === "true" || corsCredentials)` 让「无凭据 + ACAO=* + ACAC=true」误判 `fail`，而「带凭据 + 精确 ACAO + 缺 ACAC」反而通过。改为只按 `--cors-credentials` 声明判定：声明带凭据才要求精确 ACAO + `ACAC: true`；预检断言逻辑未改。
 14. **跨主机资源重定向没进 `redirects`。** `redirected: chainHops.length > 1` 在跨主机提前返回时链只有 1 跳，导致 `redirected=false`，汇总漏报。改为「3xx + 可解析 Location 即记为重定向」，`redirects` 收录同源与跨源，`probed` / `warnings` / `redirects` 统一同一组字段（原始 / 最终 URL、最终状态、跨主机标记、完整链）。
+15. **主站重定向链的跳数边界少一跳。** 旧 `chain()` 用 `for (i = 0; i < max; i++)` 只发 5 次请求，最多跟随 4 次重定向；`probeAsset()` 用 `hop <= MAX_ASSET_REDIRECTS` 发 6 次，两者语义不一致。抽出共用 `MAX_REDIRECTS=5`，主站 / 资源 / `--backup` 都最多跟随 5 次并额外请求最终地址；第 6 次重定向判超限且不请求目标。为保留原循环用例的 `hops.length === 5` 语义，超限时未跟随的那一跳不进 `hops`，改由 `limitHop` 记录（`followed=false`）。跨源判定仍优先于跳数判定。
+16. **canonical 只比 host + pathname，漏了协议。** `https` 站点上的 `http` canonical 会被判成「指向自身」。增加 `parsed.protocol === new URL(base).protocol` 检查，三者全一致才 `pass`；主机与路径相同但协议不同时 `warn` 并写明两个协议。路径规范化规则、跨主机 / 跨路径 / 多标签判定均未改动。为能真实以 `https://` 站点执行验收，新增本地自签回环证书夹具（不是真实凭据、TLS 校验保持开启、不需要 openssl 或第三方包）。
 
 ## CLI / JSON 兼容性
 
@@ -188,3 +196,5 @@ quick_validate.py            Skill is valid!
 | `assets` 的 `broken` / `warnings` / `redirects` 新增 `redirected` / `crossHost` / `level` | 只增字段，但汇总语义变化 | 跨主机 3xx 现在一定进 `redirects`；`probed[].redirected` 不再由链长度推断 |
 | `cors` 检查新增 `credentialsMode` / `credentialsDeclaredByUser` | 只增字段 | **行为变化（必须）**：无凭据 + `ACAO=*` + `ACAC=true` 从 `fail` 变 `pass`；带凭据 + 精确 ACAO + 缺 ACAC 从 `pass` 变 `fail` |
 | `scripts/redirect-policy.mjs` | 新增内部纯函数模块（零第三方依赖） | 主站与资源共用同源判定；不新增 CLI 参数、不新增对外功能 |
+| `root` 检查新增 `limitHop` | 只增字段，但跳数语义变化 | 最多跟随 5 次同源重定向并额外请求最终地址；第 6 次重定向判 `loop-or-limit`，未跟随那一跳放在 `limitHop`。`hops` 仍表示「已跟随链 + 最终响应」，原有字段与 `schemaVersion` 不变 |
+| `canonical` 检查新增 `sameProtocol` | 只增字段，但状态语义变化（必须） | 主机和路径相同但协议不同的 canonical 从 `pass` 变 `warn`，detail 点名协议不一致；`href` / `sameHost` / `samePath` 与路径规范化规则不变 |

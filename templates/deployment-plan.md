@@ -77,7 +77,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 
 ## 验收
 
-- [ ] 首页 200 + 标题正确；如有重定向，按 `redirectOutcome` 写清「同源验证成功 / 跨源目标未验证 / 循环或超跳数 / Location 无法解析 / 协议不受支持」
+- [ ] 首页 200 + 标题正确；如有重定向，按 `redirectOutcome` 写清「同源验证成功 / 跨源目标未验证 / 循环或超跳数 / Location 无法解析 / 协议不受支持」（最多 5 次同源重定向 + 最终地址；第 6 次重定向判超限，5 次后 404 是最终状态失败）
 - [ ] 未知路径符合所选模式（static/ssg 为 404；spa 为 200 + app shell；ssr 通常 404，200 需确认不是 catch-all）
 - [ ] SSR 专项：服务端渲染内容、`--api` 接口状态/JSON、数据库读写、登录会话（仅 ssr，人工或专项验证）
 - [ ] 同源资源最终 2xx（记录检查数量；3xx 只跟随同源到最终地址，跨主机 / 协议变化 / 非 HTTP(S) 不请求目标，写「目标未验证」并附重定向链）
@@ -88,7 +88,7 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 - [ ] 文件数在当前套餐生效上限内（Free 20,000；Paid 100,000 需 `--target pages` 的 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，或 `--target workers` 的 Wrangler >= 4.34.0），单文件 ≤ 25 MiB
 - [ ] 数据库读写（如果涉及，且已获批准）
 - [ ] 备用站 200 且不跳主站（如果保留）
-- [ ] canonical / noindex 正确（如果公开）
+- [ ] canonical / noindex 正确（如果公开；canonical 指向自身要求协议、主机、路径三者一致，协议不同须标警告）
 
 ## 风险与回滚
 

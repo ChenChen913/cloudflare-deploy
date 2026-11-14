@@ -11,11 +11,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import https from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolvePlan, evaluateFileCount, parseVersion, compareVersions } from "../scripts/check-build.mjs";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "../scripts/deploy-verdict.mjs";
 import { classifyRedirect } from "../scripts/redirect-policy.mjs";
+import { TLS_KEY, TLS_CERT } from "./fixtures/loopback-tls.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -43,9 +45,12 @@ function checkBuild(dir, mode = "static") {
   const r = spawnSync(process.execPath, [path.join(root, "scripts/check-build.mjs"), "--dir", dir, "--mode", mode, "--json"], { encoding: "utf8" });
   return { code: r.status, json: JSON.parse(r.stdout) };
 }
-function runVerify(args) {
+function runVerify(args, extraEnv = null) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path.join(root, "scripts/verify-deployment.mjs"), ...args], { encoding: "utf8" });
+    const child = spawn(process.execPath, [path.join(root, "scripts/verify-deployment.mjs"), ...args], {
+      encoding: "utf8",
+      ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+    });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
@@ -391,6 +396,16 @@ const backupServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
   // /to-main/ 用于验证「备用站跳到主站」：Location 指向另一台本地服务器上的
   // /backup-landing，脚本若跟随就会在那台服务器的 hits 里留下记录。
+  // /chain/<n>/<k>/ 连续 n 次同源 301 后返回 200，验证 --backup 与主站同一跳数规则。
+  const chain = p.match(/^\/chain\/(\d+)\/(\d+)\/$/);
+  if (chain) {
+    const n = Number(chain[1]);
+    const k = Number(chain[2]);
+    if (k < n) { res.writeHead(301, { location: `/chain/${n}/${k + 1}/` }); res.end(); return; }
+    res.writeHead(200, { "content-type": "text/html", server: "local-backup-chain" });
+    res.end("<!doctype html><html><head><title>backup chain final</title></head><body>ok</body></html>");
+    return;
+  }
   const loc = p === "/to-main/" ? `${crossTargetBase}/backup-landing` : `${backupTarget}/`;
   res.writeHead(301, { location: loc });
   res.end();
@@ -494,9 +509,30 @@ const assetTargetServer = http.createServer((req, res) => {
 let rootRedirectBase = "";
 const rootRedirectHits = [];
 const crossTargetHits = [];
+// 跳数边界矩阵：/chain/<case>/<step>/ 逐级 301；最后一跳按配置返回 200/404 或跨源 302。
+// hops = 同源重定向次数，因此允许的最大请求数是 hops+1；第 hops+2 跳不应被请求。
+const rootChains = {
+  "five-ok": { hops: 5, final: 200 },
+  "five-404": { hops: 5, final: 404 },
+  "six": { hops: 6, final: 200 },
+  "five-cross": { hops: 5, cross: true },
+};
 const rootRedirectServer = http.createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
   rootRedirectHits.push(p);
+  const chain = p.match(/^\/chain\/([a-z0-9-]+)\/(\d+)\/$/);
+  if (chain) {
+    const cfg = rootChains[chain[1]];
+    const step = Number(chain[2]);
+    if (!cfg) { res.writeHead(404, { "content-type": "text/html" }); res.end("nf"); return; }
+    if (step < cfg.hops) { res.writeHead(301, { location: `/chain/${chain[1]}/${step + 1}/` }); res.end(); return; }
+    if (cfg.cross) { res.writeHead(302, { location: `${crossTargetBase}/chain-landing` }); res.end(); return; }
+    if (cfg.final === 200) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><html><head><title>chain final</title></head><body>final</body></html>");
+    } else { res.writeHead(cfg.final, { "content-type": "text/html" }); res.end("nf"); }
+    return;
+  }
   if (p === "/final/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><html><head><title>final</title></head><body>final</body></html>`);
@@ -523,6 +559,31 @@ const crossTargetServer = http.createServer((req, res) => {
   res.writeHead(404, { "content-type": "text/html" }); res.end("nf");
 });
 
+// canonical 协议矩阵：真实的本地 HTTPS 服务器（内置自签名回环证书，见 fixtures/loopback-tls.mjs）。
+// 让 --url 真的是 https://，从而能验证「http canonical 不算指向自身」；不访问外网、不需要 openssl。
+let tlsCanonicalBase = "";
+const tlsCanonicalCases = {
+  "/": "self-https",
+  "/http-canon/": "self-http",
+  "/other-host/": "other-host",
+  "/other-path/": "other-path",
+  "/multi/": "multi",
+};
+const tlsCanonicalServer = https.createServer({ key: TLS_KEY, cert: TLS_CERT }, (req, res) => {
+  const p = new URL(req.url, "https://127.0.0.1").pathname;
+  const kind = tlsCanonicalCases[p];
+  if (!kind) { res.writeHead(404, { "content-type": "text/html" }); res.end("nf"); return; }
+  const self = `${tlsCanonicalBase}${p}`;
+  let tags;
+  if (kind === "self-https") tags = `<link rel="canonical" href="${self}">`;
+  else if (kind === "self-http") tags = `<link rel="canonical" href="${self.replace(/^https:/, "http:")}">`;
+  else if (kind === "other-host") tags = `<link rel="canonical" href="https://other.example.com${p}">`;
+  else if (kind === "other-path") tags = `<link rel="canonical" href="${tlsCanonicalBase}/elsewhere/">`;
+  else tags = `<link rel="canonical" href="${self}"><link rel="canonical" href="${self}">`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><title>tls canonical</title>${tags}</head><body>ok</body></html>`);
+});
+
 // 子路径站点：模拟 GitHub Pages project site / 多站点同域
 const subSeen = [];
 const subServer = http.createServer((req, res) => {
@@ -540,7 +601,7 @@ const subServer = http.createServer((req, res) => {
 let subBase = "";
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", r));
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer]) await listen(srv);
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer, tlsCanonicalServer]) await listen(srv);
 
 staticBase = `http://127.0.0.1:${staticServer.address().port}`;
 subBase = `http://127.0.0.1:${subServer.address().port}/repo`;
@@ -556,6 +617,10 @@ const assetRedirectBase = `http://127.0.0.1:${assetRedirectServer.address().port
 assetTargetBase = `http://127.0.0.1:${assetTargetServer.address().port}`;
 rootRedirectBase = `http://127.0.0.1:${rootRedirectServer.address().port}`;
 crossTargetBase = `http://127.0.0.1:${crossTargetServer.address().port}`;
+tlsCanonicalBase = `https://127.0.0.1:${tlsCanonicalServer.address().port}`;
+// 子进程用 NODE_EXTRA_CA_CERTS 信任这份本地自签 CA，TLS 校验保持开启。
+w("loopback-ca.pem", TLS_CERT);
+const tlsVerifyEnv = { NODE_EXTRA_CA_CERTS: path.join(work, "loopback-ca.pem") };
 
 const v1 = await runVerify(["--url", staticBase, "--mode", "static", "--json"]);
 const v1j = JSON.parse(v1.out);
@@ -688,6 +753,43 @@ const v7 = await runVerify(["--url", dupUrl, "--mode", "static", "--json"]);
 const v7j = JSON.parse(v7.out);
 assert("验收：重复 canonical 判失败", v7.code === 1 && v7j.checks.some((c) => c.id === "canonical" && c.status === "fail"));
 
+// ---------------------------------------------------------------- canonical 协议矩阵（真实本地 HTTPS 站点）
+const tlsCase = async (p) => {
+  const r = await runVerify(["--url", `${tlsCanonicalBase}${p}`, "--mode", "static", "--json"], tlsVerifyEnv);
+  let j = null;
+  try { j = JSON.parse(r.out); } catch { /* 断言里带上 stderr 便于定位 */ }
+  return {
+    code: r.code, err: r.err,
+    root: j?.checks?.find((c) => c.id === "root"),
+    canonical: j?.checks?.find((c) => c.id === "canonical"),
+  };
+};
+const cSelf = await tlsCase("/");
+assert("canonical：HTTPS 站点 + HTTPS 自身 canonical 判通过",
+  cSelf.root?.status === "pass" && cSelf.root.httpStatus === 200
+    && cSelf.canonical?.status === "pass" && cSelf.canonical.sameProtocol === true
+    && cSelf.canonical.sameHost === true && cSelf.canonical.samePath === true,
+  JSON.stringify({ root: cSelf.root, canonical: cSelf.canonical, err: cSelf.err }));
+const cHttp = await tlsCase("/http-canon/");
+assert("canonical：HTTPS 站点 + HTTP canonical 判警告并明确指出协议不一致",
+  cHttp.canonical?.status === "warn" && cHttp.root?.status === "pass"
+    && cHttp.canonical.sameProtocol === false && cHttp.canonical.sameHost === true
+    && cHttp.canonical.samePath === true && /协议不一致/.test(cHttp.canonical.detail)
+    && /http:/.test(cHttp.canonical.href) && /当前站点为 https:/.test(cHttp.canonical.detail),
+  JSON.stringify({ canonical: cHttp.canonical, err: cHttp.err }));
+const cHost = await tlsCase("/other-host/");
+assert("canonical：不同主机维持原有警告",
+  cHost.canonical?.status === "warn" && cHost.canonical.sameHost === false
+    && /指向其他主机/.test(cHost.canonical.detail), JSON.stringify(cHost.canonical));
+const cPath = await tlsCase("/other-path/");
+assert("canonical：不同路径维持原有警告",
+  cPath.canonical?.status === "warn" && cPath.canonical.samePath === false
+    && /指向另一个路径/.test(cPath.canonical.detail), JSON.stringify(cPath.canonical));
+const cMulti = await tlsCase("/multi/");
+assert("canonical：多个标签维持原有失败判定",
+  cMulti.canonical?.status === "fail" && cMulti.code === 1
+    && /2 个 canonical 标签/.test(cMulti.canonical.detail), JSON.stringify(cMulti.canonical));
+
 const v8 = await runVerify(["--url", staticBase, "--mode", "static", "--backup", backupUrl, "--json"]);
 const v8j = JSON.parse(v8.out);
 assert("验收：拒绝 301 备用站", v8.code === 1 && v8j.checks.some((c) => c.id === "backup" && c.status === "fail"), "备用站跳到主站");
@@ -817,6 +919,61 @@ assert("备用站：识别跳主站但不请求主站",
 assert("重定向：跨源目标服务器全程未收到 landing 请求",
   !crossTargetHits.some((p) => /landing/.test(p)), crossTargetHits.join(","));
 
+// ---------------------------------------------------------------- 主站 / 备用站跳数边界矩阵
+const chainCase = async (caseName) => {
+  const r = await runVerify(["--url", `${rootRedirectBase}/chain/${caseName}/0/`, "--mode", "static", "--json"]);
+  const j = JSON.parse(r.out);
+  // 只数链跳：404 探测（/chain/<case>/0/__cf_deploy_check_.../）和 /index.html 不算。
+  const hopRe = new RegExp(`^/chain/${caseName}/\\d+/$`);
+  return {
+    code: r.code,
+    root: j.checks.find((c) => c.id === "root"),
+    hits: rootRedirectHits.filter((p) => hopRe.test(p)),
+  };
+};
+const h5ok = await chainCase("five-ok");
+assert("跳数：5 次同源重定向后最终 200 判通过，且确实请求了第 6 个地址",
+  h5ok.root?.status === "pass" && h5ok.root.redirectOutcome === "same-origin-verified"
+    && h5ok.root.httpStatus === 200 && h5ok.root.verified === true
+    && h5ok.root.hops.length === 6 && h5ok.hits.length === 6
+    && h5ok.hits.includes("/chain/five-ok/5/"),
+  JSON.stringify({ root: h5ok.root, hits: h5ok.hits }));
+const h5404 = await chainCase("five-404");
+assert("跳数：5 次同源重定向后最终 404 判最终状态失败，而不是跳数超限",
+  h5404.root?.status === "fail" && h5404.root.redirectOutcome === "same-origin-final-failed"
+    && h5404.root.httpStatus === 404 && h5404.root.hops.length === 6
+    && h5404.hits.includes("/chain/five-404/5/") && !/循环或超过跳数/.test(h5404.root.detail),
+  JSON.stringify({ root: h5404.root, hits: h5404.hits }));
+const h6 = await chainCase("six");
+assert("跳数：第 6 次同源重定向判超出跳数，且不请求第 7 个地址",
+  h6.root?.status === "fail" && h6.root.redirectOutcome === "loop-or-limit"
+    && h6.root.limitHop?.status === 301 && h6.root.limitHop?.followed === false
+    && h6.hits.length === 6 && !h6.hits.includes("/chain/six/6/"),
+  JSON.stringify({ root: h6.root, hits: h6.hits }));
+const hcross = await chainCase("five-cross");
+assert("跳数：5 次同源重定向后跨源跳转仍不请求跨源目标",
+  hcross.root?.status === "warn" && hcross.root.redirectOutcome === "cross-origin-unverified"
+    && hcross.root.verified === false && !crossTargetHits.includes("/chain-landing"),
+  JSON.stringify(hcross.root));
+assert("跳数：原有循环用例仍判超限，且恰好请求 6 次（5 次跟随 + 第 6 次判超限）",
+  rLoop?.status === "fail" && rLoop.redirectOutcome === "loop-or-limit"
+    && rLoop.limitHop?.followed === false
+    && rootRedirectHits.filter((p) => p === "/case/loop/").length === 6,
+  JSON.stringify({ loop: rLoop, hits: rootRedirectHits.filter((p) => p === "/case/loop/").length }));
+
+const backupChain = async (n) => {
+  const r = await runVerify(["--url", staticBase, "--mode", "static", "--backup", `${backupUrl}chain/${n}/0/`, "--json"]);
+  return JSON.parse(r.out).checks.find((c) => c.id === "backup");
+};
+const b5 = await backupChain(5);
+assert("备用站：5 次同源重定向后最终 200 判通过（与主站同一跳数规则）",
+  b5?.status === "pass" && b5.hops.length === 6 && b5.redirectOutcome === null,
+  JSON.stringify(b5));
+const b6 = await backupChain(6);
+assert("备用站：6 次同源重定向同样判超出跳数",
+  b6?.status === "fail" && b6.redirectOutcome === "loop-or-limit"
+    && /重定向未完成验证/.test(b6.detail), JSON.stringify(b6));
+
 // ---------------------------------------------------------------- SSR / API 验收
 const vSsr = await runVerify(["--url", ssrUrl, "--mode", "ssr", "--api", "/api/health", "--expect-json", '{"ok":true}', "--json"]);
 const vSsrJ = JSON.parse(vSsr.out);
@@ -863,7 +1020,7 @@ const vSsr200 = await runVerify(["--url", spaUrl, "--mode", "ssr", "--json"]);
 const vSsr200J = JSON.parse(vSsr200.out);
 assert("验收：ssr 下未知路径 200 只警告不判死", vSsr200J.checks.some((c) => c.id === "404" && c.status === "warn") && !vSsr200J.checks.some((c) => c.id === "404" && c.status === "fail"), JSON.stringify(vSsr200J.checks.find((c) => c.id === "404")));
 
-for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer]) srv.close();
+for (const srv of [staticServer, spaServer, corsServer, badCorsServer, dupCanonicalServer, backupServer, subServer, ssrServer, corsMatrixServer, assetRedirectServer, assetTargetServer, rootRedirectServer, crossTargetServer, tlsCanonicalServer]) srv.close();
 
 // ---------------------------------------------------------------- 链路探针（本地假 wrangler，不接触真实账号）
 const probeDir = path.join(work, "probe-cwd");

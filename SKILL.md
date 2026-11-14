@@ -248,7 +248,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - `spa`：未知路径**必须** 200 + HTML，且含有 root 容器或入口脚本。返回 404 是警告（深链刷新会断；hash 路由可接受）。
 - `ssr`：未知路径通常 404；返回 200 只给警告，须人工确认是自定义 404 还是 catch-all。额外检查首页服务端渲染的可见文本长度与单次 TTFB——**单次采样不是性能结论**。
 
-脚本检查：首页状态（只自动跟随同源重定向；跨源、协议变化、非 HTTP(S) 协议、Location 无法解析都不请求目标，用 `redirectOutcome` 区分「同源验证成功」「跨源目标未验证」「循环或超跳数」「Location 无法解析」「协议不受支持」）、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符）、meta robots、同源资源（HEAD 失败自动用 GET 复核；3xx 按最多 5 跳跟随同源重定向并验最终 2xx，跨主机只记录并标 `warn`）、响应头、`/index.html` 重定向、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。
+脚本检查：首页状态（只自动跟随同源重定向；主站与资源共用 `MAX_REDIRECTS=5`——最多跟随 5 次并额外请求最终地址，第 6 次重定向判超限且 `limitHop` 记录未跟随的一跳；跨源、协议变化、非 HTTP(S) 协议、Location 无法解析都不请求目标，用 `redirectOutcome` 区分「同源验证成功」「跨源目标未验证」「循环或超跳数」「Location 无法解析」「协议不受支持」）、模式对应的 404/回退、标题、canonical（重复标签、跨主机、路径不符、**协议不一致**；三者全一致才算指向自身）、meta robots、同源资源（HEAD 失败自动用 GET 复核；3xx 按同一跳数语义跟随同源重定向并验最终 2xx，跨主机只记录并标 `warn`）、响应头、`/index.html` 重定向、可选 CORS（含预检的 ACAO / Allow-Methods / Allow-Headers / 凭据）、备用站独立性，以及 `--api` 接口的状态 / JSON 类型 / 期望 JSON 子集。
 
 **HTTP 验收不是全栈验收。** `--api` 只证明该接口返回了 JSON 且（给了 `--expect-json` 时）符合期望的 JSON 子集；数据库写入、登录会话、第三方回调、冷启动仍需按 `references/verification.md` 专项验证，没测就写「未验证」。CORS 预检 `notChecked` 里的项同样要写成「未验证」，不要写成「已通过」。
 
@@ -274,6 +274,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **Pages 静态资源默认 `Access-Control-Allow-Origin: *`。** 需要收紧时用 `_headers`；Functions 必须在代码里处理 CORS，包括 `OPTIONS`。`ACAO: *` 是否有效取决于**请求的 credentials mode**，不是服务器有没有回 `ACAC: true`；带凭据时 `ACAO: *` 无效，`Allow-Methods` / `Allow-Headers` 的 `*` 也不是通配符，`Authorization` 必须显式列出。
 - **资源返回 3xx 不等于资源可用。** 验收用 `redirect: "manual"`，必须跟随到最终 2xx 才算通过；跨主机重定向要记录最终地址并人工确认，循环要判失败。
 - **验收脚本只自动跟随同源（协议 + 主机 + 端口）重定向。** Location 指向别的主机、别的协议或非 HTTP(S) 协议时不请求目标，只记录并分类，避免把请求带去 `127.0.0.1` / 内网 / 云元数据地址；别的网站返回 200 不能给原始站点判 pass，识别备用站跳主站也只需解析 Location。
+- **主站、资源、`--backup` 共用 5 次重定向上限。** 5 次重定向后仍要请求最终地址并验最终状态；只有最终地址再返回 3xx（第 6 次重定向）才判超限。「5 次重定向后 404」是最终状态失败，不是跳数超限；边界处出现跨源重定向仍按跨源分类，不跟随。
+- **canonical 必须协议、主机、规范化路径全部一致才算指向自身。** `https` 页面上写 `http` canonical 判 `warn` 并点名协议不一致，不能算通过；跨主机、跨路径、多个标签的原有判定不变。
 - **缺少 `404.html` 会把 Pages 的未知路径回退到 `/`（200）。** 这对 SPA 是预期，对多页站是故障；先定模式再判断，不要一刀切。
 - **同一个站点，模式选错会得出相反结论。** `check-build` 和 `verify-deployment` 必须用同一个 `--mode`，报告里写明用了哪个。
 - **`_headers` / `_redirects` 必须在产物根目录**，不是仓库根目录。

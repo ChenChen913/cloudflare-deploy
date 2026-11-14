@@ -30,7 +30,11 @@
  * 只记录 Location、状态码和重定向链，避免 3xx 把验收脚本带去 127.0.0.1、
  * 内网地址或云厂商元数据端点。主站结果用 redirectOutcome 区分
  * 同源验证成功 / 跨源目标未验证 / 循环或超跳数 / Location 无法解析 / 协议不受支持。
+ * 两者共用 MAX_REDIRECTS：最多跟随 5 次同源重定向，并额外请求一次最终地址；
+ * 该地址再返回 3xx（第 6 次重定向）即判超限，且不请求它的目标。
  * 资源 3xx 只要带可解析的 Location 就记为发生过重定向，不看链长度。
+ *
+ * canonical 只在协议、主机、规范化路径三者都一致时才算指向自身；协议不同单独标 warn。
  *
  * 只读：只发 GET/HEAD/OPTIONS。跨源目标不会被请求。
  * 相对路径按站点根解析（支持 /repo/ 这样的子路径站点），以 / 开头的按域名根解析。
@@ -153,6 +157,9 @@ if (corsArg) {
 }
 
 const UA = "cloudflare-deploy-verify/2";
+// 主站链与资源探针共用的跳数上限：最多跟随 5 次同源重定向，并额外请求一次
+// 第 5 次重定向指向的最终地址；该地址仍返回 3xx（第 6 次重定向）即判超限。
+const MAX_REDIRECTS = 5;
 const checks = [];
 // 附加字段不能覆盖 id/status/detail 本身。
 const add = (id, status, detail, extra = {}) => checks.push({ ...extra, id, status, detail });
@@ -178,9 +185,13 @@ async function req(url, opts = {}) {
 /**
  * 主站重定向链。只自动跟随同源（协议 + 主机 + 端口）重定向；其他情况立即停止，
  * 把 Location、状态码和已发生的 hops 记进结果，绝不请求目标地址。
+ * 跳数语义与 probeAsset 一致（共用 MAX_REDIRECTS）：最多跟随 max 次重定向，
+ * 并额外请求一次第 max 次重定向指向的最终地址，所以最多 max+1 次请求。
+ * 最后一次请求若仍是同源 3xx，就是第 max+1 次重定向，判 loop-or-limit 且不请求
+ * 它的目标；这跳不计入「已跟随链」，证据放在 limitHop / stopReason。
  * stopped 用于报告分类：cross-origin / unsupported-protocol / invalid-location / loop-or-limit。
  */
-async function chain(url, max = 5) {
+async function chain(url, max = MAX_REDIRECTS) {
   const hops = [];
   let current = url;
   let startOrigin = null;
@@ -189,28 +200,37 @@ async function chain(url, max = 5) {
     error: null, hops, final: current, status: null, res: null,
     stopped: null, stopReason: null, redirectTarget: null, ...extra,
   });
-  for (let i = 0; i < max; i++) {
+  // redirects 表示「本跳之前已跟随的重定向次数」；0..max 共 max+1 次请求。
+  for (let redirects = 0; redirects <= max; redirects++) {
     const r = await req(current, { method: "GET", headers: { "user-agent": UA } });
     if (!r.res) return done({ error: r.error });
     const loc = r.res.headers.get("location");
-    const hop = { url: current, status: r.res.status, location: loc, ms: r.ms };
-    hops.push(hop);
-    if (r.res.status >= 300 && r.res.status < 400) {
-      const c = classifyRedirect(current, loc, startOrigin);
-      hop.redirect = c.kind;
-      hop.next = c.next;
-      hop.protocolChanged = c.protocolChanged;
-      if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
-      if (c.kind !== "same-origin") {
-        return done({
-          status: r.res.status, res: r.res,
-          stopped: c.kind, stopReason: c.reason, redirectTarget: c.next,
-        });
-      }
-      current = c.next;
-      continue;
+    const status = r.res.status;
+    if (!(status >= 300 && status < 400)) {
+      hops.push({ url: current, status, location: loc, ms: r.ms });
+      return done({ status, res: r.res });
     }
-    return done({ status: r.res.status, res: r.res });
+    const c = classifyRedirect(current, loc, startOrigin);
+    const hop = {
+      url: current, status, location: loc, ms: r.ms,
+      redirect: c.kind, next: c.next, protocolChanged: c.protocolChanged,
+    };
+    if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
+    // 安全策略优先：跨源 / 非 http(s) / 无效 Location 一律不请求目标。
+    if (c.kind !== "same-origin") {
+      hops.push(hop);
+      return done({ status, res: r.res, stopped: c.kind, stopReason: c.reason, redirectTarget: c.next });
+    }
+    // 第 max+1 次同源重定向 = 超限；不跟随，也不为「完成最终验证」请求目标。
+    if (redirects === max) {
+      return done({
+        status, res: r.res, stopped: "loop-or-limit",
+        stopReason: `重定向超过 ${max} 跳，可能循环（第 ${max + 1} 次重定向指向 ${c.next || loc || "未知地址"}，未请求目标）`,
+        limitHop: { ...hop, followed: false },
+      });
+    }
+    hops.push(hop);
+    current = c.next;
   }
   return done({ stopped: "loop-or-limit", stopReason: `重定向超过 ${max} 跳，可能循环`, status: hops.at(-1)?.status ?? null });
 }
@@ -232,8 +252,6 @@ async function probe(url, headers = {}) {
 const sameHost = (a, b) => {
   try { return new URL(a, base).host === new URL(b, base).host; } catch { return false; }
 };
-
-const MAX_ASSET_REDIRECTS = 5;
 
 /**
  * 资源专用探针。req() 用 redirect: "manual"，3xx 不会自动跟随；旧逻辑把
@@ -257,7 +275,7 @@ async function probeAsset(url) {
     finalUrl: current, finalStatus: null, crossHost: false,
     ...extra,
   });
-  for (let hop = 0; hop <= MAX_ASSET_REDIRECTS; hop++) {
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const r = await probe(current);
     method = r.method;
     if (r.note) fallback = true;
@@ -302,7 +320,7 @@ async function probeAsset(url) {
     if (status >= 200 && status < 300) return out({ ok: true, level: "pass", reason: null, finalStatus: status });
     return out({ ok: false, level: "fail", reason: `最终状态 ${status} 不是 2xx`, finalStatus: status });
   }
-  return out({ ok: false, level: "fail", reason: `重定向超过 ${MAX_ASSET_REDIRECTS} 跳，可能循环`, finalStatus: chainHops.at(-1)?.status ?? null });
+  return out({ ok: false, level: "fail", reason: `重定向超过 ${MAX_REDIRECTS} 跳，可能循环`, finalStatus: chainHops.at(-1)?.status ?? null });
 }
 
 const root = await chain(base);
@@ -312,7 +330,7 @@ const rootCrossTarget = root.redirectTarget || root.final;
 const crossedHost = Boolean(root.redirectTarget) && !sameHost(rootCrossTarget, base);
 const rootExtra = {
   hops: root.hops, finalUrl: root.final, redirectTarget: root.redirectTarget,
-  crossedHost, httpStatus: root.status,
+  crossedHost, httpStatus: root.status, limitHop: root.limitHop || null,
 };
 if (root.error) {
   add("root", "fail", `请求失败：${root.error}`, { ...rootExtra, redirectOutcome: "network-error", verified: false });
@@ -427,17 +445,25 @@ if (html) {
     if (!parsed) {
       add("canonical", "fail", `canonical href 无法解析：${href || "(空)"}`, { href });
     } else {
-      const hostOk = parsed.host === new URL(base).host;
-      const pathOk = norm(parsed.pathname) === norm(new URL(base).pathname);
+      const baseUrl = new URL(base);
+      // 指向自身必须协议、主机、规范化路径三者都一致；只比 host + pathname 会把
+      // https 站点上的 http canonical 误判成 self-canonical。
+      const protocolOk = parsed.protocol === baseUrl.protocol;
+      const hostOk = parsed.host === baseUrl.host;
+      const pathOk = norm(parsed.pathname) === norm(baseUrl.pathname);
+      const self = protocolOk && hostOk && pathOk;
+      const protoNote = protocolOk ? "" : `协议不一致（canonical 为 ${parsed.protocol}，当前站点为 ${baseUrl.protocol}）；`;
       add(
         "canonical",
-        hostOk && pathOk ? "pass" : "warn",
-        hostOk && pathOk
+        self ? "pass" : "warn",
+        self
           ? `canonical 指向自身（${parsed.pathname}）`
           : !hostOk
-            ? `canonical 指向其他主机：${parsed.origin}${parsed.pathname}；如果这是备用站且策略是「canonical 指主站」属预期，否则权重被指向外部`
-            : `canonical 指向另一个路径：${parsed.pathname}；确认这是有意为之（分页/聚合页）`,
-        { href, sameHost: hostOk, samePath: pathOk }
+            ? protoNote + `canonical 指向其他主机：${parsed.origin}${parsed.pathname}；如果这是备用站且策略是「canonical 指主站」属预期，否则权重被指向外部`
+            : !pathOk
+              ? protoNote + `canonical 指向另一个路径：${parsed.pathname}；确认这是有意为之（分页/聚合页）`
+              : `${protoNote}canonical 协议与当前站点不一致：${parsed.href}；主机和路径相同但协议不同，不算指向自身（当前站点 ${baseUrl.href}）`,
+        { href, sameProtocol: protocolOk, sameHost: hostOk, samePath: pathOk }
       );
     }
   }
