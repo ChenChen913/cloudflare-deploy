@@ -1,14 +1,14 @@
 ---
 name: cloudflare-deploy
-description: 把 GitHub 项目部署或迁移到 Cloudflare Pages / Workers 的端到端技能。当用户要求部署、托管、迁移到 Cloudflare，选择 Pages 还是 Workers，保留 GitHub Pages 作为备用站，检查部署后的页面/路由/静态资源/CORS/索引，或排查 Cloudflare 部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目并给出部署方案；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
+description: 把程序项目部署或迁移到 Cloudflare Pages / Workers 的端到端技能，也覆盖 Java/Python/PHP/Ruby/.NET、容器或前后端混合项目的路线判断。当用户要求部署、托管、迁移到 Cloudflare，选择 Pages 还是 Workers，保留 GitHub Pages 作为备用站，检查部署后的页面/路由/静态资源/CORS/索引，或排查 Cloudflare 部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目并给出部署方案；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
 agent_created: true
 ---
 
 # Cloudflare 部署
 
-把 GitHub 仓库变成一次**经过验证**的 Cloudflare 部署。顺序是：**先验证链路与可行性** → 只读识别项目 → 选产品 → 写计划 → 部署到预览地址 → 用真实请求验收 → 写报告。前提不成立就停下来，不要靠「先构建一下看看」去发现问题。
+把一个程序项目变成一次**经过验证**的 Cloudflare 部署。顺序是：**先验证链路与可行性** → 只读识别项目 → 选产品 → 写计划 → 部署到预览地址 → 用真实请求验收 → 写报告。前提不成立就停下来，不要靠「先构建一下看看」去发现问题。
 
-> **能力边界（先读这条）**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当作**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容），数据库写入、登录会话、第三方回调仍需专项验证。运行时兼容性、套餐与成本见 `references/runtime-compat.md`。
+> **能力边界（先读这条）**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当作**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容），数据库写入、登录会话、第三方回调仍需专项验证。运行时兼容性、套餐与成本见 `references/runtime-compat.md`；**Java/Python/PHP/Ruby/.NET 或前后端混合项目**先在 `references/tech-stack-fit.md` 判断路线，不要假设所有技术栈都能用本技能的脚本完整验收。
 
 ## 一、先决条件
 
@@ -25,7 +25,7 @@ agent_created: true
 | 域名 / DNS | 只有绑自定义域名才需要 | 域名的 NS 在哪、是否有 CAA | Pages 的 apex 需要 NS 在 Cloudflare；子域可用外部 CNAME；Workers 必须 NS 在 Cloudflare |
 | R2 订阅 | 只有用 R2 才需要 | 控制台 Storage & databases → R2 | 首次使用要走一次 checkout（免费额度也需开通） |
 | GitHub CLI | 可选 | `gh --version`、`gh auth status` | 只影响仓库/DNS 自动化，不影响 `wrangler` 部署 |
-| Docker | 只有用 Containers | `docker info` | Containers 需要本地构建镜像；没有 Docker 就直接排除该方案 |
+| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info` | 可用预构建镜像或 CI 构建；只有本地构建/推送才必须有 Docker |
 | 账号套餐 / 订阅 | 用付费能力时必须 | Manage Account → Billing → Subscriptions | 免费计划不能用 Containers；R2 首次使用需完成一次 checkout |
 | 付款方式 | 只有付费功能才需要 | 控制台 Billing | Pages/Workers 免费额度不要求绑卡；Workers Paid、R2 超额等需要 |
 
@@ -92,12 +92,13 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 
 | 用户意图 | 做什么 |
 |---|---|
-| “部署到 Cloudflare” / “迁移这个仓库” | 完整流程，第 0–7 步 |
+| “部署到 Cloudflare” / “迁移这个仓库” | 完整流程，第 0–7 步；如果项目不是 JS/TS 或前后端混合，第 2 步先读 `references/tech-stack-fit.md` |
+| “Java/Python/PHP 项目能部署吗 / 前后端怎么拆” | 只做第 1–2 步；先给路线初判（Workers / Containers / 外部后端），再列阻塞项和未验证项，不承诺自动部署 |
 | “Pages 还是 Workers？” | 只做第 1–2 步（识别 + 选型），给结论，不部署 |
 | “检查现有部署” | 第 6 步 + `references/verification.md`，不改文件 |
 | “保留 GitHub Pages 备用” | `references/github-pages-backup.md`，再做第 6 步 |
 | “部署失败 / 502 / 404 / CORS” | 先 `scripts/probe.mjs`，再 `scripts/check-env.mjs` + `references/troubleshooting.md` |
-| “迁数据库 / 后端” | 第 0–3 步；读 `references/runtime-compat.md`、`platform-selection.md`、`migration-guide.md`；数据库操作必须确认 |
+| “迁数据库 / 后端” | 第 0–3 步；读 `references/runtime-compat.md`、`references/platform-selection.md`、`references/migration-guide.md`；非 JS/TS 或混合前后端先读 `references/tech-stack-fit.md`；数据库操作必须确认 |
 
 ### 0. 链路探针与可行性熔断（先于一切工程动作）
 
@@ -138,9 +139,11 @@ node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 
 **`suggested` 只是候选建议，不是部署决定。** 只有 `confidence: high` 且依据是现有 Wrangler 配置时，才可以照着做；`medium` 必须结合第 2 步的三个问题再定。`project.suggestedMode` 给出建议的验收模式，`risks` 会标出需要核对的 ORM / 驱动 / 原生模块——两者都只是**待核对信号**，不是可行性结论。
 
-同时按需读取：`package.json`、锁文件、框架配置、`.github/workflows/*`、`wrangler.*`、`_headers`、`_redirects`、`CNAME`、`.env.example`。**不要为了识别而安装依赖。**
+同时按需读取：`package.json`、锁文件、框架配置、`.github/workflows/*`、`wrangler.*`、`_headers`、`_redirects`、`CNAME`、`.env.example`；非 JS 项目再看 `pom.xml`/`build.gradle*`、`requirements.txt`/`pyproject.toml`、`composer.json`、`Gemfile`、`*.csproj`、`Dockerfile` 等，判断是否存在未识别的前后端。**不要为了识别而安装依赖。**
 
 Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；先问清楚部署哪个，不要猜。多个锁文件、多个 `index.html`、动态框架配置都属于“需要人工确认”的情况，脚本会写进 `risks`。
+
+`detect-project.mjs` 的识别范围以 JS/静态生态为主；如果仓库里还有 `pom.xml`/`build.gradle*`、`requirements.txt`/`pyproject.toml`、`composer.json`、`Gemfile`、`*.csproj`、`Dockerfile`，不要因为脚本只报了前端就断定整个项目是静态站——按 `references/tech-stack-fit.md` 先判断后端/容器路线。
 
 ### 2. 选择目标
 
@@ -153,6 +156,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 - **Next.js SSR/ISR** → Workers + vinext/OpenNext，不能当纯静态上传。
 - **原生模块、`node:fs`、长驻进程、运行时不受支持** → 直接说明不适合，建议保留原主机或容器，不要硬迁。
 - **SSR / 全栈、ORM、数据库驱动** → 先读 `references/runtime-compat.md` 判可行性，再谈部署方式；硬阻断时给「换依赖 / 换方案 / 换平台」的代价，不要强迁。
+- **Java/Python/PHP/Ruby/.NET 或前后端混合** → 先读 `references/tech-stack-fit.md`：判断是 Workers、Containers 还是保留外部后端；只部署前端时明确写“后端未迁移/未验证”，不要把前端上线当成整个项目上线。
 
 但**不要只凭框架名决定**。静态站（含 SPA）Pages 和 Workers 都能托管，真正决定的是三个问题：
 
@@ -160,7 +164,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 2. 是否要零配置 `git push` 部署？（Pages 的 Git 集成更省事）
 3. 以后是否要 Cloudflare 侧后端（D1/DO/Queues/Cron）？（要就直接 Workers）
 
-给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。**同时给出成本档**（免费 / $5 月起 / 按量计费）和套餐前提：Containers 必须 Workers Paid 加本地 Docker，免费计划直接排除。现行额度查官方 Limits / Pricing 页，不要沿用旧数字；见 `references/runtime-compat.md`。
+给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。**同时给出成本档**（免费 / $5 月起 / 按量计费）和套餐前提：Containers 必须 Workers Paid；本地构建镜像才需要 Docker，也可用预构建镜像/CI 构建，免费计划直接排除 Containers。现行额度查官方 Limits / Pricing 页，不要沿用旧数字；见 `references/runtime-compat.md`。
 
 ### 3. 写部署计划
 
@@ -314,6 +318,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 | `references/cross-platform.md` | Windows / macOS / Linux / WSL / 容器 / CI 的差异 |
 | `references/platform-selection.md` | 选 Pages 还是 Workers、域名限制、Git 集成 |
 | `references/runtime-compat.md` | **可行性判定**：已知不可行组合、ORM × 运行时、现行额度/成本、构建环境、止损线 |
+| `references/tech-stack-fit.md` | 非 JS/TS 后端、Containers、前后端混合、CMS/移动端的技术栈选型与边界（选型清单，不承诺自动验收） |
 | `references/deployment-workflows.md` | 构建/部署、Git 与 Direct、环境变量、Jekyll、Next.js |
 | `references/pages-runtime.md` | 响应头、重定向、404/SPA、缓存、CORS、Functions |
 | `references/github-pages-backup.md` | 保留或验证 GitHub Pages 备用站 |

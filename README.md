@@ -2,9 +2,9 @@
 
 **简体中文** | [English](README.en.md)
 
-一个可复用的 Agent Skill：把 GitHub 项目部署到 Cloudflare Pages 或 Workers。流程是：**先验证链路与可行性** → 识别仓库 → 选产品 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 写报告。
+一个可复用的 Agent Skill：评估并尽可能把程序项目（静态站、前端、全栈或后端）部署到 Cloudflare Pages 或 Workers；不适用时给出保留外部后端/容器的替代路线。流程是：**先验证链路与可行性** → 识别仓库 → 选产品 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 写报告。
 
-> **能力边界**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容）。运行时兼容性、套餐与成本见 `references/runtime-compat.md`。
+> **能力边界**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容）。运行时兼容性、套餐与成本见 `references/runtime-compat.md`；Java/Python/PHP/Ruby/.NET 或前后端混合项目先看 `references/tech-stack-fit.md`，不要假设所有技术栈都能被脚本完整验收。
 
 技能正文使用简体中文。文件名和代码标识符保持 ASCII，是为了跨系统与压缩包兼容；JSON 字段名保持英文，保证脚本可被机器读取。
 
@@ -39,6 +39,7 @@ cloudflare-deploy/
 │   ├── cross-platform.md     # Windows / macOS / Linux / WSL / 容器 / CI
 │   ├── platform-selection.md # Pages vs Workers、额度、价格
 │   ├── runtime-compat.md     # 可行性判定、ORM × 运行时、成本、止损线
+│   ├── tech-stack-fit.md     # 非 JS/TS 后端、Containers、混合项目的选型与边界
 │   ├── deployment-workflows.md
 │   ├── pages-runtime.md      # 响应头、重定向、404/SPA、缓存、CORS
 │   ├── github-pages-backup.md
@@ -68,14 +69,14 @@ cloudflare-deploy/
 │   ├── hangla-2026-11-14.md  # 真实项目部署记录（Cloudflare Pages Direct Upload）
 │   └── assets/hangla-home.png # 部署后的实际页面截图
 └── tests/
-│   ├── run-tests.mjs
-│   ├── check-skill.mjs      # 结构自检：frontmatter、引用路径、绝对路径
-│   ├── browser-diff.mjs     # 可选：真实 Chrome/Edge CDP 差分（Node 22+，不参与默认套件）
-│   ├── fixtures/
-│   │   ├── loopback-tls.mjs # 本地 HTTPS 验收测试用的自签回环证书（非真实凭据）
-│   │   └── html5-oracle.json # Chrome/Edge 录制的 HTML5 解析 DOM facts（115 例）
-│   ├── last-run.txt         # 最近一次测试输出（由测试自动生成）
-│   └── results.md
+    ├── run-tests.mjs
+    ├── check-skill.mjs      # 结构自检：frontmatter、引用路径、绝对路径
+    ├── browser-diff.mjs     # 可选：真实 Chrome/Edge CDP 差分（Node 22+，不参与默认套件）
+    ├── fixtures/
+    │   ├── loopback-tls.mjs # 本地 HTTPS 验收测试用的自签回环证书（非真实凭据）
+    │   └── html5-oracle.json # Chrome/Edge 录制的 HTML5 解析 DOM facts（115 例）
+    ├── last-run.txt         # 最近一次测试输出（由测试自动生成）
+    └── results.md
 ```
 
 ## 真实部署记录
@@ -86,7 +87,7 @@ cloudflare-deploy/
 - **自动化测试记录**：[tests/last-run.txt](tests/last-run.txt) 和 [tests/results.md](tests/results.md)（由本地测试生成/维护，不代表线上部署）。
 - **技能文档**：[SKILL.md](SKILL.md)、[references/](references/)（流程、模板和检查规则，部分规则引用 Cloudflare 官方文档，但本身不是部署验证）。
 
-目前只有 **hangla 的 Pages Direct Upload** 经过真实部署和 HTTP/浏览器冒烟；Git 集成、Workers、自定义域名/DNS、其他套餐/项目类型尚未在本仓库的记录中验证。不要把一次部署记录当成对所有 Cloudflare 部署方式的验证。
+目前有两份真实 **Pages Direct Upload** 经验：hangla 记录和 `references/migration-guide.md` 的 Jekyll 项目；Git 集成、Workers、Containers、Java/Python 后端、其他套餐/项目类型尚未在本仓库记录中验证。不要把 Pages 经验当成对所有 Cloudflare 部署方式都已验证。
 
 ## 前提条件
 
@@ -99,7 +100,7 @@ cloudflare-deploy/
 | Git | 仓库操作 | `git --version` |
 | 域名 / DNS | 只有绑自定义域名 | NS 在哪、CAA 记录 |
 | R2 订阅 | 只有用 R2 | Storage & databases → R2 开通 |
-| Docker | 只有用 Containers | `docker info`（Containers 还必须 Workers Paid） |
+| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info`（可用预构建镜像/CI 构建，不强制本地 Docker；Containers 必须 Workers Paid） |
 | 账号套餐 / 订阅 | 用付费能力时 | Manage Account → Billing → Subscriptions |
 | GitHub CLI | 可选的仓库自动化 | `gh auth status` |
 

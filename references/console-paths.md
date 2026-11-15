@@ -57,7 +57,7 @@
 | R2 | Storage & databases → R2 → Overview | 首次使用要完成 checkout，免费额度也需开通 |
 | D1 | Storage & databases → D1 | 界面标签可能是 “D1 SQL Database” |
 | KV | Storage & databases → Workers KV | 命名空间在这里创建 |
-| Queues | Workers & Pages → Queues | 需要 Workers Paid |
+| Queues | Workers & Pages → Queues | Free 有每日额度；超出/更高配额需 Workers Paid，以当前官方计划为准 |
 | Hyperdrive | Storage & databases → Hyperdrive | 连接外部 Postgres/MySQL |
 
 ## 5. 域名与证书
@@ -115,3 +115,4 @@ dash.cloudflare.com
 - Workers 变量与密钥：https://developers.cloudflare.com/workers/configuration/environment-variables/
 - Workers 自定义域名：https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
 - R2 开通：https://developers.cloudflare.com/r2/get-started/
+- Queues 定价/免费额度：https://developers.cloudflare.com/queues/platform/pricing/

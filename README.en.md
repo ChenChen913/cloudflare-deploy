@@ -2,9 +2,9 @@
 
 [简体中文](README.md) | **English**
 
-A reusable Agent Skill for deploying GitHub projects to Cloudflare Pages or Workers: **verify the account/network path and technical feasibility first**, then inspect the repo, choose the product, write a plan, build, deploy to a preview, verify with real HTTP requests, and report what was actually tested.
+A reusable Agent Skill for assessing and, where feasible, deploying application projects (static sites, frontends, full-stack or backends) to Cloudflare Pages or Workers; when not a fit, it gives an alternative route (keep the external backend or use Containers). Flow: **verify the account/network path and technical feasibility first**, then inspect the repo, choose the product, write a plan, build, deploy to a preview, verify with real HTTP requests, and report what was actually tested.
 
-> **Scope**: the scripts fully cover static sites / SPAs / SSG for build checks and HTTP verification. For SSR / full-stack projects, treat this skill as a **workflow checklist**: `check-build.mjs` does not apply, and `verify-deployment.mjs` only checks the HTTP layer (root page, APIs, server-rendered content). Runtime compatibility, plans, and cost: `references/runtime-compat.md`.
+> **Scope**: the scripts fully cover static sites / SPAs / SSG for build checks and HTTP verification. For SSR / full-stack projects, treat this skill as a **workflow checklist**: `check-build.mjs` does not apply, and `verify-deployment.mjs` only checks the HTTP layer (root page, APIs, server-rendered content). Runtime compatibility, plans and cost: `references/runtime-compat.md`. For Java/Python/PHP/Ruby/.NET or mixed frontend/backend projects, read `references/tech-stack-fit.md` first; do not assume the scripts fully verify every stack.
 
 The skill body is written in Simplified Chinese. File names and code identifiers stay ASCII for cross-platform compatibility; JSON keys stay English so scripts remain machine-readable.
 
@@ -39,6 +39,7 @@ cloudflare-deploy/
 │   ├── cross-platform.md     # Windows / macOS / Linux / WSL / containers / CI
 │   ├── platform-selection.md # Pages vs Workers, limits, pricing
 │   ├── runtime-compat.md     # feasibility, ORM x runtime, cost, stop-loss
+│   ├── tech-stack-fit.md     # non-JS/TS backends, Containers, mixed-project fit
 │   ├── deployment-workflows.md
 │   ├── pages-runtime.md      # headers, redirects, 404/SPA, cache, CORS
 │   ├── github-pages-backup.md
@@ -86,7 +87,7 @@ cloudflare-deploy/
 - **Automated test records**: [tests/last-run.txt](tests/last-run.txt) and [tests/results.md](tests/results.md) (generated/maintained locally; these do not prove a live deployment).
 - **Skill documentation**: [SKILL.md](SKILL.md) and [references/](references/) (workflow, templates, and rules; some rules cite Cloudflare's official documentation, but the docs themselves are not deployment verification).
 
-Only **hangla's Pages Direct Upload** has been deployed for real and checked over HTTP/browser smoke so far. Git integration, Workers, custom domains/DNS, and other plans/project types are not verified by the records in this repository. Do not treat one deployment record as verification of every Cloudflare deployment mode.
+There are two real **Pages Direct Upload** experiences so far: the hangla record and the Jekyll project in `references/migration-guide.md`. Git integration, Workers, Containers, Java/Python backends, and other plans/project types are not verified by the records in this repository. Do not treat the Pages experience as verification of every Cloudflare deployment mode.
 
 ## Prerequisites
 
@@ -99,7 +100,7 @@ Only **hangla's Pages Direct Upload** has been deployed for real and checked ove
 | Git | Repo operations | `git --version` |
 | Domain / DNS | Custom domain only | NS location, CAA records |
 | R2 subscription | R2 only | Storage & databases → R2 checkout |
-| Docker | Containers only | `docker info` (Containers also require Workers Paid) |
+| Docker | Containers with local image build/push only | `docker info` (prebuilt images/CI builds are possible; Containers require Workers Paid) |
 | Account plan / subscription | Paid features | Manage Account → Billing → Subscriptions |
 | GitHub CLI | Optional automation | `gh auth status` |
 
