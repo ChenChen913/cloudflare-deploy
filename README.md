@@ -100,7 +100,7 @@ cloudflare-deploy/
 | Git | 仓库操作 | `git --version` |
 | 域名 / DNS | 只有绑自定义域名 | NS 在哪、CAA 记录 |
 | R2 订阅 | 只有用 R2 | Storage & databases → R2 开通 |
-| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info`（可用预构建镜像/CI 构建，不强制本地 Docker；Containers 必须 Workers Paid） |
+| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info`（可用预构建镜像、CI 或 Workers Builds 构建，不强制本地 Docker；Containers 必须 Workers Paid） |
 | 账号套餐 / 订阅 | 用付费能力时 | Manage Account → Billing → Subscriptions |
 | GitHub CLI | 可选的仓库自动化 | `gh auth status` |
 

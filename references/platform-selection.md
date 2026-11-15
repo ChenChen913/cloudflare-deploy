@@ -108,8 +108,10 @@ Cloudflare 的 Pages 文档顶部现在写着：
 | Pages 静态 / Workers 静态资源 | 免费 | $0 | 多数静态站到这一步就够 |
 | Workers + D1 / KV / R2 | 免费额度起 | $0 起，超额按量 | R2 首次使用要走一次 checkout |
 | Workers Paid | 付费订阅 | $5/月 起 | 更高 CPU / 子请求额度 |
-| Containers | **必须 Workers Paid** | $5/月 起 + 用量 | 免费计划不可用；本地还需 Docker 构建镜像 |
+| Containers | **产品要求：Workers Paid** | $5/月 起 + 用量 | 免费计划不可用；镜像需 linux/amd64。**仅本地构建/推送镜像时需要 Docker**；预构建镜像/CI/Workers Builds 不强制本机 Docker |
 | Hyperdrive | 查现行定价页 | 按量 | 加速外部 Postgres，不等于托管 Postgres |
+
+> **区分两件事**：Cloudflare Containers 的**产品要求**是 Workers Paid；本地 Docker 只是“本地构建/推送镜像”的**环境要求**。如果用户没有本地 Docker，先判断能否用预构建镜像或 CI/Workers Builds 构建，不要直接排除 Containers。
 
 **Cloudflare 没有托管 Postgres**：D1 是 SQLite（Workers binding），外部 PG 要么保留外部服务，要么换数据库。运行时兼容性、ORM × 驱动组合、构建环境与止损线见 `references/runtime-compat.md`。
 
@@ -143,7 +145,8 @@ Pages 的 Direct Upload 和 Workers 的 CLI 可以和现有 Git 流程共存，�
 
 - 依赖 Workers 没有对应实现的 Node 原生模块，且无法替换。
 - 运行时硬冲突（WASM 运行时动态编译、ORM 打包链路、适配器版本不匹配）——先查 `references/runtime-compat.md`，不要靠反复构建去试。
-- 需要持久化本地文件系统或长驻后台进程。
+- 需要完整可写持久本地盘，且不接受 R2/外部存储（Containers 默认盘临时；Snapshot 仍 Public Beta，仅 `durable_object` 策略可用，`default` 策略不能创建/恢复；快照不可变、绑定镜像版本，30 天 TTL；见 https://developers.cloudflare.com/containers/guides/snapshots/ ）。
+- 需要常驻集群、自动伸缩或原始 TCP/UDP 入站，Workers 不承载，Containers 也不适合。
 - 数据库不能迁 D1/Hyperdrive，且外部数据库延迟不可接受。
 - 域名不能迁 NS，而目标是 Workers。
 - 站点文件数超过**当前套餐生效上限**（Free 20,000；Pages 付费需 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，Workers 付费需 Wrangler >= 4.34.0，才是 100,000）或有单文件超过 25 MiB，且用户不接受 R2。
@@ -157,6 +160,7 @@ Pages 的 Direct Upload 和 Workers 的 CLI 可以和现有 Git 流程共存，�
 - Pages 限制：https://developers.cloudflare.com/pages/platform/limits/
 - Workers 限制：https://developers.cloudflare.com/workers/platform/limits/
 - Workers 定价：https://developers.cloudflare.com/workers/platform/pricing/
+- Containers 镜像/预构建：https://developers.cloudflare.com/containers/guides/image-management/
 - D1 限制：https://developers.cloudflare.com/d1/platform/limits/
 - R2 定价：https://developers.cloudflare.com/r2/pricing/
 - Pages 自定义域名：https://developers.cloudflare.com/pages/configuration/custom-domains/

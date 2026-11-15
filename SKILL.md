@@ -25,7 +25,7 @@ agent_created: true
 | 域名 / DNS | 只有绑自定义域名才需要 | 域名的 NS 在哪、是否有 CAA | Pages 的 apex 需要 NS 在 Cloudflare；子域可用外部 CNAME；Workers 必须 NS 在 Cloudflare |
 | R2 订阅 | 只有用 R2 才需要 | 控制台 Storage & databases → R2 | 首次使用要走一次 checkout（免费额度也需开通） |
 | GitHub CLI | 可选 | `gh --version`、`gh auth status` | 只影响仓库/DNS 自动化，不影响 `wrangler` 部署 |
-| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info` | 可用预构建镜像或 CI 构建；只有本地构建/推送才必须有 Docker |
+| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info` | 可用预构建镜像、CI 或 Workers Builds 构建；只有本地构建/推送才必须有 Docker |
 | 账号套餐 / 订阅 | 用付费能力时必须 | Manage Account → Billing → Subscriptions | 免费计划不能用 Containers；R2 首次使用需完成一次 checkout |
 | 付款方式 | 只有付费功能才需要 | 控制台 Billing | Pages/Workers 免费额度不要求绑卡；Workers Paid、R2 超额等需要 |
 
@@ -164,7 +164,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 2. 是否要零配置 `git push` 部署？（Pages 的 Git 集成更省事）
 3. 以后是否要 Cloudflare 侧后端（D1/DO/Queues/Cron）？（要就直接 Workers）
 
-给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。**同时给出成本档**（免费 / $5 月起 / 按量计费）和套餐前提：Containers 必须 Workers Paid；本地构建镜像才需要 Docker，也可用预构建镜像/CI 构建，免费计划直接排除 Containers。现行额度查官方 Limits / Pricing 页，不要沿用旧数字；见 `references/runtime-compat.md`。
+给出目标时，说明是哪一两个事实决定的，以及哪个问题你还没确认。**同时给出成本档**（免费 / $5 月起 / 按量计费）和套餐前提：Containers 的套餐前提是 Workers Paid；本地构建/推送镜像才需要 Docker，预构建镜像/CI/Workers Builds 均不强制本地 Docker；没有本地 Docker 不等于不能用 Containers；Free 计划本身不能用 Containers。现行额度查官方 Limits / Pricing 页，不要沿用旧数字；见 `references/runtime-compat.md`。
 
 ### 3. 写部署计划
 

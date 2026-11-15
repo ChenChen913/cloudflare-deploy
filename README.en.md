@@ -100,7 +100,7 @@ There are two real **Pages Direct Upload** experiences so far: the hangla record
 | Git | Repo operations | `git --version` |
 | Domain / DNS | Custom domain only | NS location, CAA records |
 | R2 subscription | R2 only | Storage & databases → R2 checkout |
-| Docker | Containers with local image build/push only | `docker info` (prebuilt images/CI builds are possible; Containers require Workers Paid) |
+| Docker | Containers with local image build/push only | `docker info` (prebuilt images, CI or Workers Builds do not require local Docker; Containers require Workers Paid) |
 | Account plan / subscription | Paid features | Manage Account → Billing → Subscriptions |
 | GitHub CLI | Optional automation | `gh auth status` |
 

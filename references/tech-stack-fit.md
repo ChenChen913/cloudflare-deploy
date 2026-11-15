@@ -11,8 +11,8 @@
 |---|---|---|
 | 纯静态、SSG、SPA | Pages，或 Workers Static Assets | 输出目录、SPA fallback、文件数/单文件限制 |
 | JS/TS SSR、全栈 | Workers + 框架适配器；Pages 只适合既有项目/静态导出 | 适配器版本、Node API、图片/ISR、数据库绑定 |
-| Python 后端 | 轻量纯 Python 可考虑 Python Workers；需要原生包/线程/大内存则 Containers 或保留外部后端 | C 扩展、线程、128MB、无持久文件系统 |
-| Java/JVM 后端 | Containers（Docker 镜像），或保留原后端/反代 | Workers 没有 JVM；Containers 需 Workers Paid，冷启动、临时盘、无自动伸缩 |
+| Python 后端 | 轻量纯 Python / PyEmscripten / Pyodide 兼容依赖可考虑 Python Workers；不兼容 Wasm 的原生扩展、线程/大内存则 Containers 或保留外部后端 | 具体依赖逐项核实；线程/多进程、128MB、无持久文件系统 |
+| Java/JVM 后端 | Containers（linux/amd64 镜像），或保留原后端/反代 | Workers 没有 JVM；Containers 需 Workers Paid，冷启动、临时盘、无自动伸缩 |
 | PHP、Ruby、.NET、Elixir 服务 | 通常 Containers 或保留外部后端 | 入站协议、常驻进程、数据库/文件系统、冷启动 |
 | Go、Rust 服务 | Rust 有 workers-rs/一等路线；Go/Rust 也可编译 Wasm，但只适合特定场景；普通 HTTP 服务优先 Containers 或外部主机 | 不要因为“可编译 Wasm”就认为 Gin/Axum/ASP.NET 能原样跑；依赖/运行时/网络限制要核对 |
 | 前后端分离 | 前端 Pages/Workers，后端 Workers/Python Workers/Containers/外部 API | 两条部署链、CORS、域名、secrets、回滚都要分别处理 |
@@ -20,8 +20,9 @@
 
 ## 2. 非 JS/TS 技术栈的现实边界
 
-- **Java/JVM（Spring Boot、Quarkus、Micronaut、Tomcat、Kotlin/Scala 的 JVM 版等）**：Workers 官方没有 Java/JVM 运行时（Kotlin 可编译 Wasm、Scala 可 Scala.js，但不是普通服务端）。可容器化就评估 Containers；否则保留原服务器，用 Cloudflare 做 DNS/CDN/WAF/反代。Containers 需要 Workers Paid、linux/amd64 镜像；本地构建/推送时才需要 Docker（也可用预构建镜像或 CI）。通常有冷启动，磁盘是临时的，当前没有内置自动伸缩，且容器只能经 Worker 以 HTTP(S) 访问。
-- **Python（FastAPI、Django、Flask 等）**：轻量、纯 Python/依赖可 Wasm、能接受 128MB/无线程限制的，可评估 Python Workers；有原生 C 扩展、线程/多进程、大内存、Redis/JMS、长任务，通常用 Containers 或外部后端。Python Workers 不是“完整 CPython 服务器”，不能直接照搬 uvicorn/gunicorn 部署。
+- **Java/JVM（Spring Boot、Quarkus、Micronaut、Tomcat、Kotlin/Scala 的 JVM 版等）**：Workers 官方没有 Java/JVM 运行时（Kotlin 可编译 Wasm、Scala 可 Scala.js，但不是普通服务端）。可容器化就评估 Containers；否则保留原服务器，用 Cloudflare 做 DNS/CDN/WAF/反代。Containers 需要 Workers Paid、linux/amd64 镜像；本地构建/推送时才需要 Docker（也可用预构建镜像、CI 或 Workers Builds）。通常有冷启动，当前没有内置自动伸缩，且容器只能经 Worker 以 HTTP(S) 访问。
+- **Containers 持久化**：默认磁盘是临时的，实例休眠/重启后会从镜像得到新的磁盘状态。Cloudflare 已提供文件系统 **[Snapshot](https://developers.cloudflare.com/containers/guides/snapshots/)（Public Beta）**，但仅支持 `durable_object` 调度策略；快照绑定创建时的镜像版本、不可变（恢复后再改文件需新建快照），不能当成成熟稳定的通用持久化磁盘。也可以用 [FUSE 挂载 R2](https://developers.cloudflare.com/containers/examples/r2-fuse-mount/) 持久化数据，但性能不像本地 SSD。重要业务数据仍应使用数据库、对象存储或其他合适的持久化服务。
+- **Python（FastAPI、Django、Flask、Starlette 等）**：Python Workers 基于 Pyodide，支持纯 Python、PyEmscripten 以及 Pyodide 生态中的兼容包；**不要仅凭“包含 C 扩展”就判定不能运行**，应看该依赖是否有兼容 WebAssembly/PyEmscripten 的构建版本，具体依赖逐项核实。Django/Flask 可通过 WSGI 方式适配，FastAPI/Starlette 等可通过 ASGI 方式适配；仍需使用 Python Workers 的 `WorkerEntrypoint`/`Default` 入口、`python_workers` compatibility flag 和 `pywrangler`（如 `uv run pywrangler deploy`），不能把传统 `uvicorn`/`gunicorn` 命令直接照搬。线程/多进程不可依赖、128MB 内存限制、内存文件系统不持久；不兼容的扩展、重依赖或长任务通常应考虑 Containers 或外部后端。
 - **PHP/Ruby/.NET/Elixir**：Workers 没有对应原生运行时，通常 Containers 或原平台。**Go/Rust**：Rust 有 workers-rs；Go/Rust 也可编译 Wasm，但只适合特定场景，不等于可以把 Gin/Axum/ASP.NET 原样搬上去；普通 HTTP 服务优先 Containers 或外部主机。
 - **WordPress/WooCommerce 等动态 CMS**：不要直接往 Workers 塞 PHP。通常保留托管 WordPress + Cloudflare CDN/WAF，或把内容静态化（会丢失搜索、评论、登录、购物车等动态能力）。这类 PHP/MySQL CMS 不原样搬；动态后端可评估 Containers 或保留外部服务。
 - **Shopify、Stripe、Supabase、Auth0、Sanity 等 SaaS**：Cloudflare 托管前端或做代理，业务后端/支付/认证仍在 SaaS；不要声称“整个电商/登录系统都部署到 Cloudflare”。
@@ -67,7 +68,12 @@
 
 - Workers 语言/限制：https://developers.cloudflare.com/workers/languages/ ，https://developers.cloudflare.com/workers/platform/limits/
 - Python Workers：https://developers.cloudflare.com/workers/languages/python/
+- Python packages：https://developers.cloudflare.com/workers/languages/python/packages/
+- Python Workers WSGI/ASGI 框架支持：https://developers.cloudflare.com/changelog/post/2026-09-02-python-workers-web-framework-support/
+- FastAPI / Django / Flask：https://developers.cloudflare.com/workers/languages/python/packages/fastapi/ ，https://developers.cloudflare.com/workers/languages/python/packages/django/ ，https://developers.cloudflare.com/workers/languages/python/packages/flask/
 - Containers：https://developers.cloudflare.com/containers/
+- Containers Snapshot（Public Beta）：https://developers.cloudflare.com/containers/guides/snapshots/
+- Containers 磁盘/生命周期 FAQ：https://developers.cloudflare.com/containers/faq/
 - Pages/Static Assets：https://developers.cloudflare.com/pages/ ，https://developers.cloudflare.com/workers/static-assets/
 - 套餐/定价：https://www.cloudflare.com/plans/ ，https://developers.cloudflare.com/workers/platform/pricing/
 - Queues 定价：https://developers.cloudflare.com/queues/platform/pricing/

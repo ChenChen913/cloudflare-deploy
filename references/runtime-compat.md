@@ -58,8 +58,10 @@ node "<技能目录>/scripts/probe.mjs"          # 默认只读
 | Pages 静态 / Workers 静态资源 | 免费 | $0 | 多数静态站到这一步就够 |
 | Workers + D1 / KV / R2 | 免费额度起 | $0 起，超额按量 | R2 首次使用要走一次订阅 checkout，即使只用免费额度 |
 | Workers Paid | 付费订阅 | $5/月 起 | 更高的 CPU / 子请求额度 |
-| Containers | **必须 Workers Paid** | $5/月 起 + 用量 | 免费计划不可用；本地还需要 Docker 构建镜像 |
+| Containers | **产品要求：Workers Paid** | $5/月 起 + 用量 | 免费计划不可用；linux/amd64 镜像。仅本地构建/推送镜像时需要 Docker；预构建镜像/CI/Workers Builds 不强制本机 Docker |
 | Hyperdrive | 付费相关 | 查定价页 | 用于加速外部 Postgres，不等于 Cloudflare 托管 Postgres |
+
+> Containers 的套餐前提是 Workers Paid；Docker 只影响本地镜像构建/推送。没有本地 Docker 时先考虑预构建镜像、CI 或 Workers Builds，不要直接排除 Containers。
 
 **Cloudflare 没有托管 Postgres。** D1 是 SQLite，通过 Workers binding 访问；外部 Postgres 要么保留外部服务，要么换 ORM/数据库。这是「部署前必答」的问题，不是部署后才发现的事。
 

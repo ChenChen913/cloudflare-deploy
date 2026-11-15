@@ -11,7 +11,7 @@
   - 升级 Workers Paid（$5/月/账号）
   - 使用 R2（首次要在控制台走一次 checkout，免费额度也需开通）
   - 超出免费额度后继续使用计量产品
-  - 使用 Containers（必须 Workers Paid，且本地要有 Docker 构建镜像）
+  - 使用 Containers（产品要求 Workers Paid；Docker 只影响本地构建/推送，见第 5 节）
 
 查当前套餐：控制台 `Manage Account → Billing → Subscriptions`。查 R2 是否开通：`npx wrangler r2 bucket list`，返回权限或订阅错误即未开通。
 
@@ -93,7 +93,9 @@ export CLOUDFLARE_API_TOKEN="..."
 | Wrangler | 项目内安装或用 `npx wrangler` | `npx wrangler --version` |
 | Git | 任意较新版本 | `git --version` |
 | GitHub CLI | 可选，仓库自动化才需要 | `gh --version` / `gh auth status` |
-| Docker | 只有用 Containers | `docker info`；没有就直接排除该方案 |
+| Docker | 只有本地构建/推送 Containers 镜像时才需要 | `docker info`；预构建镜像或 CI/Workers Builds 构建都不强制本机 Docker |
+
+> **区分「本地 Docker 环境要求」和「Cloudflare Containers 产品要求」**：Containers 产品本身只要求 Workers Paid；本地 Docker 只用于本地构建/推送镜像。没有本地 Docker 时，先问能否用预构建镜像或 CI/Workers Builds，不要直接排除 Containers。
 
 Wrangler 的系统要求（官方）：
 
@@ -137,7 +139,7 @@ npx wrangler --version
 | 没域名 | 先部署到 `pages.dev` / `workers.dev`，不要阻塞 |
 | 没 R2 订阅 | 如果项目不需要 R2，跳过；需要就先开通 |
 | 免费计划却要用 Containers | 明确说明必须 Workers Paid，给「升级」和「换方案」两个选项 |
-| 没 Docker 却要 Containers | 不要尝试本地构建镜像，直接换方案 |
+| 没 Docker 却要 Containers | 先判断能否用预构建镜像或 CI/Workers Builds 构建；能构建就不受本地 Docker 限制，不能构建再准备 Docker 或换方案，不要直接排除 Containers |
 | 没 Git 集成权限 | 用 Direct Upload / `wrangler deploy` 先完成预览，再让管理员接 Git |
 
 ## 来源
@@ -148,3 +150,4 @@ npx wrangler --version
 - Wrangler 登录与无头：https://developers.cloudflare.com/workers/wrangler/commands/general/
 - Wrangler 系统要求：https://developers.cloudflare.com/workers/wrangler/install-and-update/
 - R2 开通：https://developers.cloudflare.com/r2/get-started/
+- Containers 镜像/预构建：https://developers.cloudflare.com/containers/guides/image-management/
