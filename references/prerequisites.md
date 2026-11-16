@@ -32,9 +32,11 @@ npx wrangler whoami
 | 本地桌面 | `npx wrangler login` | 默认自动打开浏览器，OAuth 回调 `localhost:8976` |
 | 只想复制链接 | `npx wrangler login --browser=false` | 不自动开浏览器，打印链接 |
 | 远程 SSH / 容器 / Codespaces | `npx wrangler login --device` | 使用 OAuth Device Grant，不依赖 localhost 回调；终端会给一个验证码 |
-| CI / 完全无头 | 不登录，设置 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | 官方推荐做法 |
+| CI / 完全无头 | 不登录，设置 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | 官方推荐做法；Git 集成也需要仓库管理员在控制台授权 |
 
 `--device` 仍然会尝试打开浏览器；在纯终端环境加 `--browser=false`。设备码 5 分钟内有效。
+
+> `wrangler login` 是交互式流程：执行后要在终端等待并完成 Allow。常见 OAuth 等待超时约 2 分钟；不要把它挂后台无人值守。超时后重跑，或改用 `--device` / API Token。
 
 容器里如果坚持用回调流程，需要把宿主机的 8976 映射到容器，并加 `--callback-host=0.0.0.0`；否则用 `--device` 更简单。
 

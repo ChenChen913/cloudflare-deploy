@@ -11,7 +11,7 @@ The skill body is written in Simplified Chinese. File names and code identifiers
 ## Status
 
 - Skill format validated (`quick_validate.py`): valid. Repository check `node tests/check-skill.mjs` also passes.
-- Local tests: 739/739 passing (`node tests/run-tests.mjs`).
+- Local tests: 742/742 passing (`node tests/run-tests.mjs`).
 - Real Cloudflare deployment: **not run in this automated test environment** (no account/token, Wrangler not installed). Migration and live observations from a separate real project are recorded in `references/migration-guide.md` (tagged "measured"), but that is historical evidence, not verification performed by these local tests. Local automation is not the same as account-level deployment verification. See `tests/results.md` for exactly what was and was not verified.
 
 ## What it does
@@ -135,14 +135,14 @@ Trigger phrases include:
 - "Verify pages, routes, and assets after deploy."
 - "Fix this failed Cloudflare deploy."
 
-The agent runs `scripts/probe.mjs` first (exit codes express the link verdict); once the link is up it runs `scripts/detect-project.mjs`; before building or deploying it runs `scripts/check-env.mjs` (also exit-code driven), reads only the reference needed for the task, fills `templates/deployment-plan.md`, deploys to a preview, runs `scripts/verify-deployment.mjs`, and fills `templates/deployment-report.md`.
+The agent runs `scripts/probe.mjs --repo "$PWD"` first (exit codes express the link verdict, including code-host reachability); once the link is up it runs `scripts/detect-project.mjs`; before building or deploying it runs `scripts/check-env.mjs` (also exit-code driven), reads only the reference needed for the task, fills `templates/deployment-plan.md`, deploys to a preview, runs `scripts/verify-deployment.mjs`, and fills `templates/deployment-report.md`.
 
 ## Scripts
 
 Dependency-free Node 18+ ESM (Node 22+ is still recommended for actual deploys). Read-only by default; `probe.mjs --deploy` is the exception (it creates and deletes a real temporary Worker and needs explicit consent). `probe.mjs --timeout` must be a finite positive integer in 1..2147483647 (milliseconds); empty, non-numeric, negative, zero, fractional, or out-of-range values exit with code 2 and a usage error before any network probe:
 
 ```bash
-node scripts/probe.mjs                         # Step 0: 0 ready / 1 limited / 2 blocked
+node scripts/probe.mjs --repo "$PWD"            # Step 0: 0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs                     # 0 deployable / 1 not deployable / 2 not buildable
 node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # or ssg / spa; ssr reports skip
@@ -184,7 +184,7 @@ node scripts/verify-deployment.mjs \
 ## Tests
 
 ```bash
-node tests/run-tests.mjs        # 739 checks with layer tags (core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120): detection, plan/artifact limits, HTML tokenizer, real HTTP, CORS, redirects/SSRF, canonical, 3xx, CLI, JSON, link probe
+node tests/run-tests.mjs        # 742 checks with layer tags (core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120): detection, plan/artifact limits, HTML tokenizer, real HTTP, CORS, redirects/SSRF, canonical, 3xx, CLI, JSON, link probe
 node tests/check-skill.mjs      # structure check, no external tooling
 node tests/browser-diff.mjs     # optional: real Chrome/Edge parser differential (Node 22+; exit 2 when skipped, 1 on mismatch)
 ```

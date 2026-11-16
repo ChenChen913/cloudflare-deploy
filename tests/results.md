@@ -17,7 +17,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 739 项，分层覆盖 core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 742 项，分层覆盖 core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -36,7 +36,7 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     739/739 通过（分层：core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120）
+node tests/run-tests.mjs     742/742 通过（分层：core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120）
 node tests/check-skill.mjs   通过（SKILL.md 335 行，引用路径 32 个，无绝对路径）
 node tests/browser-diff.mjs  115/115 一致（可选开发期：本机 Chrome 157 与本机 Edge 157 分别跑过；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1，180s 超时退出码 3）
 quick_validate.py            Skill is valid!（本机一次性结果；脚本在仓库外，见上文可复现性说明）
@@ -317,13 +317,16 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 58. **集成点 HTML 结束规则/外域 template/隐式 p 关闭（独立审查发现并修复）。** (a) `applyHtmlEndRule` 之前边扫边弹，遇到 special 元素时已破坏 HTML 子栈，导致 `</strong>`、`</span>` 等错误结束标签把未闭合 HTML 子元素弹掉，`</foreignObject>` 被误当外域命中；改为非破坏性查找，只有命中同名 HTML 元素才截断栈，special 不匹配直接忽略。(b) 外域元素 `<template>` 的 `</template>` 误触发 HTML template 隔离栈恢复；删除 matched 分支里的 template 处理，HTML template 只由专门分支关闭。(c) 新增 `textVisibleNow()`，避免外域/不渲染集成点里的 `<` 进入可见文本。(d) 用最小 `P_CLOSING_START_TAGS` 近似浏览器隐式关闭 `<p>`，修复 `<p><div>` 后 `</foreignObject>` 被吞导致的 canonical/资源误报（仍不做完整树构建）。I1-I7 oracle（Chrome+Edge）锁定。
 59. **外域结束标签回退的 scope 边界与「被浏览器丢弃的开始标签」（独立审查发现并修复）。** (a) `popHtmlAncestor` 用 `lastIndexOf` 跨过 table/object/marquee/applet/select/caption/td 等 scope 边界找同名 HTML 祖先，导致 `<div><table><svg></div><link ...>` 把浏览器中的 SVG link 误判为 HTML canonical；改为复用非破坏性 HTML 结束规则，碰 special/scope 边界即停止。(b) 浏览器在 body 上下文会丢弃的 `tr/td/th/thead/tbody/tfoot/caption/colgroup/html/head/body/frame/basefont/bgsound` 曾被压进 HTML 祖先栈，挡住 `</foreignObject>`，产生假 canonical/资源；现统一不追踪。(c) select 插入模式做最小近似：嵌套 select 关闭旧 select 并忽略 token，input/keygen/textarea 关闭 select 后继续处理，其余标签在 select 内大多忽略。(d) 可见文本修正：隐藏集成点内 xmp/textarea/plaintext 不计入，foreignObject 内 CDATA 计入。J1-J6 oracle（Chrome+Edge）锁定。仍不做完整 table/select/格式化元素建树。
 60. **probe.mjs 的 `--timeout` 只做 `Number()` 转换，缺少严格校验。** 空值/非数字会变成 `NaN`，负数/0/小数会进入 `setTimeout`/`AbortSignal.timeout`，超范围值会被 Node 截断或抛 `RangeError`；参数错误还可能先发起网络请求，被误读成网络连接失败。现在在 argv 解析后、任何 fetch/wrangler 调用前校验：只接受 1..2147483647 的有限正整数；非法值输出中文用法错误并以退出码 2 结束，不输出半截 JSON。默认 15000 和合法值行为不变。测试覆盖不传 `--timeout`、合法正整数、`abc`、`-1`、`0`、`1.5`、`2147483648`、缺值、空字符串；用 fake wrangler 的调用日志确认非法参数没有进入 wrangler/部署阶段，并断言耗时短、stderr 不含网络失败措辞。
-61. **按真实部署记录补齐的可用性与证据缺口。** (a) `detect-project` 新增 `spaRouting`（hash/history/unknown/mixed），HashRouter 建议 `static` + 404.html，history 路由建议 `spa` + 显式 fallback；**没有路由证据时 `suggestedMode=unknown`，nextSteps/human/risk 都要求人工确认，不默认 spa**；mixed 同样返回 unknown。避免 hash SPA 被误套 spa 后 404 结论相反。(b) `verify-deployment` 对连接类瞬时错误默认重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误、脚本自身单次超时不重试；失败项带 `attempts`/`errorKind`，detail 区分网络失败与 HTTP 断言失败。(c) 首页没有 canonical/meta robots/X-Robots-Tag 时新增 `seo` warn，不改退出码；报告模板要求 Cloudflare 与 GitHub Pages 并存时明确 self-canonical 或 noindex。(d) Pages 缺顶层 404.html 的说明补充官方文档依据，并明确“实际回退通常 200、官方未写状态码、缺失静态资源也会回退 HTML”。(e) 文档补充：`canBuild=true` 不验证项目 build、TS 祖先 @types 污染、Wrangler Source commit 取 cwd、Pages 项目名不等于 `*.pages.dev`、浏览器冒烟必须单独做。测试新增 HashRouter/BrowserRouter/Vue/深层/字符串/mixed 路由识别、重试 7 例、SEO 2 例，共 739 项。
+61. **按真实部署记录补齐的可用性与证据缺口。** (a) `detect-project` 新增 `spaRouting`（hash/history/unknown/mixed），HashRouter 建议 `static` + 404.html，history 路由建议 `spa` + 显式 fallback；**没有路由证据时 `suggestedMode=unknown`，nextSteps/human/risk 都要求人工确认，不默认 spa**；mixed 同样返回 unknown。避免 hash SPA 被误套 spa 后 404 结论相反。(b) `verify-deployment` 对连接类瞬时错误默认重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误、脚本自身单次超时不重试；失败项带 `attempts`/`errorKind`，detail 区分网络失败与 HTTP 断言失败。(c) 首页没有 canonical/meta robots/X-Robots-Tag 时新增 `seo` warn，不改退出码；报告模板要求 Cloudflare 与 GitHub Pages 并存时明确 self-canonical 或 noindex。(d) Pages 缺顶层 404.html 的说明补充官方文档依据，并明确“实际回退通常 200、官方未写状态码、缺失静态资源也会回退 HTML”。(e) 文档补充：`canBuild=true` 不验证项目 build、TS 祖先 @types 污染、Wrangler Source commit 取 cwd、Pages 项目名不等于 `*.pages.dev`、浏览器冒烟必须单独做。测试新增 HashRouter/BrowserRouter/Vue/深层/字符串/mixed 路由识别、重试 7 例、SEO 2 例，共 742 项。
+62. **真实使用反馈：构建产物配对、产物同一性、代码托管链路。** (a) `detect-project` 不再把条件分支里的 `outDir` 直接配给 `scripts.build`：收集 build 脚本和 outDir 候选，动态/条件配置或存在多个候选时回退到 build/框架默认值，`outputDir` 标 `inferred` 并写入 risk/unknown；hangla 的 `npm run build` + `build:web`/`dist-web` 现在得到 `dist`（inferred）而不是错误的 confirmed。新增 `vite-multi-build` 夹具与断言。(b) `verify-deployment` 新增 `--dist`：从首页 HTML 取同源资源，映射到本地构建目录，比较线上响应体与本地文件的 SHA-256；不一致判 `fail`，映射不到/取不到写 `warn`，结果字段含 `compared`/`mismatched`/`missingLocal`/`unfetched`。测试覆盖一致与篡改两例；报告模板新增“部署产物 = 本轮构建”必填行。(c) `probe.mjs` 新增 `--repo`：检查 git remote + `git ls-remote`（10 秒超时）、打印脱敏代理变量；代码托管失败标 `warn`（不把 Cloudflare API 通误报成整条链路 ready）。Cloudflare API 连接类错误重试 1 次，账号/登录仍 fail-closed。(d) 文档补充 `wrangler login` 交互等待时间、浏览器冒烟最小清单/动画测量陷阱、产物未变时的轻量路径，以及部署记录的“历史快照/需复核”标记。
 
 ## CLI / JSON 兼容性
 
 | 变化 | 性质 | 原因 |
 |---|---|---|
 | `--plan` / `--wrangler-version` / `--pages-wrangler-major`、`--cors-method` / `--cors-headers` / `--cors-credentials` | 新增可选参数 | 不传时行为与旧版一致（默认 Free 20,000）；预检不再用默认方法/请求头探针（见下方 CORS 行为变化） |
+| `verify-deployment --dist <dir>` | 新增可选参数 | 不传时不新增 `artifact` 检查，旧行为不变；传了才比较首页同源资源的 SHA-256，不一致判 `fail` |
+| `probe --repo <dir>` | 新增可选参数 | 不传且当前目录不是 git 仓库时只 `skip`；不改变账号/网络检查的 fail-closed 语义，新增代码托管 `warn` 可能让 `limited` |
 | `--expect-json` 从「字符串包含」改为「JSON 子集比较」 | **行为变化（必须）** | 字符串包含无法判断 JSON 结构，且会因格式/顺序误判；现在要求合法 JSON，失败时给出字段路径和原因。旧的非 JSON 片段用法不再支持 |
 | `cors-preflight` 断言不成立时从 `warn` 变 `fail` | **行为变化（必须）** | 原来只要 OPTIONS 2xx + 有 ACAO 就通过，会把配置错误的接口判成可用 |
 | `tests/` 新增 `browser-diff.mjs` + `fixtures/html5-oracle.json` | 新增可选的开发期差分工具 | 默认测试仍是 `node tests/run-tests.mjs` 零依赖；`browser-diff` 需要本机 Chrome/Edge 与 Node 22+（全局 WebSocket），找不到浏览器时退出码 2 跳过。fixture 的期望值来自真实浏览器，不是自制 parser |

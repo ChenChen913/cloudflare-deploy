@@ -17,7 +17,7 @@ agent_created: true
 | 条件 | 是否必须 | 怎么检查 | 缺失时怎么办 |
 |---|---|---|---|
 | Cloudflare 账号 | 必须 | 浏览器登录 `dash.cloudflare.com` | 去 `dash.cloudflare.com/sign-up` 注册；只需邮箱、密码、邮箱验证 |
-| 登录态 | 必须 | `npx wrangler whoami` | 本地 `npx wrangler login`；远程/容器用 `--device`；CI 用 API Token |
+| 登录态 | 必须 | `npx wrangler whoami` | 本地 `npx wrangler login`（交互式，需在约 2 分钟内完成 Allow；不要挂后台无人值守）；远程/容器用 `--device`；CI 用 API Token |
 | Account ID | API Token / CI 必须 | 控制台搜索 “Copy account ID”，或 Workers & Pages → Account Details | 复制后放进 `CLOUDFLARE_ACCOUNT_ID` |
 | Node.js | 必须 | `node -v` | 脚本本身最低 Node 18；完整部署建议 **22+**（Wrangler 只支持 Current / Active / Maintenance，22 是当前仍在维护的最老 LTS） |
 | Wrangler | 必须 | `npx wrangler --version` | 项目内 `npm i -D wrangler@latest`，或直接用 `npx wrangler` |
@@ -105,12 +105,14 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 部署任务的第一优先级是**链路通不通**，不是产物对不对。碰到项目文件之前先做：
 
 ```bash
-node "<技能目录>/scripts/probe.mjs"
+node "<技能目录>/scripts/probe.mjs" --repo "$PWD"
 ```
+
+- 部署的是 git 仓库时加 `--repo "$PWD"`：探针会额外检查 `git remote` / `git ls-remote`（10 秒超时）并打印脱敏后的 `HTTPS_PROXY` / `NO_PROXY`；代码托管不通时标 `warn`（`limited`），不会让 Cloudflare API 的“通”掩盖 GitHub/GitLab 的不通。Direct Upload/已有产物仍可能部署，所以不直接 blocked。
 
 - 退出码 `0` = ready；`1` = limited（先读 warn，判断缺口是否影响本次目标）；`2` = blocked（**硬停**）。
 - blocked 时不要改配置、装适配器或跑构建。给出具体下一步（`npx wrangler login`，或 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`）；**不要让用户在聊天里粘贴 Token**。
-- `probe.mjs --timeout` 只接受 1..2147483647 的有限正整数（毫秒）；空值、非数字、负数、0、小数、超范围值会在任何网络探测/`--deploy` 之前以退出码 2 报中文用法错误，不会包装成网络失败。
+- `probe.mjs --timeout` 只接受 1..2147483647 的有限正整数（毫秒）；空值、非数字、负数、0、小数、超范围值会在任何网络探测/`--deploy` 之前以退出码 2 报中文用法错误，不会包装成网络失败。Cloudflare API 探测对连接类瞬时错误重试 1 次；账号/登录判定仍保持 fail-closed，不因重试放宽。
 - 登录态判定是 **fail-closed** 的（`check-env` 与 `probe` 共用 `scripts/wrangler-auth.mjs`）：`wrangler whoami` 退出码 0 但输出为空、只有 `loggedIn:false`、或没有邮箱 / Account ID / 明确登录文本时，判「无法确认」而不是已登录；`canDeploy` 不会为 true、`probe` 会 blocked。执行失败与未登录分开报告。
 - `npx wrangler deploy --temporary` 只在未登录时可用，用的是临时账号，**不能验证用户的账号、权限或套餐**，且会过期；它只能证明网络可达。
 - `--deploy` 会真实创建并删除一个临时 Worker，属于写操作，**必须先得到用户同意**。**部署命令成功不等于线上验证成功**：必须解析到 URL 并真实请求通过才判 `pass`；没 URL 或 URL 不可访问只会得到 `warn` / `fail`，清理失败也会单独记 `warn`；部署本身失败时确认不了是否创建过 Worker，清理记为 `skip` 并提示到控制台核对，不要写成「删除失败」，也不要断言一定没创建。部署 URL 返回 3xx 不算线上验证通过（脚本不跟随）。没有账号时不要声称已验证部署链路。
@@ -129,7 +131,7 @@ node "<技能目录>/scripts/probe.mjs"
 node "<技能目录>/scripts/detect-project.mjs" "$PWD" --human
 ```
 
-默认输出 JSON；给 `--human` 得到人类可读摘要。脚本会报告：框架、静态/SPA/SSR/API、包管理器、构建命令、输出目录、base path、GitHub Pages 配置、现有 Wrangler 配置（`wrangler.toml` 与 `wrangler.json/jsonc` 都支持）、绑定、环境变量键名、PWA、子应用、锁文件、风险、未知项。
+默认输出 JSON；给 `--human` 得到人类可读摘要。脚本会报告：框架、静态/SPA/SSR/API、包管理器、构建命令、输出目录、base path、GitHub Pages 配置、现有 Wrangler 配置（`wrangler.toml` 与 `wrangler.json/jsonc` 都支持）、绑定、环境变量键名、PWA、子应用、锁文件、风险、未知项。存在多个 build 脚本或条件 `outDir` 时，还会输出 `project.buildCandidates` / `project.outputDirCandidates`，把 `outputDir` 标为 `inferred` 并写风险；不要把推断值当 confirmed。
 
 三个字段决定你怎么用它的结论：
 
@@ -246,8 +248,10 @@ npx wrangler deploy
 ### 6. 验收
 
 ```bash
-node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --json
+node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mode "<static|spa|ssg|ssr>" --dist "<构建输出目录>" --json
 ```
+
+静态/SSG/SPA 应尽量加 `--dist "<输出目录>"` 做**产物同一性**检查：脚本比较首页引用资源在线上与本地的 SHA-256；不一致判 `fail`，取不到/映射不到只写 `warn`。没有这项证据，不能声称线上就是本轮构建；部署地址和 commit 只是元数据。如果用户确认产物目录没有变化，可跳过重复构建/`check-build`，但仍必须跑 `verify-deployment --dist`；不要只凭时间或 commit 声称同一性。
 
 用户要保留备用站时加 `--backup "<github.io 地址>"`；涉及 CORS 时加 `--origin "<前端来源>"`；API 在独立子域时再加 `--cors-url "<接口地址>"`。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/连接重置可重试。detail 会区分“网络连接失败（已重试 N 次）”与 HTTP 断言失败。预检涉及实际方法、请求头或 Cookie 时，显式给 `--cors-method POST`、`--cors-headers "content-type,authorization"`、`--cors-credentials`——**没提供的信息不会被推断**：脚本不会凭默认值发送 `Access-Control-Request-Method/Headers`，对应断言列进 `notChecked`，未提供实际方法/请求头的预检最多 `warn`，不能判通过；同时给 `--cors-*` 却漏 `--origin` 会直接退出码 2。`--cors-credentials` 只是声明「预期请求带凭据」：脚本不会真的发浏览器 Cookie 或身份凭据，响应里的 `ACAC: true` 也不代表请求带凭据，无凭据时 `ACAO: *` 依旧有效；显式声明带凭据时才要求 ACAO 精确匹配 Origin 且必须有 `ACAC: true`。CORS 断言按 Fetch 规范：`*` 只在**无凭据**请求里是通配符，带凭据时是字面值；`GET/HEAD/POST` 是 CORS-safelisted method，不要求出现在 `Allow-Methods` 里；`Authorization` 永远不被 `Allow-Headers: *` 覆盖（`Range` 可以被覆盖）；方法名大小写敏感（已知方法先规范化为大写）。简单请求 3xx/4xx/5xx 不判通过（脚本不跟随 CORS URL 的重定向）。SSR / 全栈额外加 `--api /api/health --expect-json '{"ok":true}'`（`--api` 可重复传）；`--expect-json` 按 **JSON 子集**比较，与字段顺序和空白无关。canonical / meta robots / X-Robots-Tag 全缺失时会多一条 `seo` warn（不改退出码），同时保留备用站时要明确 self-canonical / noindex 策略。
 

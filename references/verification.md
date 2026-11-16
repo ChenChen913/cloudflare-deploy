@@ -181,7 +181,8 @@ node "<技能目录>/scripts/verify-deployment.mjs" \
 - 首页 `redirectOutcome` 为 `cross-origin-unverified` 时写「主站跨源重定向，目标未验证」，`warn` 不等于通过，也不能写成「首页 200」。
 - **网络错误 vs HTTP 断言失败**：`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`，每次尝试使用 `--timeout`）；HTTP 4xx/5xx、TLS 证书错误、DNS 解析错误和脚本自身单次超时都不重试；连接超时/连接重置可重试。detail 中“已重试 N 次”只说明网络路径，重试后仍失败才判 `fail`，不能把它写成站点 HTTP 返回失败。JSON 的 `retry` 字段记录策略，root/404/index-redirect/API/CORS/backup 失败项带 `attempts`/`errorKind`，root 还带 `retried`。
 - **SEO 策略**：若首页没有 canonical、meta robots、X-Robots-Tag 三者中任何一个，脚本在成功解析 HTML 后额外给 `seo` `warn`（不影响退出码）。同时保留 GitHub Pages 备用站时必须明确 self-canonical / noindex；没有策略时不能把“canonical 检查 skip”当成通过。
-- **浏览器冒烟**：HTTP 全绿不等于页面可用。SPA/SSG 报告至少记录一次真实浏览器检查：打开首页和关键 hash/deep link，确认 `#root`/app 容器非空、没有本应用 console error；没有执行就写“未验证”。
+- **产物同一性（重要）**：HTTP 200/404/canonical 全对，仍不能证明线上是最新构建。静态/SSG/SPA 部署后加 `--dist <构建输出目录>`：脚本从首页 HTML 取同源资源，在本地 dist 找同名文件，比较线上响应体与本文件的 SHA-256；不一致判 `fail`，取不到/映射不到明确写 `warn`，不能写成“已验证”。它证明首页引用的资源与本地构建一致，不证明未引用文件或后端代码；commit/部署地址只是元数据，不是字节证据。
+- **浏览器冒烟**：HTTP 全绿不等于页面可用。SPA/SSG 报告至少记录一次真实浏览器检查（Chrome/Edge）：打开首页和关键 hash/deep link；最小检查首屏标题可见、`#root`/app 容器非空、无本应用 console error、390px 视口无横向溢出。有进场动画时等动画结束再量固定定位元素/视口；`transform` 祖先会让 `position: fixed` 的临时坐标偏移，不能当场判故障。没有执行就写“未验证”。
 
 ### 响应头
 

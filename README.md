@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：739/739 通过（`node tests/run-tests.mjs`）。
+- 本地测试：742/742 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -135,14 +135,14 @@ ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy
 - 检查部署后的页面、路由和静态资源
 - 帮我修复部署失败
 
-Agent 先运行 `scripts/probe.mjs`（退出码表达链路结论），链路通了再运行 `scripts/detect-project.mjs` 识别项目；构建或部署前运行 `scripts/check-env.mjs`（同样用退出码表达结论），只读当前任务需要的 reference，填 `templates/deployment-plan.md`，部署到预览，运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md`。
+Agent 先运行 `scripts/probe.mjs --repo "$PWD"`（退出码表达链路结论，包含代码托管检查），链路通了再运行 `scripts/detect-project.mjs` 识别项目；构建或部署前运行 `scripts/check-env.mjs`（同样用退出码表达结论），只读当前任务需要的 reference，填 `templates/deployment-plan.md`，部署到预览，运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md`。
 
 ## 脚本
 
 零依赖的 Node 18+ ESM（部署本身仍建议 Node 22+）；默认只读，`probe.mjs --deploy` 例外（会真实创建并删除临时 Worker，需先征得同意）。`probe.mjs --timeout` 必须是 1..2147483647 的有限正整数（毫秒），空值、非数字、负数、0、小数、超范围值都会在发起任何网络探测前以退出码 2 报中文用法错误：
 
 ```bash
-node scripts/probe.mjs                         # 第 0 步：0 ready / 1 limited / 2 blocked
+node scripts/probe.mjs --repo "$PWD"            # 第 0 步：0 ready / 1 limited / 2 blocked
 node scripts/detect-project.mjs . --human
 node scripts/check-env.mjs                     # 0 可部署 / 1 不可部署 / 2 不可构建
 node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # 或 ssg / spa；ssr 报 skip
@@ -186,7 +186,7 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 739 项，分层覆盖（core 295 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs        # 742 项，分层覆盖（core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 node tests/browser-diff.mjs     # 可选：用本机 Chrome/Edge 做真实解析器差分（Node 22+；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1）
 ```

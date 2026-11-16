@@ -207,14 +207,31 @@ const defaultOut = {
   "static-html": ".",
 };
 
-const viteOut = viteConfig.match(/outDir\s*:\s*["']([^"']+)["']/)?.[1] || null;
-const viteBase = viteConfig.match(/\bbase\s*:\s*["']([^"']+)["']/)?.[1] || null;
+const viteOutCandidates = [...new Set([...viteConfig.matchAll(/outDir\s*:\s*["']([^"']+)["']/g)].map((m) => m[1]))];
+const viteBaseExtracted = viteConfig.match(/\bbase\s*:\s*["']([^"']+)["']/)?.[1] || null;
 const nextBasePath = nextConfig.match(/basePath\s*:\s*["']([^"']+)["']/)?.[1] || null;
 const dynamicConfig = /defineConfig\s*\(\s*(?:async\s*)?(?:\(\s*[^)]*\)\s*=>|function)/.test(viteConfig) ||
   /\bloadEnv\s*\(/.test(viteConfig);
+// 条件表达式里的 outDir 不能被当成本次构建的确定产物目录。
+const conditionalOutDir = /\?[^\n]*outDir\s*:|\boutDir\s*:[^\n]*\?/.test(viteConfig);
+const buildScriptNames = Object.keys(scripts).filter((name) => name === "build" || name.startsWith("build:") || name.startsWith("build-"));
+const multipleBuildScripts = buildScriptNames.length > 1;
+const primaryBuildScript = scripts.build ? "build" : buildScriptNames[0] || null;
+const ambiguousViteOutput = dynamicConfig || conditionalOutDir || viteOutCandidates.length > 1;
+// 只有唯一、静态的 outDir 才能当作 confirmed；动态/条件配置只保留候选。
+const viteOut = ambiguousViteOutput ? null : viteOutCandidates[0] || null;
+// 动态配置里的 base 仍可作为候选，但不能标 confirmed。
+const viteBase = viteBaseExtracted;
+const buildCommand = primaryBuildScript ? `${manager || "npm"} run ${primaryBuildScript}` : defaultBuild[framework] || null;
 
-const buildCommand = scripts.build ? `${manager || "npm"} run build` : defaultBuild[framework] || null;
-const outputDir = viteOut || htmlRoot || defaultOut[framework] || null;
+const scriptSuffix = primaryBuildScript?.includes(":") ? primaryBuildScript.split(":").slice(1).join(":").toLowerCase() : "";
+const pairedOutDir = ambiguousViteOutput
+  ? (scriptSuffix ? viteOutCandidates.find((dir) => dir.toLowerCase().includes(scriptSuffix)) : null)
+  : null;
+// 无法唯一配对时：有 build:web 且 outDir 含 web 就用配对；否则退回框架默认（如 Vite 的 dist）。
+// 不能把条件分支里的 dist-web 直接配给 npm run build。
+const outputDir = viteOut || htmlRoot || pairedOutDir || defaultOut[framework] || null;
+const buildOutputAmbiguous = Boolean(ambiguousViteOutput && !viteOut);
 
 const ghWorkflowDir = path.join(root, ".github", "workflows");
 const ghWorkflows = listDir(ghWorkflowDir)
@@ -420,6 +437,11 @@ if (!hasIndexHtml && htmlIndexes.length === 0) {
 }
 if (lockfiles.length > 1) risks.push(`同时存在 ${lockfiles.length} 个锁文件（${lockfiles.join("、")}）；包管理器不确定，先确认 CI 实际用哪个，避免混用。`);
 if (dynamicConfig && (!viteBase || !viteOut)) risks.push("Vite 配置是动态的（函数或环境变量）；base 和输出目录无法静态确认，构建后必须核对产物路径。");
+if (buildOutputAmbiguous) {
+  const scriptsText = buildScriptNames.length ? buildScriptNames.join("、") : "无 build 脚本";
+  const dirsText = viteOutCandidates.length ? viteOutCandidates.join("、") : "无显式 outDir";
+  risks.push(`构建脚本与输出目录无法唯一配对（脚本：${scriptsText}；配置中的 outDir：${dirsText}）；已按 ${primaryBuildScript || "框架默认"} + ${outputDir} 推断，构建后必须核对实际产物，不能把当前结果当作 confirmed。`);
+}
 if (spaRouting === "hash") risks.push(`检测到 HashRouter/默认 hash 路由${routerDeps.length ? `（${routerDeps.join("、")}）` : ""}：部署验收建议用 --mode static 并提供 404.html；未知路径 404 对 hash 路由是正常行为。`);
 if (spaRouting === "history") risks.push(`检测到 history 路由（BrowserRouter/createBrowserRouter/createWebHistory）：Pages 需要 _redirects /* /index.html 200（或 Workers not_found_handling），否则刷新深链会 404；验收用 --mode spa。`);
 if (spaRouting === "mixed") risks.push("同时检测到 hash 与 history 路由特征；先确认实际 Router，再选择 static（hash）或带 fallback 的 spa（history），不要凭默认值部署。");
@@ -501,6 +523,7 @@ const unknowns = [
 ];
 if (framework === "unknown") unknowns.push("框架类型（未识别）");
 if (!resolvedOutputDir) unknowns.push("构建产物目录（未能确认）");
+if (buildOutputAmbiguous) unknowns.push("构建命令与输出目录的对应关系（存在多个 build 脚本或条件 outDir；当前为推断，需构建后核对）");
 if (framework === "vite" && !viteBase) unknowns.push("base path（Vite 配置里没有静态值，默认 / 但需构建后核对）");
 if (kind === "spa" && spaRouting === "unknown") unknowns.push("客户端路由类型（未识别；HashRouter 用 static，BrowserRouter/history 用 spa + fallback）");
 if (spaRouting === "mixed") unknowns.push("实际 Router（同时检测到 hash 与 history 特征，验收模式保持 unknown，禁止自动选）");
@@ -518,18 +541,28 @@ const evidence = {
       : "没有可确认的客户端路由特征（unknown 时不能凭默认值断言）"
   ),
   kind: ev(kind, "inferred", `结合 ${frameworkSource} 与构建配置推断`),
-  buildCommand: ev(buildCommand, scripts.build ? "confirmed" : buildCommand ? "inferred" : "unknown", scripts.build ? "package.json scripts.build" : "框架默认构建命令"),
+  buildCommand: ev(
+    buildCommand,
+    scripts.build && !multipleBuildScripts ? "confirmed" : buildCommand ? "inferred" : "unknown",
+    multipleBuildScripts
+      ? `package.json 有多个 build 脚本（${buildScriptNames.join("、")}），默认取 ${primaryBuildScript || "第一个"}`
+      : scripts.build ? "package.json scripts.build" : primaryBuildScript ? `package.json scripts.${primaryBuildScript}` : "框架默认构建命令"
+  ),
   outputDir: ev(
     resolvedOutputDir,
-    wranglerOutputDir || viteOut ? "confirmed" : resolvedOutputDir ? "inferred" : "unknown",
-    wrangler?.pagesBuildOutputDir ? `${wrangler.file} 的 pages_build_output_dir` : wrangler?.assetsDirectory ? `${wrangler.file} 的 assets.directory` : viteOut ? "vite.config 的 build.outDir" : htmlRoot ? "唯一的 index.html 所在目录" : "框架默认输出目录"
+    wranglerOutputDir || (viteOut && !buildOutputAmbiguous) ? "confirmed" : resolvedOutputDir ? "inferred" : "unknown",
+    wrangler?.pagesBuildOutputDir ? `${wrangler.file} 的 pages_build_output_dir` : wrangler?.assetsDirectory ? `${wrangler.file} 的 assets.directory` : viteOut ? "vite.config 的 build.outDir" : buildOutputAmbiguous ? "Vite 动态/条件配置无法唯一确认，按构建脚本或框架默认值推断" : htmlRoot ? "唯一的 index.html 所在目录" : "框架默认输出目录"
   ),
   packageManager: ev(
     manager,
     lockfiles.length === 1 ? "confirmed" : lockfiles.length > 1 ? "inferred" : pkgPath ? "inferred" : "unknown",
     lockfiles.length ? `锁文件：${lockfiles.join("、")}` : pkgPath ? "没有锁文件，按 npm 推断" : "没有 package.json"
   ),
-  basePath: ev(viteBase || nextBasePath || null, viteBase || nextBasePath ? "confirmed" : "unknown", viteBase ? "vite.config 的 base" : nextBasePath ? "next.config 的 basePath" : "没有静态 base 配置"),
+  basePath: ev(
+    viteBase || nextBasePath || null,
+    viteBase || nextBasePath ? (dynamicConfig && viteBase ? "inferred" : "confirmed") : "unknown",
+    viteBase ? (dynamicConfig ? "vite.config 的 base（动态配置，未静态确认）" : "vite.config 的 base") : nextBasePath ? "next.config 的 basePath" : "没有静态 base 配置"
+  ),
   nodeEngine: ev(pkg.engines?.node || read(path.join(root, ".nvmrc"))?.trim() || read(path.join(root, ".node-version"))?.trim() || null, pkg.engines?.node || read(path.join(root, ".nvmrc")) || read(path.join(root, ".node-version")) ? "confirmed" : "unknown", "package.json engines / .nvmrc / .node-version"),
 };
 
@@ -549,6 +582,8 @@ const result = {
     buildCommand,
     outputDir: resolvedOutputDir,
     scripts: Object.keys(scripts),
+    buildCandidates: buildScriptNames.map((name) => `${manager || "npm"} run ${name}`),
+    outputDirCandidates: [...new Set([...viteOutCandidates, ...(outputDir ? [outputDir] : [])])],
     basePath: viteBase || nextBasePath || null,
     suggestedMode,
     spaRouting,

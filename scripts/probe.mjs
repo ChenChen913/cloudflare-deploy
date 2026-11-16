@@ -3,9 +3,11 @@
  * probe.mjs — 链路探针：在碰项目之前，先确认「账号 → 权限 → 网络 → 部署」能不能通。
  *
  * 用法：
- *   node scripts/probe.mjs [--json] [--deploy] [--timeout 15000]
+ *   node scripts/probe.mjs [--json] [--deploy] [--repo <目录>] [--timeout 15000]
  *
  * 默认只读：查网络、wrangler、登录态、账号、Token 读权限。
+ * --repo 指定要部署的 git 仓库目录（不传且当前目录是仓库时自动使用），
+ *        额外检查 git remote / git ls-remote，并打印脱敏后的代理变量。
  * --deploy 会真实部署一个临时 Worker（名字带随机后缀），验证 URL 后立即删除；
  *           这是写操作，必须先得到用户同意。
  *
@@ -19,10 +21,26 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseDeployUrl, verifyDeployedUrl, evaluateDeployProbe } from "./deploy-verdict.mjs";
 import { classifyWranglerWhoami } from "./wrangler-auth.mjs";
+import { isTransientNetworkError, RETRY_BACKOFF_MS } from "./net-retry.mjs";
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
 const doDeploy = argv.includes("--deploy");
+// --repo 可选；给定时检查代码托管链路，不把“Cloudflare API 通”误当成“整个部署链路通”。
+const repoArg = (() => {
+  const idx = argv.indexOf("--repo");
+  if (idx === -1) return null;
+  const raw = argv[idx + 1];
+  if (!raw || raw.startsWith("--")) {
+    console.error("用法错误：--repo 需要仓库目录路径");
+    process.exit(2);
+  }
+  return path.resolve(raw);
+})();
+if (repoArg && (!fs.existsSync(repoArg) || !fs.statSync(repoArg).isDirectory())) {
+  console.error(`用法错误：--repo 不是目录：${repoArg}`);
+  process.exit(2);
+}
 // Node.js 定时器（setTimeout/AbortSignal.timeout）允许的最大毫秒数约为 2^31-1；
 // 超过该值会被 Node 截断/告警，必须在进入任何网络探测前拒绝。
 const MAX_TIMEOUT_MS = 2147483647;
@@ -67,6 +85,64 @@ function run(cmd, args, opts = {}) {
   return { ok: r.status === 0, status: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim(), error: r.error ? String(r.error.code || r.error.message) : null };
 }
 
+// git 参数来自仓库配置/远端 URL，不能用 Windows shell 拼接，避免 shell 注入。
+function runGit(args, opts = {}) {
+  const r = spawnSync("git", args, {
+    encoding: "utf8",
+    timeout: opts.timeout ?? 10000,
+    cwd: opts.cwd,
+    shell: false,
+    windowsHide: true,
+  });
+  return { ok: r.status === 0, status: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim(), error: r.error ? String(r.error.code || r.error.message) : null };
+}
+
+const redactUrl = (raw) => {
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    if (u.username || u.password) {
+      u.username = "***";
+      u.password = "***";
+    }
+    return u.toString();
+  } catch {
+    return String(raw).replace(/\/\/[^/@\s]+@/, "//***@");
+  }
+};
+const proxyEnv = {
+  HTTPS_PROXY: redactUrl(process.env.HTTPS_PROXY || process.env.https_proxy || null),
+  NO_PROXY: process.env.NO_PROXY || process.env.no_proxy || null,
+};
+const proxyNote = `HTTPS_PROXY=${proxyEnv.HTTPS_PROXY || "未设置"}，NO_PROXY=${proxyEnv.NO_PROXY || "未设置"}`;
+
+
+// 与 verify-deployment 共用瞬时网络错误分类：只重试连接类错误，不重试 HTTP 响应。
+async function fetchWithTransientRetry(url, opts = {}, maxRetries = 1) {
+  let last = { res: null, attempts: 0, error: "请求未执行" };
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, opts.timeout ?? timeout);
+    try {
+      const res = await fetch(url, { ...opts, signal: ctrl.signal });
+      return { res, attempts: attempt, error: null };
+    } catch (e) {
+      last = { res: null, attempts: attempt, error: String(e?.cause?.code || e?.message || e) };
+      if (attempt <= maxRetries && isTransientNetworkError(e, timedOut)) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS * attempt));
+        continue;
+      }
+      return last;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return last;
+}
+
+
+
 // wrangler 可能装在本项目、PATH 或只能走 npx；与 check-env.mjs 保持一致。
 function wrangler() {
   const local = path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "wrangler.cmd" : "wrangler");
@@ -80,20 +156,52 @@ const wr = wrangler();
 const call = (args, opts = {}) => run(wr.cmd, [...wr.prefix, ...args], opts);
 const today = new Date().toISOString().slice(0, 10);
 
-// 1. 网络：能不能到 Cloudflare API。
+// 1. 网络：能不能到 Cloudflare API（瞬时连接错误重试 1 次）。
 let networkOk = false;
 {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), Math.min(timeout, 10000));
   const started = Date.now();
-  try {
-    const res = await fetch(`${apiBase}/user/tokens/verify`, { signal: ctrl.signal, headers: { "user-agent": "cloudflare-deploy-probe/1" } });
-    networkOk = res.status < 500;
-    add("network", networkOk ? "pass" : "fail", `api.cloudflare.com -> ${res.status}（401/403 属正常：可达但未认证），${Date.now() - started}ms`);
-  } catch (e) {
-    add("network", "fail", `无法访问 ${apiBase}：${e.cause?.code || e.message}；检查代理、DNS 或区域限制`, { error: String(e.cause?.code || e.message) });
-  } finally {
-    clearTimeout(timer);
+  const r = await fetchWithTransientRetry(`${apiBase}/user/tokens/verify`, {
+    timeout: Math.min(timeout, 10000),
+    headers: { "user-agent": "cloudflare-deploy-probe/1" },
+  });
+  if (r.res) {
+    networkOk = r.res.status < 500;
+    add("network", networkOk ? "pass" : "fail", `api.cloudflare.com -> ${r.res.status}（401/403 属正常：可达但未认证），${Date.now() - started}ms${r.attempts > 1 ? `，重试 ${r.attempts - 1} 次` : ""}`);
+  } else {
+    add("network", "fail", `无法访问 ${apiBase}：${r.error}${r.attempts > 1 ? `（已重试 ${r.attempts - 1} 次）` : ""}；检查代理、DNS 或区域限制`, { error: r.error, attempts: r.attempts });
+  }
+}
+
+// 1b. 代码托管链路：Cloudflare API 通不代表 GitHub/GitLab 通。
+// 只做只读检查；失败默认 warn（Direct Upload/已有产物仍可能部署），不直接 blocked。
+{
+  const repoDir = repoArg || process.cwd();
+  const top = runGit(["rev-parse", "--show-toplevel"], { cwd: repoDir });
+  if (!top.ok) {
+    add("git", "skip", `未指定 --repo 且当前目录不是 git 仓库；跳过代码托管检查（Git 集成/远端构建前需先确认）；${proxyNote}`, { repo: repoDir, proxy: proxyEnv });
+  } else {
+    const gitRoot = top.out.split(/\r?\n/)[0];
+    const remotesOut = runGit(["remote", "-v"], { cwd: gitRoot });
+    const remoteLines = [...new Set(remotesOut.out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+    const remotes = remoteLines.map((line) => {
+      const parts = line.split(/\s+/);
+      if (parts.length >= 2) parts[1] = redactUrl(parts[1]);
+      return parts.join(" ");
+    });
+    const chosen = remoteLines.find((line) => /^origin\s/.test(line)) || remoteLines[0] || null;
+    const remoteUrl = chosen ? chosen.split(/\s+/)[1] : null;
+    if (!gitRoot || !remoteUrl) {
+      add("git", "warn", `git 仓库没有可用的 remote；Git 集成/远端构建不可用，Direct Upload 可能仍可；${proxyNote}`, { repo: gitRoot || repoDir, remotes, proxy: proxyEnv });
+    } else {
+      const ls = runGit(["ls-remote", "--heads", remoteUrl], { cwd: gitRoot, timeout: 10000 });
+      const safeRemote = redactUrl(remoteUrl);
+      if (ls.ok) {
+        add("git", "pass", `代码托管可达：${safeRemote}（git ls-remote 成功）；${proxyNote}`, { repo: gitRoot, remote: safeRemote, proxy: proxyEnv });
+      } else {
+        const reason = String(ls.error || ls.err || ls.status).split(/\r?\n/)[0].slice(0, 200);
+        add("git", "warn", `代码托管不通：git ls-remote ${safeRemote} 失败（${reason}）；Git 集成/远端构建会失败，Direct Upload 可能仍可；${proxyNote}`, { repo: gitRoot, remote: safeRemote, proxy: proxyEnv, error: reason });
+      }
+    }
   }
 }
 

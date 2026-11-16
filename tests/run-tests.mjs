@@ -222,6 +222,15 @@ json("dynamic/package.json", { name: "dynamic-fixture", scripts: { build: "vite 
 w("dynamic/vite.config.ts", `import { defineConfig, loadEnv } from "vite";\nexport default defineConfig(({ mode }) => ({ base: loadEnv(mode, ".", "").BASE || "/", build: { sourcemap: true } }));\n`);
 w("dynamic/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
 
+// 条件 outDir + 多个 build 脚本：不能把 build:web 的 dist-web 配给 npm run build。
+json("vite-multi-build/package.json", {
+  name: "vite-multi-build-fixture",
+  scripts: { build: "vite build", "build:web": "vite build --mode web" },
+  devDependencies: { vite: "^5.0.0" },
+});
+w("vite-multi-build/vite.config.ts", `import { defineConfig } from "vite";\nexport default defineConfig(({ mode }) => {\n  const isWeb = mode === "web";\n  return { base: "./", build: isWeb ? { outDir: "dist-web" } : {} };\n});\n`);
+w("vite-multi-build/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
+
 // Pages Functions 形态：有 functions/，但没有 Wrangler 配置
 json("pages-fn/package.json", { name: "pages-fn", scripts: { build: "vite build" }, devDependencies: { vite: "^5.0.0" } });
 w("pages-fn/index.html", `<!doctype html><html><body><div id="root"></div></body></html>\n`);
@@ -362,6 +371,16 @@ assert("多锁文件：风险提示", locks.risks.some((r) => /锁文件/.test(r
 const dyn = detect(path.join(work, "dynamic"));
 assert("动态配置：base 标为未知", dyn.evidence.basePath.confidence === "unknown", dyn.evidence.basePath.confidence);
 assert("动态配置：风险提示核对产物", dyn.risks.some((r) => /动态/.test(r)), dyn.risks.join(" | "));
+
+const multiBuild = detect(path.join(work, "vite-multi-build"));
+assert(
+  "多 build 脚本/条件 outDir：默认 build 不被错误配到 dist-web，且标为推断",
+  multiBuild.project.buildCommand === "npm run build"
+  && multiBuild.project.outputDir === "dist"
+  && multiBuild.evidence.outputDir.confidence === "inferred"
+  && multiBuild.risks.some((r) => /无法唯一配对/.test(r))
+  , JSON.stringify({ build: multiBuild.project.buildCommand, out: multiBuild.project.outputDir, evidence: multiBuild.evidence.outputDir, risks: multiBuild.risks })
+);
 
 const pfn = detect(path.join(work, "pages-fn"));
 assert("Pages Functions：建议 Pages", pfn.target.suggested === "pages" && pfn.target.confidence === "medium", `${pfn.target.suggested}/${pfn.target.confidence}`);
@@ -1349,6 +1368,28 @@ assert("验收：标题 / content-type / cache-control 检查落进 JSON", (() =
 })(), JSON.stringify(["title", "content-type", "cache-control"].map((id) => v1j.checks.find((c) => c.id === id))));
 assert("验收 SEO：存在 canonical 时不误报 seo warn", !v1j.checks.some((c) => c.id === "seo"),
   JSON.stringify(v1j.checks.filter((c) => c.id === "seo")), "adversarial");
+
+// 产物同一性：--dist 中的引用资源必须与线上字节一致；本地改一个字节应直接失败。
+const artifactDist = path.join(work, "artifact-dist");
+w("artifact-dist/assets/app.css", "body{}");
+w("artifact-dist/assets/app.js", "console.log(1)");
+{
+  const r = await runVerify(["--url", staticBase, "--mode", "static", "--dist", artifactDist, "--json"]);
+  const j = JSON.parse(r.out);
+  const artifact = j.checks.find((c) => c.id === "artifact");
+  assert("产物同一性：本地 dist 与线上引用资源哈希一致",
+    r.code === 0 && artifact?.status === "pass" && artifact.compared === 2 && artifact.mismatched === 0,
+    JSON.stringify({ code: r.code, artifact }), "core");
+}
+{
+  w("artifact-dist/assets/app.css", "body{color:#111}");
+  const r = await runVerify(["--url", staticBase, "--mode", "static", "--dist", artifactDist, "--json"]);
+  const j = JSON.parse(r.out);
+  const artifact = j.checks.find((c) => c.id === "artifact");
+  assert("产物同一性：本地资源与线上字节不一致直接失败",
+    r.code === 1 && artifact?.status === "fail" && artifact.mismatched >= 1,
+    JSON.stringify({ code: r.code, artifact }), "core");
+}
 
 // 瞬时网络错误重试：只重试连接类错误，不重试 HTTP 响应/超时。
 {

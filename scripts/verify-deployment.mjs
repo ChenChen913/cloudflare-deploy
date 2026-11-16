@@ -8,7 +8,7 @@
  *     [--origin https://app.example.com] [--cors-url https://api.example.com/items] \
  *     [--cors-method POST] [--cors-headers "content-type,authorization"] [--cors-credentials] \
  *     [--api /api/health --expect-json '{"ok":true}'] \
- *     [--expect-404 /__missing__] [--assets-limit 20] [--json]
+ *     [--expect-404 /__missing__] [--assets-limit 20] [--dist dist] [--json]
  *
  * 模式必须和 check-build.mjs 用同一个值：
  *   static / ssg  未知路径应当 404
@@ -51,6 +51,9 @@
 import { classifyRedirect, classifyStatus } from "./redirect-policy.mjs";
 import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, resourceReferences } from "./html-scan.mjs";
 import { DEFAULT_RETRIES, RETRY_BACKOFF_MS, isTransientNetworkError, parseRetries } from "./net-retry.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
 
 const argv = process.argv.slice(2);
 const getArg = (name, fallback = null) => {
@@ -79,6 +82,21 @@ const expectJson = getArg("--expect-json");
 const corsMethod = getArg("--cors-method");
 const corsHeadersArg = getArg("--cors-headers");
 const corsCredentials = argv.includes("--cors-credentials");
+const distRaw = getArg("--dist");
+let distRoot = null;
+if (argv.includes("--dist") && !distRaw) {
+  console.error("用法错误：--dist 需要输出目录路径");
+  process.exit(2);
+}
+if (distRaw) {
+  distRoot = path.resolve(distRaw);
+  let st;
+  try { st = fs.statSync(distRoot); } catch { st = null; }
+  if (!st?.isDirectory()) {
+    console.error(`--dist 不是目录：${distRoot}`);
+    process.exit(2);
+  }
+}
 
 // --expect-json：预期值是响应的「子集」，对象按字段递归比较（不看键顺序），
 // 数组按长度与下标比较，标量严格相等。任何不匹配都返回字段路径与原因。
@@ -155,7 +173,7 @@ function allowHeaderCheck(headerValue, wanted, credentials) {
 }
 
 if (!base) {
-  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--retries 1] [--json]");
+  console.error("用法：node scripts/verify-deployment.mjs --url https://site.example.com [--mode static|spa|ssg|ssr] [--dist <构建输出目录>] [--backup ...] [--origin ...] [--cors-method POST] [--cors-headers 'content-type,authorization'] [--cors-credentials] [--api /api/health --expect-json '{\"ok\":true}'] [--retries 1] [--json]");
   process.exit(2);
 }
 if (!MODES.includes(mode)) {
@@ -254,6 +272,87 @@ function collectAssetRefs(elements, assetBase, siteOrigin) {
   }
   // 同一目标用不同写法时按解析后的 URL 去重。
   return { unique: [...new Map(entries.map((e) => [e.abs, e])).values()], ignored };
+}
+
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+
+/**
+ * 把线上资源 URL 映射到本地 --dist 中的文件。
+ * 支持站点挂在 /repo/ 子路径、根路径绝对引用、<base href> 解析后的 URL；
+ * 只接受 dist 内的普通文件，拒绝 .. 逃逸。
+ */
+function localFileForAsset(absUrl) {
+  let u;
+  try { u = new URL(absUrl); } catch { return null; }
+  let decodedPath;
+  try { decodedPath = decodeURIComponent(u.pathname); } catch { return null; }
+  const sitePath = new URL(siteBase).pathname;
+  const candidates = [];
+  if (sitePath !== "/" && decodedPath.startsWith(sitePath)) candidates.push(decodedPath.slice(sitePath.length));
+  candidates.push(decodedPath.replace(/^\/+/, ""));
+  for (const rel of [...new Set(candidates)]) {
+    if (!rel || rel.includes("\0")) continue;
+    const abs = path.resolve(distRoot, rel);
+    if (abs !== distRoot && !abs.startsWith(distRoot + path.sep)) continue;
+    try {
+      if (fs.statSync(abs).isFile()) return { abs, rel: path.relative(distRoot, abs).replace(/\\/g, "/") };
+    } catch { /* 继续尝试下一个映射 */ }
+  }
+  return null;
+}
+
+/**
+ * 产物同一性检查：只比较首页实际引用的同源资源，要求线上字节的 SHA-256
+ * 与本地 --dist 中对应文件一致。它证明“至少这些被引用的产物是本轮的”，
+ * 不能证明线上没有任何未引用文件；映射不到/请求失败会如实标 warn/fail。
+ */
+async function checkArtifactIdentity(refs) {
+  const compared = [];
+  const mismatched = [];
+  const missingLocal = [];
+  const unfetched = [];
+  for (const ref of refs) {
+    const local = localFileForAsset(ref.abs);
+    if (!local) {
+      missingLocal.push({ url: ref.url, reason: "在 --dist 中找不到对应文件（可能是路径/base/子路径映射问题）" });
+      continue;
+    }
+    const r = await req(ref.abs, { method: "GET", headers: { "user-agent": UA } });
+    if (!r.res) {
+      unfetched.push({ url: ref.url, reason: `请求失败：${r.error}` });
+      continue;
+    }
+    if (r.res.status !== 200) {
+      if (r.res.body) { try { await r.res.body.cancel(); } catch { /* 已关闭 */ } }
+      unfetched.push({ url: ref.url, reason: `线上返回 ${r.res.status}，无法取字节比较` });
+      continue;
+    }
+    let remote;
+    try { remote = Buffer.from(await r.res.arrayBuffer()); }
+    catch { unfetched.push({ url: ref.url, reason: "读取线上响应体失败" }); continue; }
+    let localBytes;
+    try { localBytes = fs.readFileSync(local.abs); }
+    catch (e) { missingLocal.push({ url: ref.url, reason: `读取本地文件失败：${e.message}` }); continue; }
+    const localSha = sha256(localBytes);
+    const remoteSha = sha256(remote);
+    const item = {
+      url: ref.url, local: local.rel, localBytes: localBytes.length,
+      remoteBytes: remote.length, localSha256: localSha, remoteSha256: remoteSha,
+    };
+    compared.push(item);
+    if (localSha !== remoteSha || localBytes.length !== remote.length) mismatched.push(item);
+  }
+  const total = refs.length;
+  const status = mismatched.length ? "fail" : compared.length ? "pass" : "warn";
+  const details = mismatched.length
+    ? `产物同一性失败：${mismatched.length}/${compared.length} 个已比对资源与本地 --dist 不一致；${mismatched.slice(0, 3).map((m) => `${m.local}（本地 ${m.localBytes}B/${m.localSha256.slice(0, 12)}…，线上 ${m.remoteBytes}B/${m.remoteSha256.slice(0, 12)}…）`).join("；")}`
+    : compared.length
+      ? `产物同一性通过：${compared.length} 个首页同源资源与 --dist 的 SHA-256 一致（共 ${total} 个引用；未映射 ${missingLocal.length}、取不到 ${unfetched.length}）`
+      : `产物同一性未验证：--dist 已提供，但首页没有可比对的同源资源（未映射 ${missingLocal.length}、取不到 ${unfetched.length}）`;
+  add("artifact", status, details, {
+    dist: distRoot, total, compared: compared.length, mismatched: mismatched.length,
+    missingLocal, unfetched, matched: compared.filter((c) => !mismatched.includes(c)),
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -760,8 +859,10 @@ if (html) {
         : `${unique.length} 个同源资源正常${suffix}${headNote}${redirectNote}${ignoredNote}`,
     { broken, warnings, redirects, ignored, checked: unique.length, total: allUnique.length, limited: allUnique.length > unique.length, probed }
   );
+  if (distRoot) await checkArtifactIdentity(allUnique);
 } else {
   add("html", "warn", "没有拿到首页 HTML；跳过标题、canonical、资源检查");
+  if (distRoot) add("artifact", "warn", "没有首页 HTML，无法进行产物同一性比对", { dist: distRoot });
 }
 
 // ---------------------------------------------------------------- API（可选）
@@ -1090,6 +1191,7 @@ const result = {
   corsUrl: origin ? resolve(getArg("--cors-url", "")) : null,
   corsOptions: origin ? { method: corsMethod, headers: corsHeadersArg, credentials: corsCredentials } : null,
   api: apiPaths.length ? apiPaths : null,
+  dist: distRoot,
   expectJson,
   expectJsonMode: expectJson ? "json-subset" : null,
   retry: { maxRetries: retries, mode: "transient-network-only", backoffMs: RETRY_BACKOFF_MS },
