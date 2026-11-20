@@ -209,7 +209,6 @@ A: This is a CLI and documentation skill. The first screen uses Mermaid and a re
 - It does not buy domains, switch DNS, upgrade plans, or migrate databases.
 - SSR / full-stack script coverage stops at the HTTP layer; `render_support` is not a framework-compatibility guarantee.
 - The HTML tokenizer covers common boundaries but is not a full HTML5 tree builder; use a browser for DOM-level conclusions. See `tests/results.md`.
-- This repository has no `LICENSE` file; confirm licensing before use.
 
 ## Contributing
 
@@ -219,4 +218,4 @@ Before submitting, run `node tests/run-tests.mjs` and `node tests/check-skill.mj
 
 ## License
 
-This repository does not include a `LICENSE` file. Confirm licensing with the author before use, copying, or redistribution. If an open-source license is added later, the `LICENSE` file at the repository root is authoritative.
+This project is licensed under the [MIT License](./LICENSE). Copyright (c) 2026 ChenChen913.

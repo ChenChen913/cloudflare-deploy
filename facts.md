@@ -39,7 +39,7 @@
     - `check-build.mjs`：0 无阻断 / 1 有阻断；`ssr` 模式报 `skip`。
     - `verify-deployment.mjs`：0 通过 / 1 有失败 / 2 用法错误。
     - `migration-plan.mjs`：0 已生成计划 / 1 blocked 或矩阵不可用 / 2 用法错误。
-11. **已有文档**：`README.md`、`README.en.md`、`SKILL.md`、`UPGRADE-PLAN.md`、`references/`、`templates/`、`tests/results.md`、`deployment-notes/`。
+11. **已有文档**：`README.md`、`README.en.md`、`SKILL.md`、`UPGRADE-PLAN.md`、`LICENSE`、`references/`、`templates/`、`tests/results.md`、`deployment-notes/`。
 12. **可复核数字**：
     - 自动化测试：`node tests/run-tests.mjs` → 829/829。
     - 结构自检：`node tests/check-skill.mjs` → 通过；`SKILL.md` 400 行。

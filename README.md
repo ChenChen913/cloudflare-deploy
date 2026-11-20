@@ -223,7 +223,6 @@ A：这是 CLI 和文档技能，首屏用 Mermaid 和真实终端输出。真�
 - 不自动购买域名、切换 DNS、升级套餐或迁移数据库。
 - SSR / 全栈的脚本能力只到 HTTP 层；`render_support` 不是框架兼容性保证。
 - HTML tokenizer 覆盖常用边界，但不是完整 HTML5 tree builder；DOM 级结论用浏览器复核。详见 `tests/results.md`。
-- 本仓库没有 `LICENSE` 文件，使用前需要确认许可。
 
 ## 如何贡献
 
@@ -233,4 +232,4 @@ A：这是 CLI 和文档技能，首屏用 Mermaid 和真实终端输出。真�
 
 ## 许可证
 
-本仓库未包含 `LICENSE` 文件。使用、复制或分发前请先与作者确认许可；如果后续选择开源许可证，以仓库根目录的 `LICENSE` 文件为准。
+本项目使用 [MIT License](./LICENSE)。Copyright (c) 2026 ChenChen913。
