@@ -162,7 +162,7 @@ let networkOk = false;
   const started = Date.now();
   const r = await fetchWithTransientRetry(`${apiBase}/user/tokens/verify`, {
     timeout: Math.min(timeout, 10000),
-    headers: { "user-agent": "cloudflare-deploy-probe/1" },
+    headers: { "user-agent": "deploy-advisor-probe/1" },
   });
   if (r.res) {
     networkOk = r.res.status < 500;
@@ -265,7 +265,7 @@ if (authOk && accountId) {
   } else {
     try {
       const res = await fetch(`${apiBase}/accounts/${accountId}/workers/scripts?per_page=1`, {
-        headers: { authorization: `Bearer ${token}`, "user-agent": "cloudflare-deploy-probe/1" },
+        headers: { authorization: `Bearer ${token}`, "user-agent": "deploy-advisor-probe/1" },
         signal: AbortSignal.timeout(timeout),
       });
       if (res.status === 200) add("api-read", "pass", "Token 可以读取该账号的 Workers 列表");

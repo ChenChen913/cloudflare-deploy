@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * run-tests.mjs — cloudflare-deploy 技能的本地可执行测试。
+ * run-tests.mjs — deploy-advisor 技能的本地可执行测试。
  *
  * 在 tests/.work 下创建合成项目，运行 detect-project.mjs 和 check-build.mjs，
  * 再启动多个本地 HTTP 服务器，真实执行 verify-deployment.mjs（真发请求，不是 mock）。

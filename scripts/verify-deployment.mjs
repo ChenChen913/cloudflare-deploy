@@ -220,7 +220,7 @@ for (const [flag, value] of [["--expect-404", notFoundPath], ...apiPaths.map((p)
   try { new URL(value, base); } catch { console.error(`${flag} 的 URL 无法解析：${value}`); process.exit(2); }
 }
 
-const UA = "cloudflare-deploy-verify/2";
+const UA = "deploy-advisor-verify/2";
 // 主站链与资源探针共用的跳数上限：最多跟随 5 次同源重定向，并额外请求一次
 // 第 5 次重定向指向的最终地址；该地址仍返回 3xx（第 6 次重定向）即判超限。
 const MAX_REDIRECTS = 5;

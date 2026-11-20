@@ -1,243 +1,222 @@
-# cloudflare-deploy
+<h1 align="center">deploy-advisor</h1>
 
-[简体中文](README.md) | **English**
+<p align="center">
+  <b>English</b> | <a href="./README.md">简体中文</a>
+</p>
 
-A reusable Agent Skill for assessing and, where feasible, deploying application projects (static sites, frontends, full-stack or backends) to Cloudflare Pages / Workers, GitHub Pages, Vercel, Netlify, or Render; when not a fit, it gives an alternative route (keep the external backend or use Containers). Flow: **verify the account/network path and technical feasibility first**, then inspect the repo, assess deployment fit, filter and select a platform, surface network/advanced-needs guidance, write a plan, build, deploy to a preview, verify with real HTTP requests, run a migration check when applicable, and report what was actually tested.
+Choose the right platform first, then deploy and verify. A multi-platform skill for developers and AI agents.
 
-> **Scope**: the scripts fully cover static sites / SPAs / SSG for build checks and HTTP verification. For SSR / full-stack projects, treat this skill as a **workflow checklist**: `check-build.mjs` does not apply, and `verify-deployment.mjs` only checks the HTTP layer (root page, APIs, server-rendered content). Runtime compatibility, plans and cost: `references/runtime-compat.md`. For Java/Python/PHP/Ruby/.NET or mixed frontend/backend projects, read `references/tech-stack-fit.md` first; do not assume the scripts fully verify every stack.
-
-The skill body is written in Simplified Chinese. File names and code identifiers stay ASCII for cross-platform compatibility; JSON keys stay English so scripts remain machine-readable.
-
-## Status
-
-- Skill format validated (`quick_validate.py`): valid. Repository check `node tests/check-skill.mjs` also passes.
-- Local tests: 829/829 passing (`node tests/run-tests.mjs`).
-- Real Cloudflare deployment: **not run in this automated test environment** (no account/token, Wrangler not installed). Migration and live observations from a separate real project are recorded in `references/migration-guide.md` (tagged "measured"), but that is historical evidence, not verification performed by these local tests. Local automation is not the same as account-level deployment verification. See `tests/results.md` for exactly what was and was not verified.
-
-## What it does
-
-**Step 0 is a circuit breaker, not optional**: `scripts/probe.mjs` checks the account / network / permission path and hard-stops on `blocked`; a short feasibility check follows, and an infeasible stack produces "switch dependency / switch approach / switch platform" with costs. Builds also stop after two consecutive failures or 15 minutes without progress.
-
-1. **Detects** the framework, build command, output directory, base path, SPA/SSR/API type, GitHub Pages setup, existing Wrangler config, bindings, env keys, PWA, workspaces, lockfiles, and risk signals — tagging each key field `confirmed` / `inferred` / `unknown`.
-2. **Assesses and selects**: evaluates deployment fit across render mode, backend/database, audience region, and budget, plus usage type (personal non-commercial / commercial / unknown) and existing deployment health. Candidates come from `references/platform-matrix.json`, then it proposes a primary / backup / not-recommended platform set. Static sites default to Cloudflare Pages, new SSR / full-stack projects prefer Cloudflare Workers, and a healthy existing Pages deployment is not forced to migrate; commercial projects must not use Vercel Hobby. A full mainland-China access-risk notice with evidence levels is mandatory when the audience includes mainland China or is unspecified.
-3. **Plans and migrates**: writes the change and rollback, with explicit confirmation gates for DNS, custom domains, production secrets, databases, deletions, and irreversible config. Migration scenarios generate a pre-check, dual-live steps, DNS gate, rollback, and report skeleton; it never executes DNS, deployment, or database operations.
-4. **Builds and checks** the artifact against the site mode, plan, and deployment target. Free is 20,000 files by default; 100,000 requires `--plan paid --target pages` (Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`) or `--plan paid --target workers` (full Wrangler version >= 4.34.0). Unknown target, invalid versions, or missing evidence fall back to 20,000 with a `warn`; `ssr` reports "not applicable".
-5. **Deploys**: Cloudflare Pages and Workers are separate products, each going to `pages.dev` / `workers.dev` or a preview branch; other platforms are executed manually via their official Git integration or CLI, and the skill does not claim automated deployment there.
-6. **Verifies** root status (only same-origin redirects are followed, up to 5 redirects plus one request for the final address; cross-origin, protocol changes, and non-HTTP(S) targets are recorded and classified, never requested; only 301/302/303/307/308 count as redirects, while 304 and other 3xx are classified separately; content checks run only for a final 200), mode-appropriate 404/fallback behavior, assets (HTML is parsed by the shared tokenizer: fake tags inside comments/RAWTEXT/RCDATA/template/noscript, script escaped/double-escaped states, malformed DOCTYPE identifiers and SVG/MathML foreign content never count as HTML; subresource attributes are collected element-aware and `srcset` is parsed with the WHATWG algorithm; 304 never enters the redirect chain), headers, canonical/noindex (self-canonical requires matching scheme, host, and normalized path; missing / empty / unparseable hrefs each fail; only real HTML-namespace `<link rel=canonical>` elements count, including links inside HTML integration points), CORS (preflight sends only explicitly provided method/headers, unasserted checks stay in `notChecked`; a CORS URL returning non-2xx/3xx never passes), backup independence, DNS, data, and performance as applicable; `ssr` additionally checks server-rendered content (RAWTEXT excluded from visible text), a single TTFB sample, and `--api` endpoint status / JSON structure.
-7. **Reports** every check as pass/fail/warn/unverified. It does not claim a test that was not run.
-
-## Structure
-
-```text
-cloudflare-deploy/
-├── SKILL.md
-├── README.md                 # Chinese (default on GitHub)
-├── README.en.md              # English (this file)
-├── UPGRADE-PLAN.md           # multi-platform upgrade plan (iteration 1 implemented)
-├── references/
-│   ├── prerequisites.md      # account, token, account ID, Node, Wrangler, R2
-│   ├── console-paths.md      # dashboard paths after login
-│   ├── cross-platform.md     # Windows / macOS / Linux / WSL / containers / CI
-│   ├── platform-selection.md # Pages vs Workers, limits, pricing
-│   ├── platform-matrix.json  # platform capability matrix (5 core + 5 extended/plan)
-│   ├── mainland-china-access.md # mainland access risk, default domains, two routes
-│   ├── cross-platform-migration.md # multi-platform migration playbook, dual-live steps, gates
-│   ├── custom-domain-guide.md # domain purchase, CNAME / A / nameserver
-│   ├── advanced-needs.md     # paid limits, backend / database layering
-│   ├── runtime-compat.md     # feasibility, ORM x runtime, cost, stop-loss
-│   ├── tech-stack-fit.md     # non-JS/TS backends, Containers, mixed-project fit
-│   ├── deployment-workflows.md
-│   ├── pages-runtime.md      # headers, redirects, 404/SPA, cache, CORS
-│   ├── github-pages-backup.md
-│   ├── verification.md
-│   ├── troubleshooting.md
-│   ├── security.md
-│   ├── seo-indexing.md
-│   └── migration-guide.md    # phases + Jekyll case study with real data
-├── scripts/
-│   ├── probe.mjs             # Step 0: link probe
-│   ├── deploy-verdict.mjs    # testable verdict logic for probe --deploy
-│   ├── redirect-policy.mjs  # same-origin redirect policy (pure function, shared)
-│   ├── net-retry.mjs        # transient network error classification (pure function, verify)
-│   ├── html-scan.mjs         # shared HTML tokenizer (comments/RAWTEXT/RCDATA/template, entities)
-│   ├── config-scan.mjs       # comment-aware JSONC/TOML config reading (detect-project)
-│   ├── wrangler-auth.mjs     # single auth verdict authority (check-env + probe)
-│   ├── detect-project.mjs
-│   ├── platform-matrix.mjs   # matrix loading, validation, filtering and selection
-│   ├── select-platform.mjs   # deployment fit assessment and multi-platform shortlist
-│   ├── migration-plan.mjs    # pre-check, dual-live steps, DNS gate, report skeleton
-│   ├── check-env.mjs
-│   ├── check-build.mjs
-│   └── verify-deployment.mjs
-├── templates/
-│   ├── deployment-plan.md
-│   ├── deployment-report.md
-│   ├── migration-plan.md
-│   ├── migration-report.md
-│   ├── wrangler.workers.jsonc
-│   └── wrangler.pages.toml
-├── deployment-notes/
-│   ├── hangla-2026-11-14.md  # real project deployment record (Cloudflare Pages Direct Upload)
-│   └── assets/hangla-home.png # screenshot of the deployed page
-└── tests/
-    ├── run-tests.mjs
-    ├── check-skill.mjs      # structure: frontmatter, referenced paths, absolute paths
-    ├── browser-diff.mjs     # optional: real Chrome/Edge CDP differential (Node 22+, not in default suite)
-    ├── fixtures/
-    │   ├── loopback-tls.mjs # self-signed loopback cert for local HTTPS tests (not a real credential)
-    │   └── html5-oracle.json # Chrome/Edge-recorded HTML5 DOM facts (115 cases)
-    ├── last-run.txt         # latest test output (auto-generated by run-tests)
-    └── results.md
+```mermaid
+flowchart LR
+  A[probe link check] --> B[inspect repo]
+  B --> C[four-dimension fit]
+  C --> D[platform matrix]
+  D --> E[primary / backup / not recommended]
+  E --> F[build and preview]
+  F --> G[HTTP verification]
+  G --> H[report / migration / rollback]
 ```
 
-## Real deployment records
+Shortest path (run in your project directory; `SKILL_DIR` points to this skill):
 
-`deployment-notes/` contains **real project deployment records only**, separate from automated test output and skill documentation:
+```sh
+node "$SKILL_DIR/scripts/select-platform.mjs" --project . --audience mainland --budget free --usage personal_noncommercial --existing none --human
+```
 
-- **Real deployment record**: [hangla deployment record](deployment-notes/hangla-2026-11-14.md) (Cloudflare Pages Direct Upload; actual URL, verification results, issues, follow-up work).
-- **Automated test records**: [tests/last-run.txt](tests/last-run.txt) and [tests/results.md](tests/results.md) (generated/maintained locally; these do not prove a live deployment).
-- **Skill documentation**: [SKILL.md](SKILL.md) and [references/](references/) (workflow, templates, and rules; some rules cite Cloudflare's official documentation, but the docs themselves are not deployment verification).
+## Contents
 
-There are two real **Pages Direct Upload** experiences so far: the hangla record and the Jekyll project in `references/migration-guide.md`. Git integration, Workers, Containers, Java/Python backends, and other plans/project types are not verified by the records in this repository. Do not treat the Pages experience as verification of every Cloudflare deployment mode.
+- [Why this project](#why-this-project)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [FAQ](#faq)
+- [Known Limitations](#known-limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
-## Prerequisites
+## Why this project
 
-| Requirement | Needed for | Check |
-|---|---|---|
-| Cloudflare account | Everything | Sign up at `dash.cloudflare.com`; verify email |
-| Wrangler auth | Deploy | `npx wrangler whoami` |
-| Account ID | API token / CI | Account Home → search "Copy account ID" |
-| Node.js | 18+ for scripts; 22+ for deploys | `node -v` |
-| Git | Repo operations | `git --version` |
-| Domain / DNS | Custom domain only | NS location, CAA records |
-| R2 subscription | R2 only | Storage & databases → R2 checkout |
-| Docker | Containers with local image build/push only | `docker info` (prebuilt images, CI or Workers Builds do not require local Docker; Containers require Workers Paid) |
-| Account plan / subscription | Paid features | Manage Account → Billing → Subscriptions |
-| GitHub CLI | Optional automation | `gh auth status` |
+The cost of choosing the wrong platform usually appears after launch: unstable access, a commercial-use restriction, or a migration without a rollback path. This skill changes the order: judge platform fit first, then deploy, then verify with real HTTP requests.
 
-Wrangler officially supports **Windows 11**, **macOS 13.5+**, and **Linux glibc 2.35+**. For remote SSH, containers, or Codespaces, use `npx wrangler login --device`; for CI, use `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`. Details: `references/prerequisites.md` and `references/cross-platform.md`.
+It is for developers deploying projects and for people who install or author Agent Skills. Instead of naming one platform, it returns a primary, a backup, and a not-recommended set, and keeps Pages vs Workers, Hobby vs Pro, commercial use, and mainland access risk separate.
 
-## Install
+It does not claim to finish the final deployment. DNS, custom domains, production secrets, plan upgrades, and database migrations require your confirmation.
 
-User-level skills directory:
+## Quick Start
+
+Requirements: Node.js 18+ (22+ recommended for actual deployments), Git, and optionally an Agent client that supports Skills.
+
+Place this folder in your Agent skills directory. The examples use `~/.agents/skills`; replace it with the path your client documents:
 
 ```powershell
 # Windows: junction, no admin required
 New-Item -ItemType Junction `
-  -Path "$env:USERPROFILE\.workbuddy\skills\cloudflare-deploy" `
-  -Target "C:\path\to\cloudflare-deploy"
+  -Path "$env:USERPROFILE\.agents\skills\deploy-advisor" `
+  -Target "C:\path\to\deploy-advisor"
 ```
 
 ```bash
 # macOS / Linux
-ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy
+ln -s /path/to/deploy-advisor ~/.agents/skills/deploy-advisor
 ```
 
-If links are unavailable, copy the folder. Re-copy after edits. A GitHub zip may extract to a folder with a `-main` suffix; rename it to `cloudflare-deploy` before running `tests/check-skill.mjs`, otherwise the name/directory check fails.
+If links are unavailable, copy the folder. There is no `npm install` and no build step.
+
+Set the skill directory variable. Run the commands below inside your project directory, not inside this skill directory (`detect` will not recognise the skill itself):
+
+```sh
+# macOS / Linux
+export SKILL_DIR=/path/to/deploy-advisor
+```
+
+```powershell
+# Windows PowerShell
+$SKILL_DIR = "C:\path\to\deploy-advisor"
+```
+
+First run:
+
+```sh
+node "$SKILL_DIR/scripts/probe.mjs" --repo "$PWD"
+node "$SKILL_DIR/scripts/detect-project.mjs" . --human
+node "$SKILL_DIR/scripts/select-platform.mjs" --project . --audience mainland --budget free --usage personal_noncommercial --existing none --human
+```
+
+`probe` uses exit codes for the link verdict: `0` ready, `1` limited, `2` blocked. `detect` prints the framework, build command, output directory, render mode, and confidence. `select` prints candidates, primary / backup / not-recommended, and the mainland access-risk notice.
+
+Uninstall: remove the junction or symlink. Do not delete the source directory.
 
 ## Usage
 
-Trigger phrases include:
+Common scenarios:
 
-- "Deploy this GitHub project to Cloudflare."
-- "Should this use GitHub Pages, Cloudflare Pages, Vercel, Netlify, or Render?"
-- "Should this be Pages or Workers?"
-- "Migrate this from GitHub Pages to Cloudflare Pages."
-- "Which platform is more reachable for mainland-China users?"
-- "How do I buy and bind a custom domain?"
-- "Check the current deployment."
-- "Keep GitHub Pages as a fallback."
-- "Verify pages, routes, and assets after deploy."
-- "Fix this failed Cloudflare deploy."
+| Scenario | Command |
+|---|---|
+| Static / SPA / SSG | `node "$SKILL_DIR/scripts/select-platform.mjs" --render static --audience overseas --budget free --usage personal_noncommercial --existing none --human` |
+| SSR / full-stack / API | `node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --backend serverless --audience mainland --budget free --usage personal_noncommercial --existing none --human` |
+| Healthy existing Pages | `node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --existing cloudflare-pages --existing-status healthy --audience overseas --budget free --usage personal_noncommercial --human` |
+| Migration plan | `node "$SKILL_DIR/scripts/migration-plan.mjs" --source github-pages --target cloudflare-pages --project-type ssg --human` |
+| Build artifact check | `node "$SKILL_DIR/scripts/check-build.mjs" --dir dist --mode static` |
+| HTTP verification | `node "$SKILL_DIR/scripts/verify-deployment.mjs" --url https://example.com --mode static --json` |
 
-The agent runs `scripts/probe.mjs --repo "$PWD"` first (exit codes express the link verdict, including code-host reachability); once the link is up it runs `scripts/detect-project.mjs`, then `scripts/select-platform.mjs` for fit assessment and a platform shortlist; before building or deploying it runs `scripts/check-env.mjs` (also exit-code driven); migration scenarios use `scripts/migration-plan.mjs` for the plan and report skeleton; after deploying to a preview it runs `scripts/verify-deployment.mjs` and fills `templates/deployment-report.md` or `templates/migration-report.md`.
+Real output example:
 
-## Scripts
-
-Dependency-free Node 18+ ESM (Node 22+ is still recommended for actual deploys). Read-only by default; `probe.mjs --deploy` is the exception (it creates and deletes a real temporary Worker and needs explicit consent). `probe.mjs --timeout` must be a finite positive integer in 1..2147483647 (milliseconds); empty, non-numeric, negative, zero, fractional, or out-of-range values exit with code 2 and a usage error before any network probe:
-
-```bash
-node scripts/probe.mjs --repo "$PWD"            # Step 0: 0 ready / 1 limited / 2 blocked
-node scripts/detect-project.mjs . --human
-node scripts/select-platform.mjs --project . --audience mainland --budget free --human
-node scripts/migration-plan.mjs --source github-pages --target cloudflare-pages --project-type ssg --human
-node scripts/check-env.mjs                     # 0 deployable / 1 not deployable / 2 not buildable
-node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # or ssg / spa; ssr reports skip
-node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json [--retries 1]
+```text
+$ node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --backend serverless --audience overseas --budget free --usage personal_noncommercial --existing none --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);console.log(j.selection.primary.id)})"
+vercel-hobby
 ```
 
-`select-platform.mjs` is read-only: it reads `references/platform-matrix.json`, assesses render mode, backend, audience, budget, usage type, and existing deployment, then outputs candidates plus a primary / backup / not-recommended set. When the audience includes mainland China or is unspecified, it prints the full mainland access-risk notice. Exit code `0` means a usable result, `1` insufficient information or unavailable matrix, `2` usage error; it never accesses the network or writes project files. Matrix validation, filtering, and ranking pure functions live in `platform-matrix.mjs` and are covered directly by tests.
+The human-readable CLI labels are Chinese in this version; JSON keys and the `--json` output stay English so scripts can read them.
 
-`migration-plan.mjs` is a read-only migration plan generator: it validates `source` / `target` / `project_type` (including Cloudflare Workers and Vercel Pro) and outputs a pre-check, dual-live steps, DNS confirmation gate, rollback, and report skeleton. `--env-keys` accepts key names only and rejects `KEY=value`; `--human` prints the plan, `--report` prints only the report skeleton. It never executes DNS, deployment, or database operations; an unsupported target render mode returns `blocked`.
+Main scripts and exit codes:
 
-`--mode` decides the 404 verdict: `static`/`ssg` require a 404 for unknown paths; `spa` requires the app shell; `ssr` normally expects 404 and only warns on 200. Build check and verification must use the same value. `detect-project` distinguishes HashRouter (recommends static + 404.html) from BrowserRouter/history routing (spa + explicit fallback); **when there is no routing evidence it returns `unknown` and requires manual confirmation, never a default spa recommendation**. `verify-deployment` retries transient connection errors once by default (`--retries 0..3`), never retries HTTP 4xx/5xx, certificate/DNS-resolution errors, or the script's own per-attempt timeout (connection timeouts/resets may be retried); it distinguishes network failure from an HTTP assertion in the detail.
+| Script | Purpose | Key flags | Exit codes |
+|---|---|---|---|
+| `probe.mjs` | Check account, network, permissions, and code-host reachability | `--repo` | 0 ready / 1 limited / 2 blocked |
+| `detect-project.mjs` | Detect framework, build command, output directory, and render mode | directory, `--human`, `--json` | see `--help` |
+| `select-platform.mjs` | Four-dimension fit assessment and platform shortlist | `--render`, `--backend`, `--audience`, `--budget`, `--usage`, `--existing`, `--human` | 0 result / 1 insufficient input / 2 usage error |
+| `migration-plan.mjs` | Generate pre-check, dual-live steps, DNS gate, and rollback | `--source`, `--target`, `--project-type`, `--human` | 0 plan / 1 blocked / 2 usage error |
+| `check-build.mjs` | Check file count, asset references, and build output | `--dir`, `--mode`, `--plan`, `--target` | 0 no blocker / 1 blocker |
+| `verify-deployment.mjs` | Verify root, routes, assets, and APIs with real HTTP requests | `--url`, `--mode`, `--api`, `--json` | 0 pass / 1 failure / 2 usage error |
 
-`check-build.mjs` defaults to the Free **20,000** file limit. The Paid **100,000** limit has different prerequisites per target: `--target pages` needs Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4` (a Pages-only setting), while `--target workers` needs full Wrangler **>= 4.34.0** (official Workers Limits) and no Pages variable. Versions are compared numerically per segment (`4.9.0 < 4.34.0`); `4.x` and prerelease tags are treated as unverified. Omitting `--target` or any missing evidence falls back to 20,000 with a `warn`, and the result records the target, effective limit, and reason.
+The final Cloudflare deployment is not automatic. After `probe`, `check-env`, `check-build`, and preview verification, run:
 
-CORS preflight only asserts what you explicitly pass via `--cors-method` / `--cors-headers` / `--cors-credentials`; ACRM/ACRH are not sent unless provided, everything else is listed in `notChecked`, and a preflight without explicit method/header assertions is at most `warn`. A CORS URL returning non-2xx or a redirect never passes. Per the Fetch spec, `*` is a wildcard only for requests without credentials, `GET`/`HEAD`/`POST` are CORS-safelisted methods, `Authorization` is never covered by `*`, and method names are case-sensitive. **`--cors-credentials` declares the expected request mode**: the script only sends GET / HEAD / OPTIONS and never attaches browser cookies or identity credentials. An `Access-Control-Allow-Credentials: true` response header does not turn a credential-free request into a credentialed one. Only when credentials are explicitly declared does the check require an exact `ACAO` match plus `ACAC: true`.
-
-Both the root chain and asset probes follow only **same-origin** (scheme + host + port, see `scripts/redirect-policy.mjs`) redirects and share `MAX_REDIRECTS=5`: up to 5 redirects are followed, plus one extra request for the final address the 5th redirect points to. If that address still returns 3xx (a 6th redirect), the result is `loop-or-limit` and the target is never requested. Cross-origin targets, protocol changes (including HTTP ↔ HTTPS), non-HTTP(S) schemes, and missing/unparseable `Location` are never requested — only the Location, status code, and redirect chain are recorded, so verification cannot be sent to `127.0.0.1`, an internal IP, or a cloud metadata endpoint. A cross-origin redirect at the hop boundary is still classified as cross-origin, never followed. The root result uses `redirectOutcome` to distinguish same-origin verified, cross-origin target unverified, loop/hop limit, unparseable Location, unsupported protocol, `not-modified` (304), and `unexpected-3xx` (uncommon 3xx), plus `no-redirect` / `network-error` / `same-origin-final-failed`; on overflow, the root result's `limitHop` records the unfollowed hop. Any asset 3xx with a parseable `Location` is recorded in `redirects` (no longer inferred from chain length), keeping `probed` / `warnings` / `redirects` consistent. Only `301/302/303/307/308` require reading `Location`; `304 Not Modified` is a cache-validation result, never enters the redirect chain, and is never reported as an invalid redirect for lacking `Location`; other 3xx (300, 305, etc.) are neither followed nor treated as success. The root chain, asset probes, and the `/index.html` check share `classifyStatus()`, and hop records carry `statusClass`. HTML is parsed by the shared tokenizer (`scripts/html-scan.mjs`, zero-dependency explicit state machine): fake tags inside comments, RAWTEXT (script/style/xmp/iframe/noembed/noframes/noscript), RCDATA (title/textarea), template, attribute values and malformed tags never count; **non-void HTML elements written as `<div/>` / `<span/>` stay open** (the self-closing flag only takes effect for void and foreign elements); an incomplete start tag at EOF is discarded like the browser (no element, no tag text in the document; a lone `<` / `</` remains text, and script/title raw text is preserved). Foreign end-tag fallback stops at scope boundaries (table/object/marquee/applet/select), and tree-builder-discarded table/structural tags do not pollute the HTML ancestor stack. Only the final 200 homepage is content-checked. Script data implements escaped/double-escaped states (`<!--<script></script>-->`'s inner `</script>` does not close the element); DOCTYPE public/system identifiers end abruptly at `>` (browser behavior, no fake quote protection); SVG/MathML use an explicit namespace stack (nested SVG, foreignObject/desc/title, MathML text integration points, annotation-xml encoding branches, breakout tags, HTML-ancestor end tags, CDATA, template isolation, no state leaks). Asset references are element-aware: `src` only on img/script/iframe/embed/video/audio/source/track/input (type=image), `poster` only on video, `srcset` only on img/source and parsed with the WHATWG algorithm (commas in URLs/data URIs, no-space separators, trailing commas, malformed descriptors); `<a href>`, canonical and `<base>` are not resources. Character references follow HTML rules (common named entities, numeric references, common semicolon-less legacy entities, CR/CRLF normalization). Relative URLs resolve against `<base href>` or the document URL (no forced trailing slash). After same-origin redirects, 404/API/CORS/`/index.html`/assets/canonical use the final page URL; `probed.finalUrl` is the last actually requested URL, with unfollowed targets in `redirectTarget` / `limitReached`. HTML5 oracle differential: `tests/fixtures/html5-oracle.json` records 115 browser DOM facts (HTML-namespace canonical/title/script/img/base) from real Chrome/Edge; the default suite compares against it, and `node tests/browser-diff.mjs` re-runs a real Chromium differential when a browser is installed (Node 22+, optional). A canonical tag counts as self-canonical only when **scheme + host + normalized path** all match; same host and path but a different scheme (an `http` canonical on an `https` site) is a `warn` that names the protocol mismatch. A canonical `href` that is missing, empty, or unparseable each fails with `hrefState` (`missing` / `empty` / `valid` / `invalid`) and is never resolved against the current site; double-quoted, single-quoted, and unquoted legal attribute values are all supported; only real `<link rel="canonical">` tags are counted — `rel` is matched as HTML-whitespace-separated tokens, so comments, `<script>`/`<style>`, and `data-rel` / `aria-rel` are ignored. Cross-origin or non-HTTP(S) asset references on the homepage (including backslash-disguised cross-origin URLs) are never requested and are recorded in `ignored`; `/index.html` passes only when the redirect is same-origin and targets the site root — cross-origin / non-HTTP(S) / other paths are warnings, not passes. Invalid CLI values (`--api` / `--expect-404` / `--backup` / `--cors-url` / `--url` bad URLs, a non-positive `--timeout`, a non-positive-integer `--assets-limit`, a bad `--origin`, CORS options without `--origin`, or an invalid `--retries`) exit with code 2 and a usage error instead of emitting partial JSON. `verify-deployment` retries transient connection errors once by default (`--retries 0..3`); HTTP 4xx/5xx, certificate/DNS-resolution errors, and the script's own per-attempt timeout are never retried, while connection timeouts/resets may be. The detail distinguishes a network failure from an HTTP assertion. When canonical, meta robots, and X-Robots-Tag are all absent, an extra `seo` warning is emitted without changing the exit code. On Cloudflare Pages, a missing top-level `404.html` triggers the documented SPA fallback to `/` (the official docs do not state the status code; in practice it is usually 200), and that fallback also applies to missing static-asset paths, so resource checks must not rely on the status code alone. CORS preflight sends ACRM/ACRH only when explicitly provided; unprovided assertions stay in `notChecked` and the preflight verdict is at most `warn`; simple requests returning 3xx/4xx/5xx never pass, and only `Authorization` is a non-wildcard header. `check-env` and `probe` share one auth verdict: a `whoami` exit 0 without positive evidence (email / Account ID / explicit logged-in text) is `unknown` and can never deploy. `--expect-json` compares JSON subsets, so key order and whitespace do not matter.
-
-HTTP baseline for SSR / full-stack:
-
-```bash
-node scripts/verify-deployment.mjs \
-  --url https://site.example.com --mode ssr \
-  --api /api/health --expect-json '{"ok":true}' --json
+```sh
+npx wrangler pages deploy "<output-dir>" --project-name "<project-name>"
+npx wrangler deploy
 ```
 
-`--expect-json` must be valid JSON and is compared as a **subset** of the response (key order and whitespace are irrelevant; missing fields, value mismatches, and invalid JSON produce explicit reasons). This only verifies the HTTP layer. Database writes, login sessions, third-party callbacks, and cold starts still need dedicated checks.
+Pages and Workers are separate products; do not reuse the same configuration assumptions. Other platforms are executed manually via their official Git integration or CLI.
 
-Backup site plus CORS on a separate API host:
+## Configuration
 
-```bash
-node scripts/verify-deployment.mjs \
-  --url https://site.example.com \
-  --mode static \
-  --backup https://owner.github.io/repo/ \
-  --origin https://app.example.com \
-  --cors-url https://api.example.com/items \
-  --cors-method POST \
-  --cors-headers "content-type,authorization" \
-  --json
+Platform selection needs no secrets. Only CI or non-interactive Cloudflare operations need account variables:
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | No | — | CI or non-interactive deployment auth |
+| `CLOUDFLARE_ACCOUNT_ID` | No | — | Cloudflare Account ID |
+| `HTTPS_PROXY` / `NO_PROXY` | No | — | Proxy settings for the link probe |
+| `PAGES_WRANGLER_MAJOR_VERSION` | No | — | Evidence for enabling the Wrangler v4 file limit on Pages |
+| `NODE_EXTRA_CA_CERTS` | No | — | Tests only: trust the loopback TLS certificate |
+| `CHROME_PATH` / `EDGE_PATH` | No | — | Optional browser differential tests |
+
+Never write real tokens, passwords, or secret values into the repository, README, or migration plan. Migration plans record environment-variable key names only.
+
+## Project Structure
+
+```text
+deploy-advisor/
+├── SKILL.md          # agent workflow, routing, and safety gates
+├── scripts/          # 14 dependency-free Node ESM scripts
+├── references/       # platform matrix, migration, mainland access, domain, pricing, runtime
+├── templates/        # deployment / migration plan and report templates
+├── tests/            # 829 automated tests, structure check, loopback TLS fixture
+├── deployment-notes/ # real project deployment records
+└── facts.md          # README fact ledger
 ```
 
-## Tests
+To add a platform, edit `references/platform-matrix.json`, declare `selection_pools` and commercial use, and add tests. Filtering reads the matrix, so there is no second hardcoded platform list.
 
-```bash
-node tests/run-tests.mjs        # 829 checks with layer tags (core 385 / adversarial 276 / boundary 43 / combination 5 / unit 120): detection, platform matrix, Pages/Workers split, commercial use, fit assessment, cross-platform migration, plan/artifact limits, HTML tokenizer, real HTTP, CORS, redirects/SSRF, canonical, 3xx, CLI, JSON, link probe
-node tests/check-skill.mjs      # structure check, no external tooling
-node tests/browser-diff.mjs     # optional: real Chrome/Edge parser differential (Node 22+; exit 2 when skipped, 1 on mismatch)
+`render_support` only describes high-level platform capability, not framework, runtime, database, or dependency compatibility.
+
+## Development
+
+```sh
+node tests/run-tests.mjs     # 829/829 passing
+node tests/check-skill.mjs   # structure check
+node tests/browser-diff.mjs  # optional: real Chrome / Edge differential
 ```
 
-The runner creates thirty synthetic projects — Vite SPA, Vite+HashRouter, Vite+BrowserRouter, Jekyll, Vite+Supabase, Hono+D1, heavy Express, Next.js SSR, monorepo, multi-lockfile, dynamic Vite config, multiple HTML entries, Pages Functions, Prisma/Drizzle + Neon, wrangler.jsonc, plus comment-noise / public-only / Nuxt ssr:false / `node --inspect` config fixtures — asserts detector output, confidence levels, verification modes, and runtime-dependency hints; checks twelve artifact fixtures (fake refs, directory URLs, `%2F`, comma-in-srcset, cross-origin base, the 40-reference cap, case/symlink handling) plus the explicit `ssr` skip; and runs the verifier against sixteen local HTTP servers plus one local HTTPS server — covering HEAD 405 falling back to GET, static/SPA/SSR 404 semantics, transient-network retry separated from HTTP failures/timeouts, a separate CORS host, duplicate canonical tags, an SEO-decision warning, HTML context isolation (comments/RAWTEXT/RCDATA/template/attribute values/SVG/MathML/foreignObject), `<base href>` and post-redirect final URL, the final-200 content gate, 304 / uncommon-3xx classification, cross-origin assets never requested, a backup that 301s to the main site, and `--api` JSON structure / expected-value comparisons. The HTTPS server uses a self-signed loopback cert shipped in `tests/fixtures/loopback-tls.mjs`; the child trusts it via `NODE_EXTRA_CA_CERTS` (TLS verification stays on, no openssl or third-party package), so the canonical scheme matrix runs against a real `https://` site.
+Verify the platform counts:
 
-HTML5 state-machine regression additionally covers script data escaped/double-escaped/`<!-->` transitions, DOCTYPE public/system identifiers ending abruptly at `>`, the SVG/MathML namespace stack (nested SVG, foreignObject/desc/title, MathML text integration points, mglyph/malignmark, annotation-xml encoding branches, breakout tags, HTML-ancestor end tags, HTML child stacks, CDATA, template isolation), end-tag attribute quotes/EOF text, HTML non-void self-closing semantics, scope-boundary HTML-ancestor fallback, tree-builder-discarded table/structural tags, select insertion mode, visible-text integration points, the WHATWG srcset parser (URLs containing commas, data URIs, no-space separators, trailing commas, malformed/duplicate descriptors), element-aware resource attributes, and deterministic state combinations. `tests/fixtures/html5-oracle.json` records 115 HTML-namespace DOM facts from real Chrome 157 + Edge 157 (canonical/title/script/img/base); the default suite compares against it, and `node tests/browser-diff.mjs` re-runs a live Chromium differential when a browser is present (Node 22+; exits 2 and skips otherwise). This proves those boundaries match Chromium, not full HTML5 tree construction or real deployment.
+```sh
+node -e "const m=require('./references/platform-matrix.json'); console.log(m.platforms.length, m.platforms.filter(p=>p.core).length)"
+# 10 5
+```
 
-Regression groups cover: target-aware plan escalation with full version comparison (Pages complete / missing env var, Workers 4.34.0 / 4.33.0 / Free, unknown target, invalid versions, pure-function file-count boundaries without creating 20,000 real files), a CORS preflight matrix (allowed/denied Origin, missing method/header, bad credentials, 204 without ACAO, no inference for absent inputs, wildcard × credentials, Authorization non-wildcard, safelisted methods, method casing), a CORS simple-request credentials matrix (`ACAO=*` × ACAC present/absent × `--cors-credentials` declared or not), a root redirect matrix (same-origin 301→200 / 302→404, cross-host, 127.0.0.1, HTTP→HTTPS, loop, invalid Location, non-HTTP(S) scheme, backup redirecting to the main site), pure redirect-policy cases (including HTTPS→HTTP), asset redirect and aggregate consistency (direct 200, same-host 301, cross-host 302, loop, missing Location, protocol rejection, aligned `probed` / `warnings` / `redirects`), root/backup hop boundaries (5 redirects + final 200 / final 404 / 6th redirect overflow / cross-origin at the boundary / the original loop case, with server hit counts proving the final address really was requested), a canonical scheme matrix (HTTPS site × HTTPS self / HTTP canonical / other host / other path / multiple tags, all executing the verifier and asserting `sameProtocol` and status in its JSON), a canonical `href` form matrix (real HTTP site: missing href / empty string / single quote / double quote / unquoted / unparseable, asserting `hrefState` and the verdict in the verifier JSON), a canonical rel-recognition matrix (`data-rel` / `aria-rel` / `canonicalized` / commented / `<script>` string tags are not recognized; attribute order and multi-token `alternate canonical` are recognized), a 3xx classification matrix (root / assets / `/index.html` × 304 / 300 / 301 / 302 / 303 / 307 / 308, asserting `statusClass`, `httpStatus`, `redirectOutcome`, `redirect`, and the `redirects` aggregate; the existing redirect-loop, cross-origin, and hop-boundary cases keep passing), wrangler.jsonc JSON-key parsing and output-dir precedence, CLI validation (invalid `--api` / `--expect-404` / `--assets-limit` / `--timeout` / `--backup` → exit 2 and no partial JSON), homepage asset-reference SSRF protection (backslash-disguised cross-origin URLs are never requested; `javascript:` is not probed), `/index.html` cross-origin / non-HTTP(S) / other-path redirects not passing, `httpStatus` on `404` / `spa-fallback` / `api` checks, response-header checks (title / content-type / cache-control / security-headers), 304 / uncommon 3xx for backup and SPA fallback, check-build case-sensitive asset matching and `..` escapes, a project path containing spaces, check-skill BOM / block-scalar / fenced-code self-checks, HTML tokenizer unit/adversarial/fuzz cases (comments, bogus comments, CDATA, DOCTYPE, RAWTEXT/RCDATA/plaintext/template, `>` inside attribute values, incomplete tags, duplicate attributes, character references, `<base href>`, visible text); a canonical context-isolation matrix (comment / script / style / textarea / title / iframe / xmp / noembed / noframes / plaintext / template / attribute value / incomplete tag / real-plus-fake); metadata isolation (fake title/meta ignored); asset-reference rules and fake refs (src/srcset/poster/object data/link href; anchors, canonical and base excluded; `<base href>`; cross-origin never requested; `ignored` aggregate); config noise (Vite/Next/wrangler JSONC/TOML/YAML comments, `node --inspect`, `.env` export/lowercase keys, Nuxt ssr:false, public/index discovery); auth fail-closed (empty output / `loggedIn:false` / command failure distinguished); CORS preflight semantics (no inferred ACRM/ACRH, unasserted at most warn, 403 after explicit declaration fails, Authorization-vs-Range wildcard rules), CORS simple requests (500 error, 3xx redirect); the final-200 content gate; SPA fallback fail-closed and `/index.html` 5xx; truthful resource `finalUrl` / `redirectTarget` / `limitReached`; check-build case sensitivity, `..`, `%2F`, directory URLs, the 40-reference cap note, and the symlink main-module guard; CLI/mode matrix; and `--expect-json` structure cases (key order, missing fields, type mismatch, nested arrays, invalid JSON). A second local HTTP server records every request path it receives, proving the verifier never follows cross-origin targets; no real internal IP or cloud metadata endpoint is contacted. A local fake wrangler verifies the link probe does not misreport "not logged in" when `whoami --json` fails, and covers `--deploy` with no URL / failed cleanup / failed deploy; the deploy verdict logic is also unit-tested for URL parsing, HTTP verification, and cleanup warnings.
+There is no `package.json`, `npm install`, bundling, or lint step; the scripts run directly. Before committing, run `run-tests` and `check-skill`, and update both README files.
 
-These tests prove the scripts work. They do not prove account permissions, DNS, TLS, or platform behavior.
+## FAQ
 
-## Design rules
+**Q: Does it deploy to production automatically?**  
+A: No. It does not complete the final deployment, DNS, domain, plan, or database operations. Cloudflare previews can be deployed by command; production requires your confirmation.
 
-- Link first: never continue on `blocked`; feasibility is judged before touching project config, not discovered by building.
-- Progressive disclosure: `SKILL.md` has routing, workflow, and safety gates; details live in `references/`.
-- One topic per reference; no duplicated platform explanations.
-- Detection is layered: `confirmed` / `inferred` / `unknown`; the target is a candidate, not a verdict.
-- One `--mode` is threaded through build check and verification, so 404 verdicts cannot contradict each other.
-- Scripts are deterministic and print JSON; human summaries on demand.
-- One authority per rule: HTML in `scripts/html-scan.mjs`, config in `scripts/config-scan.mjs`, auth in `scripts/wrangler-auth.mjs`, 3xx classification in `scripts/redirect-policy.mjs`, resource attributes in `resourceReferences()`. Callers must not re-implement the same rule.
-- Fail closed: missing evidence is not a pass. Auth, SPA fallback, CORS preflight, and resource references are at most `warn` when unverifiable.
-- No empty directories or placeholder assets.
-- Every report distinguishes verified, failed, and unverified.
-- No runtime HTML-parser dependency (such as parse5): the skill is distributed as a copyable folder run by plain `node`, with no package.json / `npm install` step. `html-scan.mjs` is an explicit state machine covering comments, RAWTEXT/RCDATA/plaintext, template, attribute syntax, and character references; the cost is no full HTML5 tree construction.
+**Q: Does it support SSR / full-stack?**  
+A: It supports detection, selection, migration planning, and partial HTTP verification. `check-build.mjs` reports skip for SSR; runtime compatibility, login, databases, and third-party callbacks still need dedicated checks.
 
-## Limitations
+**Q: Pages or Workers?**  
+A: Static sites default to Pages; new SSR / full-stack / API projects prefer Workers; a healthy existing Pages deployment is kept, not forced to migrate. Pages Functions are not Workers.
 
-- Cannot create Cloudflare / Vercel / Netlify / Render / GitHub accounts or complete OAuth for the user.
-- Cannot connect Git integration / Workers Builds through the CLI; that is a dashboard/API step.
-- DNS, custom domains, production secrets, database migration, and deletions require explicit confirmation; the migration script only generates a plan and never executes them.
-- For SSR / full-stack, script coverage stops at the HTTP layer; `check-build.mjs` does not apply.
-- Vercel Hobby is personal non-commercial only; commercial projects must use Pro or another platform. Cloudflare Pages and Workers are separate products and must not be conflated in configuration, limits, or migration.
-- All automated tests run against local synthetic fixtures; no real Cloudflare deployment and no real Vercel / Netlify / Render / GitHub Pages migration was performed here. The real-project case study lives in `references/migration-guide.md` and is a different thing.
-- The HTML tokenizer is not a full HTML5 tree builder: implicit end tags, foster parenting, active formatting element reconstruction/adoption agency, and the full foreign-content tree construction are not modelled. SVG/MathML use an explicit namespace stack covering roots, HTML integration points, MathML text integration points, annotation-xml encoding branches, breakout tags and HTML-ancestor end tags; tree-builder-discarded table-internal/structural start tags, select insertion mode, and scope boundaries for HTML-ancestor fallback are approximated; the full annotation-xml/foreign-content tree rules and remaining legacy named entities are not implemented (only a common subset of semicolon-less legacy entities). DOCTYPE only guarantees token boundaries; force-quirks/compatMode is not exposed. Use a browser for DOM-level certainty. An independent one-off randomized browser differential (harness not committed) found no further state-machine bug; the only mismatch was the declared foster-parenting limitation, plus the documented entity-subset limitation.
+**Q: Can it guarantee stable access from mainland China?**  
+A: No. Default-domain behavior is a network observation or unverified, not an official platform guarantee. Stable mainland access needs an ICP filing plus a domestic cloud or CDN.
+
+**Q: Does it read or write secret values?**  
+A: No. It does not read, print, or write secret values. Migration plans record key names only; you configure the values in the platform environment variables.
+
+**Q: Why does `detect` return `unknown`?**  
+A: Check that you are in the project you want to deploy, not this skill directory. `detect` reads the framework and build config of the current directory; the skill itself is not a deployable project.
+
+**Q: Why is there no screenshot on the first screen?**  
+A: This is a CLI and documentation skill. The first screen uses Mermaid and a real terminal example. Real project screenshots live in `deployment-notes/` and do not prove every platform.
+
+## Known Limitations
+
+- No real Vercel, Netlify, Render, GitHub Pages deployment or migration was performed; automated tests use local fixtures and loopback HTTP servers.
+- No mainland-China measurements. Vercel, GitHub Pages, Netlify, and Cloudflare default-domain behavior is labelled as observation or unverified.
+- It does not buy domains, switch DNS, upgrade plans, or migrate databases.
+- SSR / full-stack script coverage stops at the HTTP layer; `render_support` is not a framework-compatibility guarantee.
+- The HTML tokenizer covers common boundaries but is not a full HTML5 tree builder; use a browser for DOM-level conclusions. See `tests/results.md`.
+- This repository has no `LICENSE` file; confirm licensing before use.
+
+## Contributing
+
+Issues and pull requests are welcome. Ask questions in [Issues](https://github.com/ChenChen913/deploy-advisor/issues). There is no separate `CONTRIBUTING.md` yet.
+
+Before submitting, run `node tests/run-tests.mjs` and `node tests/check-skill.mjs`, and keep commands, numbers, and limitations in sync across `facts.md`, `README.md`, and `README.en.md`.
+
+## License
+
+This repository does not include a `LICENSE` file. Confirm licensing with the author before use, copying, or redistribution. If an open-source license is added later, the `LICENSE` file at the repository root is authoritative.

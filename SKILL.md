@@ -1,5 +1,5 @@
 ---
-name: cloudflare-deploy
+name: deploy-advisor
 description: 把程序项目部署或迁移到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render 的多平台决策与执行技能，也覆盖 Java/Python/PHP/Ruby/.NET、容器或前后端混合项目的路线判断。当用户要求部署、托管、迁移、选择平台，判断项目适合哪个平台，比较 Cloudflare Pages / Workers 或 Vercel / Netlify / Render / GitHub Pages，检查部署后的页面/路由/静态资源/CORS/索引，或排查部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目，给出部署适配度评估与首选/备选/不推荐建议，并强制提示中国大陆访问风险；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
 agent_created: true
 ---

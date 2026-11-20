@@ -103,8 +103,8 @@ CI 里不要跑 `wrangler login`；它是交互式 OAuth，不适合无头环境
 
 | 系统 | 命令 |
 |---|---|
-| Windows | `New-Item -ItemType Junction -Path "$env:USERPROFILE\.workbuddy\skills\cloudflare-deploy" -Target "C:\path\to\cloudflare-deploy"` |
-| macOS / Linux | `ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy` |
+| Windows | `New-Item -ItemType Junction -Path "$env:USERPROFILE\.workbuddy\skills\deploy-advisor" -Target "C:\path\to\deploy-advisor"` |
+| macOS / Linux | `ln -s /path/to/deploy-advisor ~/.workbuddy/skills/deploy-advisor` |
 | 无权限 | 直接复制目录；修改后重新复制 |
 
 Windows 的 junction 不需要管理员权限；符号链接可能需要开发者模式。

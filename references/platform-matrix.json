@@ -273,7 +273,7 @@
       },
       "best_for": "Next.js / SSR 低摩擦、海外个人项目",
       "not_for": "商业用途（Hobby 仅个人非商业）、大陆稳定访问、需要长期运行服务",
-      "limits": "Hobby 仅个人非商业；默认域名大陆不可用；不适合长期运行服务",
+      "limits": "Hobby 仅个人非商业；默认域名大陆访问风险高（网络观测）；不适合长期运行服务",
       "sources": [
         "https://vercel.com/docs/limits"
       ],
@@ -415,7 +415,7 @@
       },
       "best_for": "需要 Deploy Previews、Forms / Functions、简单 Git 工作流的海外项目",
       "not_for": "大陆稳定访问、需要长期运行服务或数据库为主的项目",
-      "limits": "默认域名大陆常不可达；SSR 需 Functions / Edge",
+      "limits": "默认域名大陆访问风险高（网络观测）；SSR 需 Functions / Edge",
       "sources": [
         "https://docs.netlify.com/"
       ],

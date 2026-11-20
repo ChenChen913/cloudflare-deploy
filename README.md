@@ -1,243 +1,236 @@
-# cloudflare-deploy
+<h1 align="center">deploy-advisor</h1>
 
-**简体中文** | [English](README.en.md)
+<p align="center">
+  <b>简体中文</b> | <a href="./README.en.md">English</a>
+</p>
 
-一个可复用的 Agent Skill：评估并尽可能把程序项目（静态站、前端、全栈或后端）部署到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render；不适用时给出保留外部后端/容器的替代路线。流程是：**先验证链路与可行性** → 识别仓库 → 部署适配度评估 → 平台筛选 → 选型 → 网络与进阶引导 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 迁移检查（如适用）→ 写报告。
+先判断平台，再部署和验收。面向开发者和 AI Agent 的多平台部署选型、迁移与 HTTP 验收技能。
 
-> **能力边界**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容）。运行时兼容性、套餐与成本见 `references/runtime-compat.md`；Java/Python/PHP/Ruby/.NET 或前后端混合项目先看 `references/tech-stack-fit.md`，不要假设所有技术栈都能被脚本完整验收。
+```mermaid
+flowchart LR
+  A[probe 链路检查] --> B[识别仓库]
+  B --> C[四维适配度评估]
+  C --> D[平台矩阵筛选]
+  D --> E[首选 / 备选 / 不推荐]
+  E --> F[构建与预览]
+  F --> G[HTTP 验收]
+  G --> H[报告 / 迁移 / 回滚]
+```
 
-技能正文使用简体中文。文件名和代码标识符保持 ASCII，是为了跨系统与压缩包兼容；JSON 字段名保持英文，保证脚本可被机器读取。
+最短路径（在你要部署的项目目录运行，`SKILL_DIR` 指向本技能目录）：
 
-## 状态
-
-- 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：829/829 通过（`node tests/run-tests.mjs`）。
-- 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
-
-## 它能做什么
-
-**第 0 步是熔断，不是可选项**：`scripts/probe.mjs` 先验证账号、网络、权限，`blocked` 就硬停；再用 10 分钟判定技术可行性，不可行就把「换依赖 / 换方案 / 换平台」的代价摆出来。构建连续失败 2 次、或单次 15 分钟无进展也要止损。
-
-1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险信号；每个关键字段标注 `confirmed` / `inferred` / `unknown`。
-2. **适配度评估与选型**：按渲染模式、后端与数据库、用户地域、预算四维给出部署适配度；另外评估使用性质（个人非商业 / 商业 / 未知）和现有部署是否健康。候选由 `references/platform-matrix.json` 驱动，在多平台里给首选 / 备选 / 不推荐。静态站默认 Cloudflare Pages，新 SSR / 全栈优先 Cloudflare Workers，已有 Pages 健康时不强制迁移；商业项目不使用 Vercel Hobby。目标用户含中国大陆或未明确时，强制输出完整访问风险提示，并标注证据等级。
-3. **计划与迁移**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。迁移场景生成迁移前检查、双活五步、DNS 确认门、回滚和报告骨架，不执行 DNS / 部署 / 数据库操作。
-4. **构建检查**：部署前按站点模式、套餐和部署目标检查产物。默认 Free 20,000 文件；`--plan paid --target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，`--plan paid --target workers` 要 Wrangler >= 4.34.0，才按 100,000。目标未知、版本非法或证据不足一律退回 20,000 并给 `warn`；`ssr` 明确报告「不适用」。
-5. **部署**：Cloudflare Pages 和 Workers 分开部署，先到 `pages.dev` / `workers.dev` 或预览分支；其他平台按官方 Git 集成或 CLI 人工执行，不声称自动部署。
-6. **验收**：首页（只自动跟随同源重定向，最多 5 次并额外请求最终地址；跨源、协议变化、非 HTTP(S) 目标不请求，只记录并分类；3xx 里只有 301/302/303/307/308 是重定向，304 与其他 3xx 单独分类；只有最终 200 才做内容检查）、按模式判定的 404/回退、资源（HTML 由共享 tokenizer 解析，注释/script/style/textarea/template 内的伪标签不算；只取真实子资源属性，按 `<base href>` / 最终页面 URL 解析；304 不进入重定向链）、响应头、canonical/noindex（href 缺失 / 空值 / 无法解析分别判失败；只统计真正的 `<link rel=canonical>`）、CORS（预检只发送显式提供的方法/请求头，未提供的断言只进 `notChecked`；CORS URL 非 2xx/重定向不判通过）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容（RAWTEXT 不计入可见文本）、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
-7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
+```sh
+node "$SKILL_DIR/scripts/select-platform.mjs" --project . --audience mainland --budget free --usage personal_noncommercial --existing none --human
+```
 
 ## 目录
 
-```text
-cloudflare-deploy/
-├── SKILL.md                  # 主流程、路由、安全边界
-├── README.md                 # 中文版（本文件，默认展示）
-├── README.en.md              # 英文版
-├── UPGRADE-PLAN.md           # 多平台升级方案（迭代 1 已落地）
-├── references/
-│   ├── prerequisites.md      # 账号、Token、Account ID、Node、Wrangler、R2
-│   ├── console-paths.md      # 登录后的控制台路径
-│   ├── cross-platform.md     # Windows / macOS / Linux / WSL / 容器 / CI
-│   ├── platform-selection.md # Pages vs Workers、额度、价格
-│   ├── platform-matrix.json  # 平台能力矩阵数据源（5 核心 + 5 扩展/计划）
-│   ├── mainland-china-access.md # 中国大陆访问风险、默认域名、两条路线
-│   ├── cross-platform-migration.md # 多平台迁移手册、双活五步、安全门
-│   ├── custom-domain-guide.md # 域名购买、CNAME / A / nameserver
-│   ├── advanced-needs.md     # 付费额度、后端 / 数据库分层
-│   ├── runtime-compat.md     # 可行性判定、ORM × 运行时、成本、止损线
-│   ├── tech-stack-fit.md     # 非 JS/TS 后端、Containers、混合项目的选型与边界
-│   ├── deployment-workflows.md
-│   ├── pages-runtime.md      # 响应头、重定向、404/SPA、缓存、CORS
-│   ├── github-pages-backup.md
-│   ├── verification.md
-│   ├── troubleshooting.md
-│   ├── security.md
-│   ├── seo-indexing.md
-│   └── migration-guide.md    # 迁移阶段 + Jekyll 实战数据
-├── scripts/
-│   ├── probe.mjs             # 第 0 步：链路探针
-│   ├── deploy-verdict.mjs    # 探针 --deploy 的可测判定逻辑
-│   ├── redirect-policy.mjs  # 重定向同源判定（纯函数，主站与资源共用）
-│   ├── net-retry.mjs        # 瞬时网络错误分类（verify 重试用，纯函数）
-│   ├── html-scan.mjs         # 共享 HTML tokenizer（注释/RAWTEXT/RCDATA/template、字符引用）
-│   ├── config-scan.mjs       # 配置注释/JSONC/TOML 读取（detect-project 用）
-│   ├── wrangler-auth.mjs     # 登录态判定的唯一权威（check-env 与 probe 共用）
-│   ├── detect-project.mjs
-│   ├── platform-matrix.mjs   # 矩阵读取、校验、筛选与选型纯函数
-│   ├── select-platform.mjs   # 部署适配度评估与多平台初选
-│   ├── migration-plan.mjs    # 迁移前检查、双活五步、DNS 门、报告骨架
-│   ├── check-env.mjs
-│   ├── check-build.mjs
-│   └── verify-deployment.mjs
-├── templates/
-│   ├── deployment-plan.md
-│   ├── deployment-report.md
-│   ├── migration-plan.md
-│   ├── migration-report.md
-│   ├── wrangler.workers.jsonc
-│   └── wrangler.pages.toml
-├── deployment-notes/
-│   ├── hangla-2026-11-14.md  # 真实项目部署记录（Cloudflare Pages Direct Upload）
-│   └── assets/hangla-home.png # 部署后的实际页面截图
-└── tests/
-    ├── run-tests.mjs
-    ├── check-skill.mjs      # 结构自检：frontmatter、引用路径、绝对路径
-    ├── browser-diff.mjs     # 可选：真实 Chrome/Edge CDP 差分（Node 22+，不参与默认套件）
-    ├── fixtures/
-    │   ├── loopback-tls.mjs # 本地 HTTPS 验收测试用的自签回环证书（非真实凭据）
-    │   └── html5-oracle.json # Chrome/Edge 录制的 HTML5 解析 DOM facts（115 例）
-    ├── last-run.txt         # 最近一次测试输出（由测试自动生成）
-    └── results.md
-```
+- [为什么做这个项目](#为什么做这个项目)
+- [快速开始](#快速开始)
+- [用法](#用法)
+- [配置](#配置)
+- [项目结构](#项目结构)
+- [开发](#开发)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [如何贡献](#如何贡献)
+- [许可证](#许可证)
 
-## 真实部署记录
+## 为什么做这个项目
 
-`deployment-notes/` 只存放**真实项目部署记录**，与自动化测试记录、技能文档分开：
+选错平台的成本通常不在部署当天，而在上线后才发现访问不稳定、商业条款不适用，或者迁移时没有回滚路径。这个技能把顺序改过来：先判断项目适合哪个平台，再部署，最后用真实 HTTP 请求验收。
 
-- **真实部署记录**：[hangla 部署记录](deployment-notes/hangla-2026-11-14.md)（Cloudflare Pages Direct Upload；含实际 URL、验收结果、问题与后续完善）。
-- **自动化测试记录**：[tests/last-run.txt](tests/last-run.txt) 和 [tests/results.md](tests/results.md)（由本地测试生成/维护，不代表线上部署）。
-- **技能文档**：[SKILL.md](SKILL.md)、[references/](references/)（流程、模板和检查规则，部分规则引用 Cloudflare 官方文档，但本身不是部署验证）。
+它面向需要部署项目的开发者，也面向安装和使用 Agent Skill 的作者。和只给一个平台名称的做法不同，它会同时给出首选、备选和不推荐，并把 Pages / Workers、Hobby / Pro、商业用途和大陆访问风险分开判断。
 
-目前有两份真实 **Pages Direct Upload** 经验：hangla 记录和 `references/migration-guide.md` 的 Jekyll 项目；Git 集成、Workers、Containers、Java/Python 后端、其他套餐/项目类型尚未在本仓库记录中验证。不要把 Pages 经验当成对所有 Cloudflare 部署方式都已验证。
+它不承诺自动完成最终部署。DNS、自定义域名、生产密钥、套餐升级和数据库迁移都需要你确认。
 
-## 前提条件
+## 快速开始
 
-| 条件 | 用在哪 | 怎么查 |
-|---|---|---|
-| Cloudflare 账号 | 全部 | `dash.cloudflare.com` 注册，验证邮箱 |
-| Wrangler 登录 | 部署 | `npx wrangler whoami` |
-| Account ID | API Token / CI | Account Home → 搜索 “Copy account ID” |
-| Node.js | 脚本最低 18；部署建议 22+ | `node -v` |
-| Git | 仓库操作 | `git --version` |
-| 域名 / DNS | 只有绑自定义域名 | NS 在哪、CAA 记录 |
-| R2 订阅 | 只有用 R2 | Storage & databases → R2 开通 |
-| Docker | 只有用 Containers 且本地构建/推送镜像 | `docker info`（可用预构建镜像、CI 或 Workers Builds 构建，不强制本地 Docker；Containers 必须 Workers Paid） |
-| 账号套餐 / 订阅 | 用付费能力时 | Manage Account → Billing → Subscriptions |
-| GitHub CLI | 可选的仓库自动化 | `gh auth status` |
+前置要求：Node.js 18+（实际部署建议 22+）、Git；如果用 Agent 客户端，需要该客户端支持 Skill。
 
-Wrangler 官方支持 **Windows 11**、**macOS 13.5+**、**Linux glibc 2.35+**。远程 SSH、容器、Codespaces 用 `npx wrangler login --device`；CI 用 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`。详见 `references/prerequisites.md` 和 `references/cross-platform.md`。
-
-## 安装
-
-用户级技能目录：
+把本目录放到你的 Agent 技能目录。下面以 `~/.agents/skills` 为例，其他客户端按各自文档替换：
 
 ```powershell
 # Windows：目录联接，不需要管理员
 New-Item -ItemType Junction `
-  -Path "$env:USERPROFILE\.workbuddy\skills\cloudflare-deploy" `
-  -Target "C:\path\to\cloudflare-deploy"
+  -Path "$env:USERPROFILE\.agents\skills\deploy-advisor" `
+  -Target "C:\path\to\deploy-advisor"
 ```
 
 ```bash
 # macOS / Linux
-ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy
+ln -s /path/to/deploy-advisor ~/.agents/skills/deploy-advisor
 ```
 
-没有链接权限时直接复制目录；改完再复制一次。从 GitHub 下载的 zip 解压后目录可能带 `-main` 后缀；运行 `tests/check-skill.mjs` 前把目录改名为 `cloudflare-deploy`，否则会报 name 与目录名不一致。
+没有链接权限时直接复制目录。没有 `npm install`，也没有构建步骤。
 
-## 使用
+设置技能目录变量。下面的命令都在你要部署的项目目录里运行，不要在本技能目录里运行 `detect`：
 
-触发说法：
-
-- 帮我把这个 GitHub 项目部署到 Cloudflare
-- 这个项目适合 GitHub Pages / Cloudflare Pages / Vercel / Netlify / Render 哪个
-- 这个项目适合 Pages 还是 Workers
-- 帮我从 GitHub Pages 迁到 Cloudflare Pages
-- 目标用户含中国大陆，哪个平台访问更稳
-- 自定义域名怎么买、怎么绑
-- 检查当前部署有没有问题
-- 帮我保留 GitHub Pages 作为备用站
-- 检查部署后的页面、路由和静态资源
-- 帮我修复部署失败
-
-Agent 先运行 `scripts/probe.mjs --repo "$PWD"`（退出码表达链路结论，包含代码托管检查），链路通了再运行 `scripts/detect-project.mjs` 识别项目；用 `scripts/select-platform.mjs` 做适配度评估和平台初选；构建或部署前运行 `scripts/check-env.mjs`（同样用退出码表达结论）；迁移场景用 `scripts/migration-plan.mjs` 生成计划和报告骨架；部署到预览后运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md` 或 `templates/migration-report.md`。
-
-## 脚本
-
-零依赖的 Node 18+ ESM（部署本身仍建议 Node 22+）；默认只读，`probe.mjs --deploy` 例外（会真实创建并删除临时 Worker，需先征得同意）。`probe.mjs --timeout` 必须是 1..2147483647 的有限正整数（毫秒），空值、非数字、负数、0、小数、超范围值都会在发起任何网络探测前以退出码 2 报中文用法错误：
-
-```bash
-node scripts/probe.mjs --repo "$PWD"            # 第 0 步：0 ready / 1 limited / 2 blocked
-node scripts/detect-project.mjs . --human
-node scripts/select-platform.mjs --project . --audience mainland --budget free --human
-node scripts/migration-plan.mjs --source github-pages --target cloudflare-pages --project-type ssg --human
-node scripts/check-env.mjs                     # 0 可部署 / 1 不可部署 / 2 不可构建
-node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--target pages|workers] [--wrangler-version 4.34.0]   # 或 ssg / spa；ssr 报 skip
-node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json [--retries 1]
+```sh
+# macOS / Linux
+export SKILL_DIR=/path/to/deploy-advisor
 ```
 
-`select-platform.mjs` 是只读评估脚本：读取 `references/platform-matrix.json`，按渲染模式、后端、地域、预算、使用性质和现有部署输出候选平台和首选 / 备选 / 不推荐；目标用户含大陆或未明确时，输出完整大陆风险提示和证据说明。退出码 `0` 有结论、`1` 信息不足或矩阵不可用、`2` 用法错误；不访问网络、不写项目文件。矩阵校验、筛选和排序的纯函数在 `platform-matrix.mjs`，测试直接覆盖。商业项目必须传 `--usage commercial`；静态站默认 Pages，新 SSR / 全栈优先 Workers，已有 Pages 健康时不强制迁移。
-
-`migration-plan.mjs` 是只读迁移计划生成器：校验 `source` / `target` / `project_type`（含 Cloudflare Workers、Vercel Pro），输出迁移前检查、双活五步、DNS 确认门、回滚段和报告骨架。`--env-keys` 只接受键名，拒绝 `KEY=value`；`--human` 输出计划，`--report` 只输出报告骨架。它不执行 DNS、部署或数据库操作；目标平台不支持该渲染模式时返回 `blocked`。
-
-`--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。`detect-project` 会识别 HashRouter（建议 static + 404.html）与 BrowserRouter/history 路由（spa + 显式 fallback）；**没有任何路由证据时返回 `unknown`，要求人工确认，不默认推荐 spa**。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`）……，HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/重置可重试。detail 会区分网络失败和 HTTP 断言失败。
-
-`check-build.mjs` 默认按 Free **20,000** 文件检查。Paid **100,000** 的启用条件按部署目标分流：`--target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`（Pages 专属变量）；`--target workers` 要完整版本 **Wrangler >= 4.34.0**（官方 Workers Limits），不需要 Pages 变量。版本按点分数字比较（`4.9.0 < 4.34.0`），`4.x` 等非法版本视为未确认；不传 `--target`、证据不足都退回 20,000 并给 `warn`，结果里写明目标、生效上限与原因。
-
-CORS 预检只断言显式提供的 `--cors-method` / `--cors-headers` / `--cors-credentials`，其余写进 `notChecked`；按 Fetch 规范，`*` 只在无凭据请求里作通配，`GET/HEAD/POST` 是 CORS-safelisted method，`Authorization` 不被 `*` 覆盖，方法名大小写敏感。**`--cors-credentials` 是用户声明的预期请求模式**：脚本只发 GET / HEAD / OPTIONS，不会真的带浏览器 Cookie 或身份凭据；响应里出现 `Access-Control-Allow-Credentials: true` 也不会把无凭据请求变成带凭据请求。只有显式声明带凭据时，才要求 `ACAO` 精确匹配 Origin 且必须有 `ACAC: true`。
-
-主站与资源都只自动跟随**同源**（协议 + 主机 + 端口，见 `scripts/redirect-policy.mjs`）重定向，共用 `MAX_REDIRECTS=5` 的跳数语义：最多跟随 5 次重定向，并额外请求一次第 5 次重定向指向的最终地址；该地址仍返回 3xx（第 6 次重定向）就判「超出跳数 / 循环」，且不请求它的目标。跨源、协议变化（含 HTTP ↔ HTTPS）、非 HTTP(S) 协议、Location 缺失/含 userinfo/无法解析都不请求目标，只记录 Location / 状态码 / 重定向链，避免把验收请求带去 `127.0.0.1`、内网或云元数据地址。主站结果用 `redirectOutcome` 区分同源验证成功、跨源目标未验证、循环或超跳数、Location 无法解析、协议不受支持、`not-modified`（304）、`unexpected-3xx`，另有 `no-redirect` / `network-error` / `same-origin-final-failed`；超限时 `limitHop` 记录未跟随的那一跳。3xx 里只有 `301/302/303/307/308` 需要读取 Location；304 与其他 3xx 不进入重定向链、不判通过。主站链、资源探针和 `/index.html` 检查共用 `classifyStatus()`。只有最终 **200** 的首页才做内容检查（错误页的 title/canonical 不作为站点证据）；`/index.html` 5xx 判失败。
-
-HTML 由共享 tokenizer（`scripts/html-scan.mjs`，显式状态机、零依赖）解析：注释、RAWTEXT（script/style/xmp/iframe/noembed/noframes/noscript）、RCDATA（title/textarea）、template 惰性内容、属性值和畸形标签里的伪标签都不会被当成真实 HTML 元素。**HTML 命名空间里的非空元素即使写成 `<div/>`、`<span/>` 也不会关闭**（self-closing 只对 void 元素和 foreign 元素生效）；EOF 处未完成的开始标签按浏览器行为丢弃，不产生元素、也不并入可见文本（`<` / `</` 单独出现仍是文本，script/title 的 raw 文本保留）。**script data 按规范处理 escaped / double-escaped 状态**（`<!--<script></script>-->` 里的第一个 `</script>` 不关闭元素）；**DOCTYPE 的 public/system 标识符里的 `>` 按规范 abrupt 结束 DOCTYPE**（不假装引号能保护；残余文本继续按 HTML 解析）；**SVG/MathML 用显式命名空间栈**处理嵌套 svg、foreignObject/desc/title、MathML 文本集成点、`mglyph`、HTML breakout 标签、CDATA、template 隔离和退出后恢复，而不是用两个 depth 计数器。`verify-deployment` 与 `check-build` 共用同一套资源属性规则；**`srcset` 按 WHATWG 算法拆候选**（URL 里的逗号、data URI、逗号后无空格、尾随逗号、畸形 descriptor 都不会误拆/漏拆）。资源引用只取真实元素上的子资源属性（`src` / `srcset` / `poster` / `<object data>` / `<link href>`；`<a href>` 导航链接、canonical、`<base>` 不算资源），字符引用按 HTML 语义解码；相对地址按 `<base href>`，没有 base 时按文档 URL（与浏览器一致，不强行补尾斜杠）。根路径有同源重定向时，404/API/CORS/`/index.html`/资源/canonical 都基于最终页面 URL。`probed.finalUrl` 只表示最后真正请求过的地址，未跟随的目标在 `redirectTarget` / `limitReached`；跨源、畸形引用只记进 `ignored`，不请求。canonical 只统计真正的 HTML 命名空间 `<link rel="canonical">`（`rel` 按 HTML 空白分隔 token 精确匹配，`data-rel` / `aria-rel` / `canonicalized` 不算），href 缺失 / 空 / 无法解析分别判 `fail`，不会把空值解析成当前站点；协议、主机、规范化路径三者一致才算指向自身。CORS 预检只发送显式提供的 `--cors-method` / `--cors-headers`（没提供就不发 ACRM/ACRH，只断言 ACAO，最多 `warn`）；简单请求的 3xx/4xx/5xx 不判通过；`Allow-Headers: *` 不覆盖 Authorization（Range 可被通配）；`--backup` 与主站同源不构成独立入口。`check-env` 与 `probe` 共用登录判定：`whoami` 退出码 0 但输出没有邮箱 / Account ID / 明确登录文本时判 `unknown`，不允许 `canDeploy`/ready，避免 fail-open。参数写错（非法 `--api` / `--expect-404` / `--backup` / `--cors-url` / `--url`、非正 `--timeout`、非正整数 `--assets-limit`、非法 `--origin`、CORS 参数缺 `--origin`、非法 `--retries`）会以退出码 2 报用法错误。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`），HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/连接重置可重试。detail 区分网络失败与 HTTP 断言失败；canonical / meta robots / X-Robots-Tag 都缺失时额外给 `seo` warn（不改退出码）。Cloudflare Pages 缺少顶层 `404.html` 时按官方行为把未知路径回退到 `/`（官方未写状态码，实际通常 200），该回退对缺失静态资源也生效，所以资源检查不能只看状态码。`--expect-json` 按 JSON 子集比较，与字段顺序和空格无关。
-
-SSR / 全栈的 HTTP 基线：
-
-```bash
-node scripts/verify-deployment.mjs \
-  --url https://site.example.com --mode ssr \
-  --api /api/health --expect-json '{"ok":true}' --json
+```powershell
+# Windows PowerShell
+$SKILL_DIR = "C:\path\to\deploy-advisor"
 ```
 
-`--expect-json` 必须是一段合法 JSON，按**子集**与响应比较（字段顺序和空格无关，字段缺失 / 值不符 / 无效 JSON 都会给出原因）。这只能验证 HTTP 层；数据库写入、登录会话、第三方回调、冷启动仍需专项验证。
+第一次运行：
 
-检查备用站与独立 API 的 CORS：
-
-```bash
-node scripts/verify-deployment.mjs \
-  --url https://site.example.com \
-  --mode static \
-  --backup https://owner.github.io/repo/ \
-  --origin https://app.example.com \
-  --cors-url https://api.example.com/items \
-  --cors-method POST \
-  --cors-headers "content-type,authorization" \
-  --json
+```sh
+node "$SKILL_DIR/scripts/probe.mjs" --repo "$PWD"
+node "$SKILL_DIR/scripts/detect-project.mjs" . --human
+node "$SKILL_DIR/scripts/select-platform.mjs" --project . --audience mainland --budget free --usage personal_noncommercial --existing none --human
 ```
 
-## 测试
+`probe` 用退出码表达链路结论：`0` ready、`1` limited、`2` blocked。`detect` 输出框架、构建命令、输出目录、渲染模式和证据等级。`select` 输出候选、首选 / 备选 / 不推荐，以及大陆访问风险。
 
-```bash
-node tests/run-tests.mjs        # 829 项，分层覆盖（core 385 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、平台矩阵、Pages/Workers 分工、商业用途、适配度评估、跨平台迁移、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
-node tests/check-skill.mjs      # 结构自检，不依赖外部工具
-node tests/browser-diff.mjs     # 可选：用本机 Chrome/Edge 做真实解析器差分（Node 22+；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1）
+卸载：删除上面的 junction 或 symlink 即可，不要删除源目录。
+
+## 用法
+
+常见场景：
+
+| 场景 | 命令 |
+|---|---|
+| 纯静态 / SPA / SSG | `node "$SKILL_DIR/scripts/select-platform.mjs" --render static --audience overseas --budget free --usage personal_noncommercial --existing none --human` |
+| SSR / 全栈 / API | `node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --backend serverless --audience mainland --budget free --usage personal_noncommercial --existing none --human` |
+| 已有 Pages 且健康 | `node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --existing cloudflare-pages --existing-status healthy --audience overseas --budget free --usage personal_noncommercial --human` |
+| 生成迁移计划 | `node "$SKILL_DIR/scripts/migration-plan.mjs" --source github-pages --target cloudflare-pages --project-type ssg --human` |
+| 检查构建产物 | `node "$SKILL_DIR/scripts/check-build.mjs" --dir dist --mode static` |
+| 部署后 HTTP 验收 | `node "$SKILL_DIR/scripts/verify-deployment.mjs" --url https://example.com --mode static --json` |
+
+真实输出示例：
+
+```text
+$ node "$SKILL_DIR/scripts/select-platform.mjs" --render ssr --backend serverless --audience overseas --budget free --usage personal_noncommercial --existing none --human
+【项目部署适配度】
+- 渲染模式：SSR（confirmed）
+- 后端需求：Serverless / 轻后端（confirmed）
+- 目标用户：主要海外（confirmed）
+- 预算：免费优先（confirmed）
+- 使用性质：个人非商业（confirmed）
+- 现有部署：无（不适用）
+- 候选平台：Cloudflare Workers / Vercel Hobby / Render Free
+- 排除平台：GitHub Pages（只能托管静态文件，不能运行 SSR / 全栈服务端代码）；Netlify Free（纯静态托管不适用；如使用 Netlify Functions / Edge 承载 SSR，需另行评估，不作为默认候选）；Cloudflare Pages（新 SSR / API 项目优先 Cloudflare Workers；Pages Functions 仅在已有 Pages 或明确选择时保留）；等 6 个
+- 推荐首选：Vercel Hobby（个人非商业可用；Next.js / SSR 适配成熟）
+- 免费额度：100 GB 传输/月；200 个项目；6,000 构建分钟/月；100 部署/天；仅个人非商业
+- 主要限制：Hobby 仅个人非商业；默认域名大陆访问风险高（网络观测）；不适合长期运行服务
+- 备选：Cloudflare Workers（SSR 需适配器；免费请求额度足够时可用）；Render Free（可接受冷启动；大陆访问未实测）
+- 不推荐：GitHub Pages（只能托管静态文件，不能运行 SSR / 全栈服务端代码）；Netlify Free（纯静态托管不适用；如使用 Netlify Functions / Edge 承载 SSR，需另行评估，不作为默认候选）
+
+【下一步】
+- 先部署到预览地址，再用 verify-deployment.mjs 做 HTTP 验收；SSR / 数据库 / 登录 / 第三方回调仍需专项验证，没测就写“未验证”。
 ```
 
-测试会创建 30 个合成项目（Vite SPA、Vite+HashRouter、Vite+BrowserRouter、Jekyll、Vite+Supabase、Hono+D1、重依赖 Express、Next.js SSR、monorepo、多锁文件、动态 Vite 配置、多 HTML 入口、Pages Functions、Prisma/Drizzle + Neon、wrangler.jsonc、以及「注释噪声 / 只有 public/index.html / Nuxt ssr:false 与 generate / routeRules / node 启动参数」等配置识别夹具），断言识别结果、证据等级、验收模式与运行时依赖提示，检查 12 个构建产物夹具（含伪资源引用、目录式 URL、`%2F`、srcset 逗号、跨源 base、超 40 条引用、大小写/符号链接），并用 16 台本地 HTTP 服务器 + 1 台本地 HTTPS 服务器真实运行验收脚本——覆盖 HEAD 405 转 GET、SPA / 静态 / SSR 三种 404 判定、瞬时网络错误重试（与 HTTP 失败/超时区分）、独立 CORS 域、重复 canonical、SEO 决策提示、HTML 上下文隔离（注释/RAWTEXT/RCDATA/template/属性值/SVG/MathML/foreignObject）、`<base href>` 与重定向后的最终 URL、304 与少见 3xx、跨源资源引用不请求、500 错误页门控、301 假备用站、`--api` 的 JSON 结构与期望值比较。HTTPS 服务器用仓库自带的自签回环证书（`tests/fixtures/loopback-tls.mjs`，子进程经 `NODE_EXTRA_CA_CERTS` 信任，TLS 校验保持开启，不需要 openssl 或第三方包），让 canonical 协议矩阵能真的以 `https://` 站点执行。
+主要脚本和退出码：
 
-专项回归包括：HTML tokenizer 单元 / 对抗 / 随机组合（注释、bogus comment、CDATA、DOCTYPE、RAWTEXT/RCDATA/plaintext/template、属性值含 `>`、不完整标签、重复属性、字符引用、`<base href>`、可见文本）；**HTML5 状态机专项**：script data 的 escaped/double-escaped/`-->` 回 data/EOF、DOCTYPE 标识符里的 `>` 与 abrupt 结束、SVG/MathML 命名空间栈（嵌套 svg、foreignObject/desc/title、MathML 文本集成点、mglyph、breakout、CDATA、template 隔离、退出恢复、无状态泄漏）、`srcset` 的逗号/data URI/尾随逗号/畸形/重复 descriptor，以及四类问题的组合与 300 组确定性状态组合；**浏览器差分**：`tests/fixtures/html5-oracle.json` 记录 Chrome/Edge 真实 DOM facts 的 115 个用例（HTML 命名空间 canonical/title/script/img/base），默认套件直接对照，`browser-diff.mjs` 可在有浏览器时重新录制/校验；**CLI 与网络边界**：HashRouter/BrowserRouter 模式识别、`verify-deployment` 连接类瞬时错误重试（HTTP/超时不重试）、SEO canonical/meta 缺失 warn、Pages 缺 404 官方默认回退；canonical 上下文隔离矩阵（注释 / script / style / textarea / title / iframe / xmp / noembed / noframes / plaintext / template / 属性值 / 不完整标签 / 真实+伪标签组合）；元数据隔离（伪 title/meta 不算）；资源引用规则与伪引用（src/srcset/poster/object data/link href，导航链接与 canonical 排除，`<base href>`、跨源不请求、`ignored` 汇总）；套餐按目标分流与完整版本比较；CORS 预检矩阵；CORS 简单请求；主站重定向矩阵；资源重定向与汇总一致性；跳数边界；canonical 协议 / href 形态 / rel token 矩阵；`<base href>` 与重定向最终 URL 解析；3xx 状态分类矩阵；配置注释噪声；登录判定 fail-closed；SPA 回退 fail-closed 与 `/index.html` 5xx；check-build 大小写 / `..` / `%2F` / 目录式 URL / 40 条上限 / symlink 主模块守卫 / `<base>` 与 srcset；CLI 参数与模式矩阵；`--expect-json` 结构用例。跨源目标用另一台本地 HTTP 服务器记录收到的请求路径，用来证明脚本**没有跟随**，不访问真实内网地址或云厂商元数据地址。本地假 wrangler 覆盖登录态异常、`--deploy` 的无 URL / 清理失败 / 部署失败 / 跳转响应；部署判定的纯逻辑单独测 URL 解析、HTTP 通过与否和清理告警。
+| 脚本 | 作用 | 关键参数 | 退出码 |
+|---|---|---|---|
+| `probe.mjs` | 检查账号、网络、权限和代码托管链路 | `--repo` | 0 ready / 1 limited / 2 blocked |
+| `detect-project.mjs` | 识别框架、构建命令、输出目录和渲染模式 | 目录、`--human`、`--json` | 见 `--help` |
+| `select-platform.mjs` | 四维适配度评估和平台初选 | `--render`、`--backend`、`--audience`、`--budget`、`--usage`、`--existing`、`--human` | 0 有结论 / 1 信息不足 / 2 用法错误 |
+| `migration-plan.mjs` | 生成迁移前检查、双活步骤、DNS 门和回滚 | `--source`、`--target`、`--project-type`、`--human` | 0 已生成 / 1 blocked / 2 用法错误 |
+| `check-build.mjs` | 检查文件数、资源引用和构建产物 | `--dir`、`--mode`、`--plan`、`--target` | 0 无阻断 / 1 有阻断 |
+| `verify-deployment.mjs` | 用真实 HTTP 请求验收首页、路由、资源和 API | `--url`、`--mode`、`--api`、`--json` | 0 通过 / 1 有失败 / 2 用法错误 |
 
-这些测试证明脚本能工作，不证明账号权限、DNS、TLS 或平台行为；HTML5 oracle 用例只证明 tokenizer 在这些边界上与 Chromium 一致，不代表完整 HTML5 tree construction 或真实部署。
+Cloudflare 的最终部署不自动执行。确认 `probe`、`check-env`、`check-build` 和预览验收后，再运行：
 
-## 设计约束
+```sh
+npx wrangler pages deploy "<输出目录>" --project-name "<项目名>"
+npx wrangler deploy
+```
 
-- 链路优先：`blocked` 不往下走；可行性判定在改工程之前，构建不是发现前提问题的手段。
-- 渐进披露：`SKILL.md` 只放路由、流程、安全边界；细节按需读 `references/`。
-- 一个 reference 一个主题，不重复解释平台行为。
-- 识别结果分三层：`confirmed` / `inferred` / `unknown`；部署目标是候选，不是定论。
-- 同一个 `--mode` 贯穿构建检查和验收，避免 404 结论互相矛盾。
-- 脚本确定性执行并输出 JSON，人类摘要按需输出。
-- 解析/判定单一权威：HTML 走 `scripts/html-scan.mjs`，配置走 `scripts/config-scan.mjs`，登录态走 `scripts/wrangler-auth.mjs`，3xx 分类走 `scripts/redirect-policy.mjs`，资源属性规则由 `resourceReferences()` 统一。不在调用方重复实现同类规则。
-- 安全失败优先：缺证据不等于通过；登录态、SPA 回退、CORS 预检、资源引用在无法验证时最多 `warn`，不能判 `pass`。
-- 不建空目录、不放占位资源。
-- 报告必须区分 已验证 / 失败 / 未验证。
-- HTML 解析不引入 parse5 等运行期依赖：本技能以「复制目录 + 纯 `node` 运行」分发，没有 package.json / `npm install` 步骤；`html-scan.mjs` 用显式状态机覆盖注释、RAWTEXT/RCDATA/plaintext、template、属性语法与字符引用，代价是不做完整 HTML5 tree construction。
+Pages 和 Workers 是两个独立产品，不要共用同一套配置假设。其他平台按官方 Git 集成或 CLI 人工执行。
 
-## 限制
+## 配置
 
-- 不能替用户注册 Cloudflare / Vercel / Netlify / Render / GitHub 账号，或完成 OAuth。
-- CLI 不能代替控制台连接 Git 集成 / Workers Builds。
-- DNS、自定义域名、生产密钥、数据库迁移、删除操作必须用户确认；迁移脚本只生成计划，不执行这些操作。
-- SSR / 全栈的脚本能力只到 HTTP 层，`check-build.mjs` 对它不适用。
-- Vercel Hobby 仅个人非商业；商业项目必须使用 Pro 或其他平台。Cloudflare Pages 与 Workers 是独立产品，配置、限制和迁移方式不能混用。
-- 本仓库的自动化测试全部在本机跑合成夹具，没有执行真实 Cloudflare 部署，也没有执行真实的 Vercel / Netlify / Render / GitHub Pages 迁移；实战记录见 `references/migration-guide.md`，两者不是一回事。
-- HTML tokenizer 不是完整 HTML5 tree builder：不建模隐式闭合、foster parenting、活动格式化元素重建与完整的 foreign content 树构建；SVG/MathML 用显式命名空间栈覆盖根/集成点/MathML 文本集成点/annotation-xml encoding 分支/breakout，但不做其完整树构建；对浏览器会丢弃的 table-internal/structural 开始标签、select 插入模式、HTML 祖先回退的 scope 边界只做最小近似；script data 覆盖 escaped/double-escaped，但仍有历史解析怪癖未覆盖；命名实体只覆盖常用集合（legacy 无分号实体为常见子集）；DOCTYPE 只保证 token 边界，不暴露 force-quirks/compatMode。需要 DOM 级精确结论时人工用浏览器复核。
+平台选择本身不需要密钥。只有 CI 或非交互式 Cloudflare 操作才需要账号变量：
+
+| 变量 | 必填 | 默认值 | 说明 |
+|---|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | 否 | — | CI 或非交互式部署认证 |
+| `CLOUDFLARE_ACCOUNT_ID` | 否 | — | Cloudflare Account ID |
+| `HTTPS_PROXY` / `NO_PROXY` | 否 | — | 链路探针的代理设置 |
+| `PAGES_WRANGLER_MAJOR_VERSION` | 否 | — | Pages 项目启用 Wrangler v4 文件数上限的证据 |
+| `NODE_EXTRA_CA_CERTS` | 否 | — | 仅测试：信任回环 TLS 自签证书 |
+| `CHROME_PATH` / `EDGE_PATH` | 否 | — | 仅可选浏览器差分测试 |
+
+不要把真实 Token、密码或密钥值写进仓库、README 或迁移计划。迁移计划只记录环境变量键名。
+
+## 项目结构
+
+```text
+deploy-advisor/
+├── SKILL.md          # Agent 主流程、路由和安全边界
+├── scripts/          # 14 个零依赖 Node ESM 脚本
+├── references/       # 平台矩阵、迁移、大陆访问、域名、付费、运行时资料
+├── templates/        # 部署 / 迁移计划与报告模板
+├── tests/            # 829 项自动化测试、结构检查、回环 TLS 夹具
+├── deployment-notes/ # 真实项目部署记录
+└── facts.md          # README 事实台账
+```
+
+新增平台时，编辑 `references/platform-matrix.json`，声明 `selection_pools` 和商业用途，再补测试。筛选逻辑会读取矩阵，不需要在多处硬编码平台列表。
+
+`render_support` 只表示平台大类能力，不代表所有框架、运行时、数据库和依赖都兼容。
+
+## 开发
+
+```sh
+node tests/run-tests.mjs     # 829/829 通过
+node tests/check-skill.mjs   # 结构检查
+node tests/browser-diff.mjs  # 可选：真实 Chrome / Edge 差分
+```
+
+平台数量和核心平台数量可以复核：
+
+```sh
+node -e "const m=require('./references/platform-matrix.json'); console.log(m.platforms.length, m.platforms.filter(p=>p.core).length)"
+# 10 5
+```
+
+没有 `package.json`、`npm install`、打包或 lint 步骤；脚本直接运行。提交前至少跑 `run-tests` 和 `check-skill`，并同步修改两份 README。
+
+## 常见问题
+
+**Q：会自动部署到生产吗？**  
+A：不会自动完成最终部署、DNS、域名、套餐或数据库操作。Cloudflare 预览可以按命令执行，生产上线需要你确认。
+
+**Q：支持 SSR / 全栈吗？**  
+A：支持识别、选型、迁移计划和部分 HTTP 验收。`check-build.mjs` 对 SSR 报 skip；运行时兼容性、登录、数据库和第三方回调仍需专项验证。
+
+**Q：Pages 和 Workers 怎么选？**  
+A：静态站默认 Pages；新 SSR / 全栈 / API 优先 Workers；已有 Pages 健康时保留，不强制迁移。Pages Functions 不是 Workers。
+
+**Q：能保证中国大陆稳定访问吗？**  
+A：不能。默认域名表现是网络观测或待验证，不是平台官方承诺；稳定大陆访问需要 ICP 备案 + 国内云 / CDN。
+
+**Q：会读取或写入密钥值吗？**  
+A：不会读取、打印或写入密钥值。迁移计划只记录环境变量键名；认证值由你在平台环境变量里配置。
+
+**Q：为什么 `detect` 返回 `unknown`？**  
+A：先确认当前目录是你要部署的项目，而不是本技能目录。`detect` 读的是当前目录的框架和构建配置，技能目录本身不是待部署项目。
+
+**Q：为什么首屏没有截图？**  
+A：这是 CLI 和文档技能，首屏用 Mermaid 和真实终端输出。真实项目的页面截图在 `deployment-notes/`，不代表每个平台都已验证。
+
+## 已知限制
+
+- 没有执行真实的 Vercel、Netlify、Render、GitHub Pages 部署或迁移；自动化测试只跑本地夹具和 HTTP 回环。
+- 没有中国大陆实测数据；Vercel、GitHub Pages、Netlify、Cloudflare 的默认域名表现标注为网络观测或待验证。
+- 不自动购买域名、切换 DNS、升级套餐或迁移数据库。
+- SSR / 全栈的脚本能力只到 HTTP 层；`render_support` 不是框架兼容性保证。
+- HTML tokenizer 覆盖常用边界，但不是完整 HTML5 tree builder；DOM 级结论用浏览器复核。详见 `tests/results.md`。
+- 本仓库没有 `LICENSE` 文件，使用前需要确认许可。
+
+## 如何贡献
+
+欢迎提 Issue 和 PR。提问请到 [Issues](https://github.com/ChenChen913/deploy-advisor/issues)。仓库目前没有独立的 `CONTRIBUTING.md`。
+
+提交前请运行 `node tests/run-tests.mjs` 和 `node tests/check-skill.mjs`，并同步更新 `facts.md`、`README.md` 和 `README.en.md` 中的命令、数字和限制。
+
+## 许可证
+
+本仓库未包含 `LICENSE` 文件。使用、复制或分发前请先与作者确认许可；如果后续选择开源许可证，以仓库根目录的 `LICENSE` 文件为准。
