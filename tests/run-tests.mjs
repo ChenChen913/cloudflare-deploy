@@ -21,6 +21,8 @@ import { classifyRedirect } from "../scripts/redirect-policy.mjs";
 import { parseHtml, getAttribute, relTokens, effectiveBaseUrl, decodeCharacterReferences, resourceReferences, parseSrcset, scanScriptData } from "../scripts/html-scan.mjs";
 import { classifyWranglerWhoami, extractAccountId } from "../scripts/wrangler-auth.mjs";
 import { isTransientNetworkError, parseRetries, collectNetworkErrorCodes } from "../scripts/net-retry.mjs";
+import { loadMatrix, validateMatrix, filterCandidates, selectPlatforms, platformDetails, MATRIX_PATH } from "../scripts/platform-matrix.mjs";
+import { buildMigrationPlan, renderMigrationReport } from "../scripts/migration-plan.mjs";
 import { TLS_KEY, TLS_CERT } from "./fixtures/loopback-tls.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -438,6 +440,298 @@ assert("静态站：只有 public/index.html 也能识别", publicOnly.project.f
 assert("环境变量键名：支持 export 前缀与小写键",
   sb.runtime.envKeys.includes("VITE_EXPORTED_FLAG") && sb.runtime.envKeys.includes("lower_case_key"),
   sb.runtime.envKeys.join(","), "boundary");
+
+// ---------------------------------------------------------------- 平台能力矩阵
+const matrix = loadMatrix();
+const matrixVerdict = validateMatrix(matrix);
+assert("矩阵：加载通过、schema 版本正确", matrix.schema_version === 1 && matrixVerdict.ok, JSON.stringify(matrixVerdict.errors));
+assert("矩阵：五个核心平台 + 三个扩展平台",
+  matrix.platforms.length === 8 && matrix.platforms.filter((p) => p.core).length === 5,
+  `${matrix.platforms.length} / core=${matrix.platforms.filter((p) => p.core).length}`);
+assert("矩阵：必填字段齐全",
+  matrix.platforms.every((p) => p.type && Array.isArray(p.render_support) && p.free_tier_key_points.length
+    && p.custom_domain && p.migration_notes && p.best_for && p.not_for),
+  matrix.platforms.map((p) => p.id).join(","));
+assert("矩阵：ID 唯一且 render_support 取值合法",
+  new Set(matrix.platforms.map((p) => p.id)).size === matrix.platforms.length
+    && matrix.platforms.every((p) => p.render_support.every((m) => ["static", "ssg", "spa", "ssr", "api"].includes(m))),
+  matrix.platforms.map((p) => `${p.id}:${p.render_support.join("/")}`).join(" | "));
+assert("矩阵：checked_at 和 sources 可追溯",
+  /^\d{4}-\d{2}-\d{2}$/.test(matrix.checked_at) && fs.existsSync(MATRIX_PATH)
+    && matrix.platforms.some((p) => Array.isArray(p.sources) && p.sources.length > 0),
+  `${matrix.checked_at} ${MATRIX_PATH}`);
+
+const badType = JSON.parse(JSON.stringify(matrix));
+badType.platforms[0].type = "nope";
+assert("矩阵：非法 type 被拒绝", !validateMatrix(badType).ok, JSON.stringify(validateMatrix(badType).errors));
+const badDup = JSON.parse(JSON.stringify(matrix));
+badDup.platforms[1].id = badDup.platforms[0].id;
+assert("矩阵：重复平台 ID 被拒绝", !validateMatrix(badDup).ok, JSON.stringify(validateMatrix(badDup).errors));
+const badMissing = JSON.parse(JSON.stringify(matrix));
+delete badMissing.platforms[0].best_for;
+assert("矩阵：缺必填字段被拒绝", !validateMatrix(badMissing).ok, JSON.stringify(validateMatrix(badMissing).errors));
+
+const filterStatic = filterCandidates({ matrix, render: "static", backend: "none", budget: "free" });
+assert("矩阵筛选：静态+免费 → 五个核心平台，Cloudflare Pages 排前",
+  filterStatic.candidates.length === 5 && filterStatic.candidates[0] === "cloudflare-pages"
+    && ["github-pages", "vercel-hobby", "netlify-free", "render-free"].every((id) => filterStatic.candidates.includes(id)),
+  filterStatic.candidates.join(","));
+const filterSsr = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "free" });
+assert("矩阵筛选：SSR → 排除 GitHub Pages / Netlify 静态托管",
+  !filterSsr.candidates.includes("github-pages") && !filterSsr.candidates.includes("netlify-free")
+    && ["vercel-hobby", "cloudflare-pages", "render-free"].every((id) => filterSsr.candidates.includes(id))
+    && filterSsr.excluded.some((e) => e.id === "github-pages")
+    && filterSsr.excluded.some((e) => e.id === "netlify-free"),
+  JSON.stringify({ candidates: filterSsr.candidates, excluded: filterSsr.excluded.map((e) => e.id) }));
+const filterFullstack = filterCandidates({ matrix, render: "fullstack", backend: "serverless", budget: "free" });
+assert("矩阵筛选：fullstack 按 SSR 能力匹配", filterFullstack.candidates.join(",") === filterSsr.candidates.join(","), filterFullstack.candidates.join(","));
+const filterLongFree = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "free" });
+assert("矩阵筛选：长期运行+免费 → 只留 Render，Railway/Fly 标注不承诺免费",
+  filterLongFree.candidates.join(",") === "render-free"
+    && filterLongFree.excluded.some((e) => e.id === "railway")
+    && filterLongFree.excluded.some((e) => e.id === "fly-io"),
+  JSON.stringify({ candidates: filterLongFree.candidates, excluded: filterLongFree.excluded.map((e) => e.id) }));
+const filterLongPaid = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "paid" });
+assert("矩阵筛选：长期运行+付费 → Railway / Fly / Render",
+  filterLongPaid.candidates.join(",") === "railway,fly-io,render-free",
+  filterLongPaid.candidates.join(","));
+
+const selectStaticMainland = selectPlatforms({ matrix, ...filterStatic, render: "static", backend: "none", audience: "mainland", budget: "free" });
+assert("矩阵选型：静态+大陆 → Cloudflare 首选 / GitHub Pages 备选 / Vercel 不推荐",
+  selectStaticMainland.primary?.id === "cloudflare-pages"
+    && selectStaticMainland.backup.some((b) => b.id === "github-pages")
+    && selectStaticMainland.not_recommended.some((n) => n.id === "vercel-hobby"),
+  JSON.stringify({ primary: selectStaticMainland.primary?.id, backup: selectStaticMainland.backup.map((b) => b.id), notRec: selectStaticMainland.not_recommended.map((n) => n.id) }));
+const selectSsrMainland = selectPlatforms({ matrix, ...filterSsr, render: "ssr", backend: "serverless", audience: "mainland", budget: "free" });
+assert("矩阵选型：SSR+大陆 → Cloudflare 首选 / Vercel 备选",
+  selectSsrMainland.primary?.id === "cloudflare-pages"
+    && selectSsrMainland.backup.some((b) => b.id === "vercel-hobby"),
+  JSON.stringify({ primary: selectSsrMainland.primary?.id, backup: selectSsrMainland.backup.map((b) => b.id) }));
+const selectLongFree = selectPlatforms({ matrix, ...filterLongFree, render: "fullstack", backend: "long-running", audience: "overseas", budget: "free" });
+assert("矩阵选型：长期运行免费 → Render 首选",
+  selectLongFree.primary?.id === "render-free" && selectLongFree.not_recommended.some((n) => n.id === "railway"),
+  JSON.stringify({ primary: selectLongFree.primary?.id, notRec: selectLongFree.not_recommended.map((n) => n.id) }));
+const cfDetails = platformDetails(matrix, "cloudflare-pages");
+assert("矩阵：平台详情映射免费额度、限制和大陆风险",
+  cfDetails.free_tier_key_points.includes("无限静态带宽") && /pages\.dev/.test(cfDetails.mainland_china_risk) && cfDetails.limits,
+  JSON.stringify(cfDetails));
+
+// ---------------------------------------------------------------- 适配度评分
+function select(args) {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/select-platform.mjs"), ...args], { encoding: "utf8", timeout: 30000 });
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch { /* --human 或错误输出 */ }
+  return { code: r.status, json: parsed, out: r.stdout, err: r.stderr };
+}
+
+json("fit/project-ssg.json", {
+  project: { name: "fit-ssg", framework: "jekyll", kind: "static", suggestedMode: "ssg", workspaces: [] },
+  evidence: { kind: { value: "static", confidence: "inferred", source: "fixture" } },
+  cloudflare: { functionsDir: false, workerJs: false },
+});
+json("fit/project-unknown.json", {
+  project: { name: "fit-unknown", framework: "vite", kind: "spa", suggestedMode: "unknown", workspaces: [] },
+  evidence: { kind: { value: "spa", confidence: "inferred", source: "fixture" } },
+  cloudflare: { functionsDir: false, workerJs: false },
+});
+w("fit/bad.json", "{ not json");
+
+const fitPath = path.join(work, "fit/project-ssg.json");
+const fitMainland = select(["--project", fitPath, "--audience", "mainland", "--budget", "free"]);
+assert("适配度：SSG+大陆+免费 → Cloudflare Pages 首选",
+  fitMainland.code === 0 && fitMainland.json?.selection?.primary?.id === "cloudflare-pages",
+  JSON.stringify({ code: fitMainland.code, primary: fitMainland.json?.selection?.primary?.id, err: fitMainland.err }));
+const fitCoreIds = ["cloudflare-pages", "github-pages", "vercel-hobby", "netlify-free", "render-free"];
+assert("适配度：SSG 候选包含五个核心平台",
+  fitCoreIds.every((id) => (fitMainland.json?.candidates || []).includes(id)),
+  (fitMainland.json?.candidates || []).join(","));
+assert("适配度：大陆风险 5 条 + 两条路线",
+  fitMainland.json?.risk?.mainland_china === true && fitMainland.json.risk.notice.length === 5
+    && /DNS 污染/.test(fitMainland.json.risk.notice[0]) && fitMainland.json.risk.routes.length === 2,
+  JSON.stringify(fitMainland.json?.risk));
+assert("适配度：大陆默认域名风险 → Vercel / Netlify 不推荐",
+  fitMainland.json?.selection?.not_recommended?.some((p) => p.id === "vercel-hobby")
+    && fitMainland.json.selection.not_recommended.some((p) => p.id === "netlify-free"),
+  JSON.stringify(fitMainland.json?.selection?.not_recommended?.map((p) => p.id)));
+
+const fitOverseas = select(["--project", fitPath, "--audience", "overseas", "--budget", "free"]);
+assert("适配度：只面向海外 → 不输出大陆风险",
+  fitOverseas.code === 0 && fitOverseas.json?.risk?.mainland_china === false && fitOverseas.json.risk.notice.length === 0,
+  JSON.stringify(fitOverseas.json?.risk));
+
+const fitDefaultAudience = select(["--project", fitPath, "--budget", "free"]);
+assert("适配度：地域未说明 → 按含大陆处理",
+  fitDefaultAudience.code === 0 && fitDefaultAudience.json?.risk?.level === "unknown"
+    && fitDefaultAudience.json.risk.notice.length === 5,
+  JSON.stringify(fitDefaultAudience.json?.risk));
+
+const fitSsr = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free"]);
+assert("适配度：SSR 海外 → Vercel 首选，排除 GitHub Pages / Netlify 静态托管",
+  fitSsr.code === 0 && fitSsr.json?.selection?.primary?.id === "vercel-hobby"
+    && !(fitSsr.json?.candidates || []).includes("github-pages")
+    && !(fitSsr.json?.candidates || []).includes("netlify-free")
+    && (fitSsr.json?.excluded || []).some((e) => e.id === "github-pages")
+    && (fitSsr.json?.excluded || []).some((e) => e.id === "netlify-free"),
+  JSON.stringify({ primary: fitSsr.json?.selection?.primary?.id, candidates: fitSsr.json?.candidates, excluded: fitSsr.json?.excluded?.map((e) => e.id) }));
+
+const fitSsrMainland = select(["--render", "ssr", "--backend", "serverless", "--audience", "mainland", "--budget", "free"]);
+assert("适配度：SSR 含大陆 → Cloudflare 首选，Vercel 备选并带条件",
+  fitSsrMainland.code === 0 && fitSsrMainland.json?.selection?.primary?.id === "cloudflare-pages"
+    && (fitSsrMainland.json?.selection?.backup || []).some((b) => b.id === "vercel-hobby" && /自定义域名/.test(b.condition)),
+  JSON.stringify({ primary: fitSsrMainland.json?.selection?.primary?.id, backup: fitSsrMainland.json?.selection?.backup?.map((b) => [b.id, b.condition]) }));
+
+const fitLongFree = select(["--render", "fullstack", "--backend", "long-running", "--audience", "overseas", "--budget", "free"]);
+assert("适配度：长期运行+免费 → Render 首选，Railway/Fly 不承诺免费",
+  fitLongFree.code === 0 && fitLongFree.json?.selection?.primary?.id === "render-free"
+    && fitLongFree.json?.candidates?.length === 1 && fitLongFree.json.candidates[0] === "render-free"
+    && (fitLongFree.json?.selection?.not_recommended || []).some((p) => p.id === "railway"),
+  JSON.stringify({ primary: fitLongFree.json?.selection?.primary?.id, candidates: fitLongFree.json?.candidates, notRec: fitLongFree.json?.selection?.not_recommended?.map((p) => p.id) }));
+
+const fitLongPaid = select(["--render", "fullstack", "--backend", "long-running", "--audience", "overseas", "--budget", "paid"]);
+assert("适配度：长期运行+付费 → Railway 首选，Fly/Render 备选",
+  fitLongPaid.code === 0 && fitLongPaid.json?.selection?.primary?.id === "railway"
+    && (fitLongPaid.json?.selection?.backup || []).some((b) => b.id === "fly-io")
+    && (fitLongPaid.json?.selection?.backup || []).some((b) => b.id === "render-free"),
+  JSON.stringify({ primary: fitLongPaid.json?.selection?.primary?.id, backup: fitLongPaid.json?.selection?.backup?.map((b) => b.id) }));
+
+const fitSupabase = select(["--render", "static", "--backend", "postgres-auth-storage", "--audience", "overseas", "--budget", "free"]);
+assert("适配度：PostgreSQL/Auth/Storage → Supabase 后端候选，前端仍静态",
+  fitSupabase.code === 0 && fitSupabase.json?.selection?.primary?.id === "cloudflare-pages"
+    && fitSupabase.json?.selection?.backend?.id === "supabase",
+  JSON.stringify({ primary: fitSupabase.json?.selection?.primary?.id, backend: fitSupabase.json?.selection?.backend?.id }));
+
+const fitSupabaseDetected = select(["--project", path.join(work, "supabase"), "--render", "static", "--audience", "overseas", "--budget", "free"]);
+assert("适配度：识别到 Supabase 环境变量键名 → 后端候选 Supabase",
+  fitSupabaseDetected.code === 0 && fitSupabaseDetected.json?.fit?.backend?.value === "postgres-auth-storage"
+    && fitSupabaseDetected.json?.selection?.backend?.id === "supabase"
+    && (fitSupabaseDetected.json?.warnings || []).some((w) => /环境变量键名/.test(w)),
+  JSON.stringify({ backend: fitSupabaseDetected.json?.fit?.backend, selected: fitSupabaseDetected.json?.selection?.backend?.id, warnings: fitSupabaseDetected.json?.warnings }));
+
+const fitUnknown = select(["--project", path.join(work, "fit/project-unknown.json"), "--audience", "overseas", "--budget", "free"]);
+assert("适配度：渲染模式 unknown → 退出码 1，暂不选型",
+  fitUnknown.code === 1 && fitUnknown.json?.selection === null
+    && (fitUnknown.json?.questions || []).some((q) => /纯静态/.test(q)) && fitUnknown.json?.degraded === true,
+  JSON.stringify({ code: fitUnknown.code, selection: fitUnknown.json?.selection, questions: fitUnknown.json?.questions }));
+
+const fitHuman = select(["--project", fitPath, "--audience", "mainland", "--budget", "free", "--human"]);
+assert("适配度：--human 输出评分和大陆风险",
+  fitHuman.code === 0 && /【项目部署适配度】/.test(fitHuman.out) && /【中国大陆访问风险】/.test(fitHuman.out),
+  fitHuman.out.split("\n")[0]);
+
+const fitBad = select(["--render", "nope"]);
+assert("适配度：非法 --render → 退出码 2 + 用法错误", fitBad.code === 2 && /用法错误/.test(fitBad.err), fitBad.err.trim());
+const fitBadJson = select(["--project", path.join(work, "fit/bad.json")]);
+assert("适配度：非法 JSON → 退出码 2", fitBadJson.code === 2 && /用法错误/.test(fitBadJson.err), fitBadJson.err.trim());
+
+const fitDir = select(["--project", path.join(work, "jekyll"), "--audience", "overseas", "--budget", "free"]);
+assert("适配度：--project 支持目录并复用识别结果",
+  fitDir.code === 0 && fitDir.json?.fit?.render_mode?.value === "ssg" && fitDir.json.source === "detect-project",
+  JSON.stringify({ code: fitDir.code, render: fitDir.json?.fit?.render_mode, source: fitDir.json?.source }));
+
+// ---------------------------------------------------------------- 跨平台迁移
+function migration(args) {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts/migration-plan.mjs"), ...args], { encoding: "utf8", timeout: 30000 });
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch { /* --human / --report 或错误输出 */ }
+  return { code: r.status, json: parsed, out: r.stdout, err: r.stderr };
+}
+
+const migGhCf = buildMigrationPlan({
+  matrix,
+  source: "github-pages",
+  target: "cloudflare-pages",
+  projectType: "ssg",
+  buildCommand: "bundle exec jekyll build",
+  outputDir: "_site",
+  envKeys: ["SITE_URL", "ANALYTICS_ID"],
+  domain: "example.com",
+  dnsProvider: "cloudflare",
+  retainDays: 7,
+});
+assert("迁移：GitHub Pages → Cloudflare Pages 生成完整计划",
+  migGhCf.status === "needs_input" && migGhCf.precheck.length >= 6
+    && migGhCf.dual_live.length === 5 && migGhCf.dns.requires_confirmation === true
+    && migGhCf.rollback.retain_source_days === 7,
+  JSON.stringify({ status: migGhCf.status, precheck: migGhCf.precheck.length, steps: migGhCf.dual_live.length }));
+assert("迁移：环境变量只记录键名，不记录值",
+  migGhCf.precheck.some((p) => p.id === "env" && p.detail.includes("SITE_URL") && p.detail.includes("ANALYTICS_ID") && p.detail.includes("不读取")),
+  migGhCf.precheck.find((p) => p.id === "env")?.detail);
+assert("迁移：GitHub Pages → Cloudflare Pages 提示控制台导入",
+  migGhCf.platform_tips.some((tip) => /Workers & Pages/.test(tip) && /Pages/.test(tip)),
+  migGhCf.platform_tips.join(" | "));
+
+const migrationPaths = [
+  ["github-pages", "cloudflare-pages"],
+  ["cloudflare-pages", "github-pages"],
+  ["github-pages", "vercel"],
+  ["vercel", "github-pages"],
+  ["cloudflare-pages", "vercel"],
+  ["vercel", "cloudflare-pages"],
+];
+const migrationPlans = migrationPaths.map(([source, target]) => buildMigrationPlan({ matrix, source, target, projectType: "ssg" }));
+assert("迁移：六条高频路径都生成计划",
+  migrationPlans.every((plan) => plan.status !== "blocked" && plan.dual_live.length === 5 && plan.precheck.length >= 6),
+  migrationPlans.map((p) => `${p.source.id}->${p.target.id}:${p.status}`).join(" | "));
+assert("迁移：GitHub Pages → Vercel 提示 base path / vercel.json",
+  migrationPlans[2].platform_tips.some((tip) => /base path/.test(tip) && /vercel\.json/.test(tip)),
+  migrationPlans[2].platform_tips.join(" | "));
+assert("迁移：迁出 Vercel 提示自动 promote 风险",
+  migrationPlans[3].platform_tips.some((tip) => /promote/.test(tip)),
+  migrationPlans[3].platform_tips.join(" | "));
+assert("迁移：Cloudflare Pages → Vercel 提示 vercel.json",
+  migrationPlans[4].platform_tips.some((tip) => /vercel\.json/.test(tip)),
+  migrationPlans[4].platform_tips.join(" | "));
+
+const migBlocked = buildMigrationPlan({ matrix, source: "vercel", target: "github-pages", projectType: "ssr" });
+assert("迁移：SSR → GitHub Pages 判 blocked",
+  migBlocked.status === "blocked" && migBlocked.warnings.some((w) => /未声明支持/.test(w))
+    && migBlocked.precheck.some((p) => p.id === "target_support" && p.status === "blocked"),
+  JSON.stringify({ status: migBlocked.status, warnings: migBlocked.warnings }));
+
+const migNetlifyRender = buildMigrationPlan({ matrix, source: "netlify", target: "render", projectType: "fullstack" });
+assert("迁移：Netlify → Render 提示源配置和 Render 休眠",
+  migNetlifyRender.precheck.find((p) => p.id === "redirects")?.detail.includes("netlify.toml")
+    && migNetlifyRender.platform_tips.some((tip) => /休眠/.test(tip)),
+  JSON.stringify({ redirects: migNetlifyRender.precheck.find((p) => p.id === "redirects")?.detail, tips: migNetlifyRender.platform_tips }));
+assert("迁移：全栈标记数据库检查",
+  migNetlifyRender.precheck.some((p) => p.id === "database" && p.status === "pending"),
+  JSON.stringify(migNetlifyRender.precheck.find((p) => p.id === "database")));
+
+const migUnknown = buildMigrationPlan({ matrix, source: "custom-host", target: "cloudflare-pages", projectType: "static" });
+assert("迁移：未知源平台生成通用清单和警告",
+  migUnknown.source.known === false && migUnknown.degraded === true
+    && migUnknown.warnings.some((w) => /未纳入矩阵/.test(w)) && migUnknown.dual_live.length === 5
+    && migUnknown.status !== "blocked",
+  JSON.stringify({ known: migUnknown.source.known, status: migUnknown.status, warnings: migUnknown.warnings }));
+
+const migRetain = buildMigrationPlan({ matrix, source: "github-pages", target: "cloudflare-pages", projectType: "static", retainDays: 3 });
+assert("迁移：回滚保留期少于 7 天被调整",
+  migRetain.rollback.retain_source_days === 7 && migRetain.warnings.some((w) => /至少 7 天/.test(w)),
+  JSON.stringify({ retain: migRetain.rollback.retain_source_days, warnings: migRetain.warnings }));
+
+const migNoMatrix = buildMigrationPlan({ matrix: null, source: "github-pages", target: "cloudflare-pages", projectType: "static" });
+assert("迁移：矩阵缺失生成通用计划并降级",
+  migNoMatrix.degraded === true && migNoMatrix.warnings.some((w) => /矩阵不可用/.test(w))
+    && migNoMatrix.dual_live.length === 5,
+  JSON.stringify({ degraded: migNoMatrix.degraded, warnings: migNoMatrix.warnings }));
+
+const migReport = renderMigrationReport(migGhCf);
+assert("迁移：报告骨架包含检查、DNS、回滚、观察期",
+  /迁移前检查/.test(migReport) && /DNS 变更记录/.test(migReport) && /回滚路径/.test(migReport) && /建议观察期/.test(migReport),
+  migReport.split("\n").slice(0, 3).join(" / "));
+
+const migHuman = migration(["--source", "github-pages", "--target", "cloudflare-pages", "--project-type", "ssg", "--human"]);
+assert("迁移：--human 输出计划和报告骨架",
+  migHuman.code === 0 && /# 迁移计划/.test(migHuman.out) && /## 报告骨架/.test(migHuman.out),
+  migHuman.out.split("\n")[0]);
+const migReportOnly = migration(["--source", "github-pages", "--target", "cloudflare-pages", "--project-type", "ssg", "--report"]);
+assert("迁移：--report 只输出报告骨架",
+  migReportOnly.code === 0 && /^# 迁移报告/.test(migReportOnly.out.trim()) && !/^# 迁移计划/m.test(migReportOnly.out.trim()),
+  migReportOnly.out.split("\n")[0]);
+const migSame = migration(["--source", "github-pages", "--target", "github-pages", "--project-type", "ssg"]);
+assert("迁移：同平台拒绝", migSame.code === 2 && /用法错误/.test(migSame.err), migSame.err.trim());
+const migEnvLeak = migration(["--source", "github-pages", "--target", "cloudflare-pages", "--project-type", "ssg", "--env-keys", "API_KEY=secret"]);
+assert("迁移：拒绝键值形式的环境变量", migEnvLeak.code === 2 && /只接受环境变量键名/.test(migEnvLeak.err), migEnvLeak.err.trim());
 
 // ---------------------------------------------------------------- 产物检查
 const art = path.join(work, "artifact");
@@ -3299,12 +3593,23 @@ const fixtureCaseCount = (() => {
 // 自动化维护 tests/last-run.txt：报告不再依赖人工复制终端输出，也不会出现
 // 「文档说这是最近一次结果、文件却停留在旧版本」的漂移。
 // 头部带 run-tests.mjs / oracle fixture 的 hash 与用例数，便于判断 last-run 是否过期。
+// 细节里的本机绝对路径替换成 <repo> / <work>，避免测试报告泄露本地目录结构。
+const scrubLocalPaths = (text) => {
+  let out = String(text);
+  for (const [target, label] of [[work, "<work>"], [root, "<repo>"]]) {
+    if (!target) continue;
+    for (const variant of [target, target.replace(/\\/g, "/"), JSON.stringify(target).slice(1, -1)]) {
+      out = out.split(variant).join(label);
+    }
+  }
+  return out;
+};
 const lastRunText = [
   `# 本文件由 node tests/run-tests.mjs 自动生成，请勿手工编辑`,
   `# ${new Date().toISOString()} / node ${process.version} / ${process.platform}`,
   `# run-tests.mjs sha256:${fileSha16(fileURLToPath(import.meta.url))} / html5-oracle.json sha256:${fileSha16(fixturePath)} (${fixtureCaseCount} cases)`,
   ...results.map((r) => {
-    const detail = String(r.detail ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+    const detail = scrubLocalPaths(String(r.detail ?? "")).replace(/\s+/g, " ").trim().slice(0, 300);
     return `${r.ok ? "通过" : "失败"}  ${r.name}${detail ? ` — ${detail}` : ""}`.trimEnd();
   }),
   "",

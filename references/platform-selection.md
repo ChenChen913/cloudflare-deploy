@@ -2,6 +2,8 @@
 
 核实日期：2026-11-14。价格和额度会变，引用前重新核对官方页面。
 
+> 平台层选型（GitHub Pages / Cloudflare Pages / Vercel / Netlify / Render 的首选 / 备选 / 不推荐）先走 SKILL.md 第 2 步和 `scripts/select-platform.mjs`；候选数据源是 `references/platform-matrix.json`。本文只负责 Cloudflare 家族内部的 Pages vs Workers。目标用户含中国大陆时，先读 `references/mainland-china-access.md`。
+
 ## 1. 默认值已经变了
 
 Cloudflare 的 Pages 文档顶部现在写着：

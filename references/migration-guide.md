@@ -1,5 +1,7 @@
 # 迁移方法与 Jekyll 实战记录
 
+> 本文是 Cloudflare 内部迁移与 Jekyll 实战记录；跨平台迁移（GitHub Pages / Cloudflare Pages / Vercel / Netlify / Render）见 `cross-platform-migration.md`，迁移脚本见 `scripts/migration-plan.mjs`。
+
 这是端到端顺序，以及产出本技能大部分数字的真实项目。平台细节在其它 reference；本文是地图和案例。
 
 ## 1. 证据标注

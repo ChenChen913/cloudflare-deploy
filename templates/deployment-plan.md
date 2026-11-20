@@ -12,6 +12,17 @@
 | 成本档 | {{免费 / $5 月起 / 按量}} |
 | 不可行时的选项 | {{换依赖 / 换方案 / 换平台 + 各自代价}} |
 
+## 部署适配度
+
+| 维度 | 结论 | 证据 |
+|---|---|---|
+| 渲染模式 | {{纯静态 / SSG / SPA / SSR / 全栈 / API}} | {{confirmed / inferred / unknown}} |
+| 后端与数据库 | {{无 / Serverless / PostgreSQL + Auth + Storage / 长期运行 / Docker}} | {{...}} |
+| 目标用户地域 | {{主要海外 / 含中国大陆 / 未明确}} | {{...}} |
+| 预算 | {{免费优先 / 愿意付费 / 未说明}} | {{...}} |
+| 首选 / 备选 / 不推荐 | {{平台 + 一句理由}} | {{排除原因}} |
+| 中国大陆访问风险 | {{不适用 / 已输出完整提示 + 路线 A / B}} | {{...}} |
+
 ## 现状
 
 | 项目 | 值 |
@@ -33,8 +44,9 @@
 
 | 决策 | 值 | 依据 |
 |---|---|---|
-| Cloudflare 产品 | {{Pages / Workers}} | {{一两个决定性事实}} |
-| 部署方式 | {{Git / Direct Upload / wrangler / Workers Builds}} | {{...}} |
+| 目标平台 | {{Cloudflare Pages / Workers / GitHub Pages / Vercel / Netlify / Render}} | {{适配度评分和首选理由}} |
+| Cloudflare 产品（如适用） | {{Pages / Workers}} | {{一两个决定性事实；非 Cloudflare 目标写“不适用”}} |
+| 部署方式 | {{Git / Direct Upload / wrangler / Workers Builds / 平台 Git 集成}} | {{...}} |
 | 是否迁后端 | {{否 / 是，范围}} | {{...}} |
 | GitHub Pages 备用 | {{保留 / 不保留}} | {{...}} |
 | 索引策略 | {{主站 self-canonical，备用站 noindex / 其他；Cloudflare 与 GitHub Pages 并存时必须二选一}} | {{...}} |
@@ -107,6 +119,8 @@ node "<技能目录>/scripts/check-build.mjs" --dir "{{输出}}" --mode "{{stati
 只勾选适用项：
 
 - [ ] 生产 DNS
+- [ ] 自定义域名绑定或切换（含 CNAME / A / nameserver）
+- [ ] 中国大陆访问路线 A / B 的选择
 - [ ] GitHub Pages 自定义域名变更
 - [ ] 生产密钥
 - [ ] 生产数据库

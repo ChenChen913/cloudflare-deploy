@@ -17,7 +17,7 @@
 ## 怎么复现
 
 ```bash
-node tests/run-tests.mjs     # 742 项，分层覆盖 core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs     # 794 项，分层覆盖 core 350 / adversarial 276 / boundary 43 / combination 5 / unit 120：识别、平台矩阵、适配度评分、跨平台迁移、套餐与产物、HTML tokenizer、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs   # 结构自检，零外部依赖
 ```
 
@@ -36,8 +36,8 @@ python -X utf8 <skill-creator>/scripts/quick_validate.py <技能目录>
 ## 结果
 
 ```text
-node tests/run-tests.mjs     742/742 通过（分层：core 298 / adversarial 276 / boundary 43 / combination 5 / unit 120）
-node tests/check-skill.mjs   通过（SKILL.md 335 行，引用路径 32 个，无绝对路径）
+node tests/run-tests.mjs     794/794 通过（分层：core 350 / adversarial 276 / boundary 43 / combination 5 / unit 120）
+node tests/check-skill.mjs   通过（SKILL.md 399 行，引用路径 43 个，无绝对路径）
 node tests/browser-diff.mjs  115/115 一致（可选开发期：本机 Chrome 157 与本机 Edge 157 分别跑过；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1，180s 超时退出码 3）
 quick_validate.py            Skill is valid!（本机一次性结果；脚本在仓库外，见上文可复现性说明）
 ```
@@ -78,6 +78,60 @@ quick_validate.py            Skill is valid!（本机一次性结果；脚本在
 | 28 | Vue Router 3 显式 `mode:"history"` | `spaRouting=history` | `suggestedMode=spa` | 显式 history 不被 Vue3 默认 hash 覆盖 |
 | 29 | 源码 HashRouter + `dist-web/` 里陈旧 BrowserRouter/长驻代码 | `spaRouting=hash` | `suggestedMode=static` | 构建产物目录不进入源码路由/长驻扫描 |
 | 30 | 同时存在真实 HashRouter 与 BrowserRouter | `spaRouting=mixed` | `suggestedMode=unknown` | 证据冲突时不给确定性模式，要求人工确认 |
+
+### 平台能力矩阵
+
+`platform-matrix.json` 和 `scripts/platform-matrix.mjs` 用纯函数断言，不访问网络：
+
+| 检查 | 断言 |
+|---|---|
+| 加载与 schema | 8 个平台、5 个核心、3 个扩展；`schema_version=1`、`checked_at` 存在 |
+| 必填字段 | `type` / `render_support` / `free_tier_key_points` / `custom_domain` / `mainland_china_risk` / `migration_notes` / `best_for` / `not_for` 齐全 |
+| ID 与枚举 | 平台 ID 唯一；`render_support` 只含 static / ssg / spa / ssr / api |
+| 非法矩阵 | 非法 `type`、重复 ID、缺少 `best_for` 都被拒绝 |
+| 静态筛选 | 五个核心平台，Cloudflare Pages 排前 |
+| SSR 筛选 | 排除 GitHub Pages / Netlify 静态托管，保留 Vercel / Cloudflare / Render |
+| fullstack 筛选 | 按 `ssr` 能力匹配，不误判 |
+| 长期运行筛选 | 免费只留 Render；付费为 Railway / Fly.io / Render |
+| 选型 | 静态 + 大陆 → Cloudflare 首选 / GitHub Pages 备选 / Vercel 不推荐；SSR + 大陆 → Cloudflare 首选；长期运行免费 → Render 首选 |
+| 平台详情 | 免费额度、限制、大陆风险正确映射 |
+
+### 部署适配度评分
+
+`scripts/select-platform.mjs` 用固定输入断言四维评分和选型结果，不访问网络：
+
+| 场景 | 断言 |
+|---|---|
+| SSG + 含大陆 + 免费 | 首选 Cloudflare Pages；五个核心平台都候选；大陆风险 5 条 + 两条路线 |
+| SSG + 只面向海外 | 不输出大陆风险；Cloudflare Pages 首选 |
+| 地域未说明 | 按含大陆处理，`risk.level=unknown`，风险提示仍完整 |
+| SSR + 海外 + 免费 | Vercel 首选；GitHub Pages / Netlify 静态托管被排除并写原因 |
+| SSR + 含大陆 | Cloudflare 首选；Vercel 备选并带自定义域名条件 |
+| 长期运行 + 免费 | Render 首选；Railway / Fly.io 标注不承诺长期免费 |
+| 长期运行 + 付费 | Railway 首选；Fly.io / Render 备选 |
+| PostgreSQL + Auth + Storage | Supabase 作为后端候选；前端仍静态 |
+| 渲染模式 unknown | 退出码 1，`selection=null`，要求补充渲染模式 |
+| 非法参数 / 非法 JSON | 退出码 2，中文用法错误 |
+| `--project` 目录 | 复用 `detect-project.mjs`，Jekyll 识别为 SSG |
+| `--human` | 输出【项目部署适配度】和【中国大陆访问风险】 |
+
+### 跨平台迁移
+
+`scripts/migration-plan.mjs` 用纯函数和 CLI 断言，不访问网络、不执行 DNS：
+
+| 场景 | 断言 |
+|---|---|
+| GitHub Pages → Cloudflare Pages | 生成迁移前检查、双活五步、DNS 确认门、回滚；控制台导入提示 |
+| 环境变量 | 只记录键名，不记录值；`KEY=value` 直接拒绝 |
+| 六条高频路径 | GH ↔ CF、GH ↔ Vercel、CF ↔ Vercel 都生成计划，不误判 blocked |
+| SSR → GitHub Pages | 目标不支持，`blocked` + 警告 + `target_support` 检查项 |
+| Netlify → Render | 检查项含 `netlify.toml`，提示 Render 免费 Web Service 休眠 |
+| 全栈 | 标记数据库检查为 pending |
+| 未知平台 | 生成通用清单和警告，不静默失败 |
+| 保留期 | 少于 7 天自动调整为 7 天并警告 |
+| 矩阵缺失 | 生成通用计划并标记 degraded |
+| 报告骨架 | 含迁移前检查、DNS 变更记录、回滚路径、建议观察期 |
+| CLI | `--human` 输出计划 + 报告骨架；`--report` 只输出报告；同平台退出码 2 |
 
 ### 构建产物
 
