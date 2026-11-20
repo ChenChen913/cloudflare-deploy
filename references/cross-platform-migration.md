@@ -1,13 +1,13 @@
 # 跨平台迁移手册
 
-适用平台：GitHub Pages、Cloudflare Pages、Vercel、Netlify、Render。  
-迁移脚本：`scripts/migration-plan.mjs`。它只生成计划、检查清单和报告骨架，不执行 DNS、部署或数据库操作。
+适用平台：GitHub Pages、Cloudflare Pages、Cloudflare Workers、Vercel Hobby / Pro、Netlify、Render。  
+迁移脚本：`scripts/migration-plan.mjs`。它只生成计划、检查清单和报告骨架，不执行 DNS、部署或数据库操作。Cloudflare Pages 与 Workers 是两个独立产品，不能共用一套迁移假设；Vercel Hobby 不能用于商业项目。
 
 ## 1. 入口参数
 
 | 参数 | 取值 | 必填 | 说明 |
 |---|---|---|---|
-| `source` | `github-pages` / `cloudflare-pages` / `vercel` / `netlify` / `render` | 是 | 当前部署平台 |
+| `source` | `github-pages` / `cloudflare-pages` / `cloudflare-workers` / `vercel` / `vercel-pro` / `netlify` / `render` | 是 | 当前部署平台 |
 | `target` | 同上 | 是 | 目标平台；不能等于 `source` |
 | `project_type` | `static` / `ssg` / `spa` / `ssr` / `fullstack` | 是 | 决定渲染兼容性和验收模式 |
 
@@ -16,7 +16,16 @@
 
 ## 2. 迁移前检查
 
-逐项输出 `pending` / `confirmed` / `not_applicable` / `blocked`：
+逐项输出 `provided` / `inferred` / `verified` / `pending` / `blocked` / `not_applicable`：
+
+- `provided`：用户提供了信息，但尚未验证。
+- `inferred`：从项目配置或平台矩阵推断。
+- `verified`：实际构建、探测或配置检查通过。
+- `pending`：尚未确认。
+- `blocked`：存在阻断。
+- `not_applicable`：不适用。
+
+用户提供构建命令、输出目录、环境变量键名或域名，只能算 `provided`；不代表构建成功、变量已配置或 DNS 已核实。
 
 1. 源平台构建命令、输出目录。
 2. 环境变量键名（只记录键名）。
@@ -70,6 +79,10 @@
 | Vercel → GitHub Pages | 移除 `vercel.json` 依赖；确认 Hobby 非商业限制不再适用；静态站可迁，SSR 不可迁 |
 | Cloudflare Pages → Vercel | `_redirects` 转 `vercel.json`；`_headers` 转 `vercel.json` headers；确认 Functions 替换 |
 | Vercel → Cloudflare Pages | `vercel.json` 转 `_redirects` / `_headers`；注意单仓库“源-部署分离”时自动 promote 异常 |
+| Cloudflare Pages → Workers | 重新核对 wrangler 配置、Static Assets、SSR 入口和绑定；`_redirects` / `_headers` 不完全等价 |
+| Cloudflare Workers → Pages | 确认不再依赖 D1 / DO / Queues / Cron；Pages Functions 不能替代全部 Workers 能力 |
+| Vercel Hobby → Pro | 商业项目必须升级；确认计费、团队席位和 Functions 额度 |
+| Vercel Pro → Hobby | 仅当确认个人非商业；商业项目不要降级 |
 
 扩展路径：
 

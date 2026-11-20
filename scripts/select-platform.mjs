@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * select-platform.mjs — 部署适配度评分与多平台初选（迭代 2，平台能力矩阵驱动）。
+ * select-platform.mjs — 部署适配度评估与多平台初选（迭代 2，平台能力矩阵驱动）。
  *
  * 用法：
  *   node scripts/select-platform.mjs [--project <目录|JSON 文件|->] [--render <模式>]
@@ -18,13 +18,15 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadMatrix, filterCandidates, selectPlatforms, platformDetails, MatrixError } from "./platform-matrix.mjs";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const RENDER_MODES = ["static", "ssg", "spa", "ssr", "fullstack", "api"];
 const BACKENDS = ["none", "serverless", "postgres-auth-storage", "long-running", "unknown"];
 const AUDIENCES = ["overseas", "mainland", "unknown"];
 const BUDGETS = ["free", "paid", "unknown"];
+const USAGE_TYPES = ["personal_noncommercial", "commercial", "unknown"];
+const EXISTING_STATUSES = ["healthy", "issues", "unknown"];
 
 const MAINLAND_NOTICE = [
   "Vercel 的 *.vercel.app 默认域名在中国大陆已被 DNS 污染，直接访问通常超时；绑定自定义域名可能改善，但 Vercel 官方明确不保证中国大陆的可用性或性能。",
@@ -43,8 +45,19 @@ class UsageError extends Error {}
 class AnalysisError extends Error {}
 
 function parseArgs(argv) {
-  const opts = { project: null, render: null, backend: null, audience: null, budget: null, human: false, help: false };
-  const valueFlags = new Set(["--project", "--render", "--backend", "--audience", "--budget"]);
+  const opts = {
+    project: null,
+    render: null,
+    backend: null,
+    audience: null,
+    budget: null,
+    usage: null,
+    existing: null,
+    existingStatus: null,
+    human: false,
+    help: false,
+  };
+  const valueFlags = new Set(["--project", "--render", "--backend", "--audience", "--budget", "--usage", "--existing", "--existing-status"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--human") { opts.human = true; continue; }
@@ -55,7 +68,8 @@ function parseArgs(argv) {
       if (value === undefined || value === "" || value.startsWith("--")) {
         throw new UsageError(`${arg} 需要一个值`);
       }
-      opts[arg.slice(2)] = value;
+      const key = arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      opts[key] = value;
       continue;
     }
     if (arg.startsWith("--")) throw new UsageError(`未知参数 ${arg}`);
@@ -158,6 +172,26 @@ function deriveBudget(explicit) {
   return dimension("unknown", "unknown", "用户未说明；按免费优先处理");
 }
 
+function deriveUsage(explicit) {
+  if (explicit) return dimension(explicit, explicit === "unknown" ? "unknown" : "confirmed", "用户输入");
+  return dimension("unknown", "unknown", "用户未说明；不认定为个人非商业");
+}
+
+function deriveExisting(explicit, explicitStatus) {
+  const value = explicit || "unknown";
+  const status = value === "none"
+    ? "not_applicable"
+    : value === "unknown"
+      ? "unknown"
+      : explicitStatus || "unknown";
+  return {
+    value,
+    status,
+    confidence: value === "unknown" ? "unknown" : "confirmed",
+    source: explicit ? "用户输入" : "用户未说明",
+  };
+}
+
 function buildGuidance({ render, backend, budget }) {
   return {
     domain: "如需自定义域名，先确认主要面向海外还是中国大陆；海外可选 Cloudflare Registrar / Porkbun / Namecheap / NameSilo，中国大陆可选腾讯云 / 阿里云并评估 ICP 备案。",
@@ -176,19 +210,22 @@ function buildGuidance({ render, backend, budget }) {
   };
 }
 
-function buildResult({ source, projectData, renderDim, backendDim, audienceDim, budgetDim, matrix, matrixError }) {
+function buildResult({ source, projectData, renderDim, backendDim, audienceDim, budgetDim, usageDim, existingDim, matrix, matrixError }) {
   const render = renderDim.value;
   const backend = backendDim.value;
   const audience = audienceDim.value;
   const budget = budgetDim.value;
+  const usageType = usageDim.value;
+  const existing = existingDim.value;
+  const existingStatus = existingDim.status;
   let candidates = [];
   let excluded = [];
   if (matrix) {
-    ({ candidates, excluded } = filterCandidates({ matrix, render, backend, budget }));
+    ({ candidates, excluded } = filterCandidates({ matrix, render, backend, budget, usageType, existing, existingStatus }));
   }
   const mainland = audience !== "overseas";
   const selection = matrix && candidates.length
-    ? selectPlatforms({ matrix, render, backend, audience, budget, candidates, excluded })
+    ? selectPlatforms({ matrix, render, backend, audience, budget, usageType, existing, existingStatus, candidates, excluded })
     : null;
 
   if (selection && backend === "postgres-auth-storage") {
@@ -224,8 +261,33 @@ function buildResult({ source, projectData, renderDim, backendDim, audienceDim, 
     warnings.push("预算未说明，已按免费优先排序；愿意付费时可比较 Workers Paid / Vercel Pro / Railway / Fly.io。");
     questions.push("预算是否只考虑免费额度？");
   }
+  if (usageDim.confidence === "unknown") {
+    warnings.push("使用性质未确认：Vercel Hobby 仅个人非商业；未确认前不会把 Hobby 作为首选。");
+    questions.push("项目是个人非商业还是商业用途？");
+  } else if (usageType === "commercial") {
+    warnings.push("商业项目不使用 Vercel Hobby；如愿意付费，可比较 Vercel Pro，或使用允许商业用途的免费层。");
+  }
+  if (existingDim.value === "unknown") {
+    warnings.push("现有部署未说明；如果是迁移，先确认平台和是否健康。");
+    questions.push("当前是否已有部署？平台和状态是什么？");
+  } else if (existingDim.status === "unknown") {
+    warnings.push("现有部署状态未确认；在建议迁移前先确认是否健康。");
+    questions.push("现有部署是否健康？");
+  } else if (existingDim.status === "healthy") {
+    warnings.push("现有部署健康；默认不强制迁移，迁移必须给出明确收益和回滚方案。");
+  } else if (existingDim.status === "issues") {
+    warnings.push("现有部署有问题；先判断是修复还是迁移，并在计划中写明原因。");
+  }
+  if (existingDim.value !== "unknown" && existingDim.value !== "none" && matrix && !matrix.byId[existingDim.value]) {
+    warnings.push(`现有部署平台 ${existingDim.value} 不在平台矩阵中；无法自动判断是否应保留。`);
+  }
+  if (usageType === "commercial" && existingDim.value === "vercel-hobby") {
+    warnings.push("现有 Vercel Hobby 不可用于商业项目；需要迁到 Vercel Pro 或其他平台。");
+  } else if (usageType === "unknown" && existingDim.value === "vercel-hobby") {
+    warnings.push("现有 Vercel Hobby 的使用性质未确认；确认个人非商业前，不把 Hobby 作为首选。");
+  }
   if (projectData?.project?.workspaces?.length) {
-    warnings.push("Monorepo：先确认要部署哪个子应用，当前评分针对整个仓库。");
+    warnings.push("Monorepo：先确认要部署哪个子应用，当前评估针对整个仓库。");
     questions.push("Monorepo 里要部署哪个子应用？");
   }
 
@@ -252,6 +314,10 @@ function buildResult({ source, projectData, renderDim, backendDim, audienceDim, 
       audience: audienceDim,
       budget: budgetDim,
     },
+    constraints: {
+      usage_type: usageDim,
+      existing: existingDim,
+    },
     candidates,
     excluded: excluded.map((e) => ({
       id: e.id,
@@ -264,12 +330,15 @@ function buildResult({ source, projectData, renderDim, backendDim, audienceDim, 
       level: audience === "mainland" ? "high" : audience === "unknown" ? "unknown" : "none",
       notice: mainland ? MAINLAND_NOTICE : [],
       routes: mainland ? MAINLAND_ROUTES : [],
+      basis: mainland
+        ? "大陆访问结论是网络观测/社区反馈或待验证，不是平台官方承诺；本仓库未保存可复现的大陆探测记录。"
+        : "",
     },
     guidance: buildGuidance({ render, backend, budget }),
     platforms,
     warnings,
     questions,
-    degraded: Boolean(matrixError) || renderDim.value === "unknown" || backendDim.confidence === "unknown" || audienceDim.confidence === "unknown" || budgetDim.confidence === "unknown",
+    degraded: Boolean(matrixError) || renderDim.value === "unknown" || backendDim.confidence === "unknown" || audienceDim.confidence === "unknown" || budgetDim.confidence === "unknown" || usageDim.confidence === "unknown" || existingDim.confidence === "unknown",
   };
   return result;
 }
@@ -279,15 +348,24 @@ const LABELS = {
   backend: { none: "无", serverless: "Serverless / 轻后端", "postgres-auth-storage": "PostgreSQL + Auth + Storage", "long-running": "长期运行 / Docker", unknown: "未确认" },
   audience: { overseas: "主要海外", mainland: "含中国大陆", unknown: "未明确（按含中国大陆处理）" },
   budget: { free: "免费优先", paid: "愿意付费", unknown: "未说明（按免费优先）" },
+  usage: { personal_noncommercial: "个人非商业", commercial: "商业", unknown: "未确认" },
+  existingStatus: { healthy: "健康", issues: "有问题", unknown: "未确认", not_applicable: "不适用" },
 };
 
 function formatHuman(result, matrix) {
-  const { fit, selection, risk } = result;
+  const { fit, selection, risk, constraints } = result;
   const lines = ["【项目部署适配度】"];
   lines.push(`- 渲染模式：${LABELS.render[fit.render_mode.value]}（${fit.render_mode.confidence}）`);
   lines.push(`- 后端需求：${LABELS.backend[fit.backend.value]}（${fit.backend.confidence}）`);
   lines.push(`- 目标用户：${LABELS.audience[fit.audience.value]}（${fit.audience.confidence}）`);
   lines.push(`- 预算：${LABELS.budget[fit.budget.value]}（${fit.budget.confidence}）`);
+  const existingLabel = constraints.existing.value === "none"
+    ? "无"
+    : constraints.existing.value === "unknown"
+      ? "未说明"
+      : platformDetails(matrix, constraints.existing.value)?.name || constraints.existing.value;
+  lines.push(`- 使用性质：${LABELS.usage[constraints.usage_type.value]}（${constraints.usage_type.confidence}）`);
+  lines.push(`- 现有部署：${existingLabel}（${LABELS.existingStatus[constraints.existing.status]}）`);
   if (result.candidates.length) {
     lines.push(`- 候选平台：${result.candidates.map((id) => platformDetails(matrix, id)?.name || id).join(" / ")}`);
   }
@@ -304,12 +382,14 @@ function formatHuman(result, matrix) {
     lines.push(`- 备选：${selection.backup.length ? selection.backup.map((b) => `${b.name}（${b.condition}）`).join("；") : "无"}`);
     lines.push(`- 不推荐：${selection.not_recommended.length ? selection.not_recommended.map((n) => `${n.name}（${n.reason}）`).join("；") : "无"}`);
     if (selection.backend) lines.push(`- 后端建议：${selection.backend.name}（${selection.backend.reason}）`);
+    if (selection.existing) lines.push(`- 现有部署结论：保留 ${selection.existing.name}（${LABELS.existingStatus[selection.existing.status]}）`);
   }
 
   if (risk.mainland_china) {
     lines.push("");
     lines.push("【中国大陆访问风险】");
     for (const item of risk.notice) lines.push(`- ${item}`);
+    lines.push(`- 证据说明：${risk.basis}`);
     lines.push("");
     lines.push("【两条路线】");
     for (const route of risk.routes) lines.push(`${route.id}. ${route.text}`);
@@ -340,7 +420,7 @@ function main() {
   try {
     const opts = parseArgs(process.argv.slice(2));
     if (opts.help) {
-      console.log("用法：node scripts/select-platform.mjs [--project <目录|JSON 文件|->] [--render static|ssg|spa|ssr|fullstack|api] [--backend none|serverless|postgres-auth-storage|long-running|unknown] [--audience overseas|mainland|unknown] [--budget free|paid|unknown] [--human]");
+      console.log("用法：node scripts/select-platform.mjs [--project <目录|JSON 文件|->] [--render static|ssg|spa|ssr|fullstack|api] [--backend none|serverless|postgres-auth-storage|long-running|unknown] [--audience overseas|mainland|unknown] [--budget free|paid|unknown] [--usage personal_noncommercial|commercial|unknown] [--existing <平台|none|unknown>] [--existing-status healthy|issues|unknown] [--human]");
       console.log("默认输出 JSON；只读、不上传、不写项目文件、不访问网络。不传 --project 且不传 --render 时，对当前目录运行 detect-project.mjs。");
       return 0;
     }
@@ -349,6 +429,14 @@ function main() {
     validateEnum(opts.backend, BACKENDS, "--backend");
     validateEnum(opts.audience, AUDIENCES, "--audience");
     validateEnum(opts.budget, BUDGETS, "--budget");
+    validateEnum(opts.usage, USAGE_TYPES, "--usage");
+    validateEnum(opts.existingStatus, EXISTING_STATUSES, "--existing-status");
+    if (opts.existing && !["none", "unknown"].includes(opts.existing) && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(opts.existing)) {
+      throw new UsageError(`--existing 只接受平台 ID、none 或 unknown，收到 ${opts.existing}`);
+    }
+    if (opts.existingStatus && !opts.existing) {
+      throw new UsageError("--existing-status 需要同时提供 --existing");
+    }
 
     const projectArg = opts.project || (!opts.render ? process.cwd() : null);
     const { data, source } = loadProject(projectArg);
@@ -359,6 +447,8 @@ function main() {
     const backendDim = deriveBackend(data, renderDim.value, opts.backend);
     const audienceDim = deriveAudience(opts.audience);
     const budgetDim = deriveBudget(opts.budget);
+    const usageDim = deriveUsage(opts.usage);
+    const existingDim = deriveExisting(opts.existing, opts.existingStatus);
 
     let matrix = null;
     let matrixError = null;
@@ -376,6 +466,8 @@ function main() {
       backendDim,
       audienceDim,
       budgetDim,
+      usageDim,
+      existingDim,
       matrix,
       matrixError,
     });
@@ -391,7 +483,7 @@ function main() {
       console.error(`用法错误：${error.message}`);
       return 2;
     }
-    console.error(`无法完成评分：${error.message}`);
+    console.error(`无法完成评估：${error.message}`);
     return 1;
   }
 }

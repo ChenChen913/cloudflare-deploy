@@ -18,7 +18,8 @@
 |---|---|---|---|
 | GitHub Pages | CNAME 到 `<owner>.github.io` | A 记录；仓库内 CNAME 文件 | 先加域名，再改 DNS；启用 Enforce HTTPS |
 | Cloudflare Pages | CNAME 到 `<project>.pages.dev` | apex 需 NS 在 Cloudflare | 先在 Pages 项目 Custom domains 添加，再改 DNS |
-| Vercel | CNAME 到 Vercel 提示的目标 | A 记录或 nameserver | 按项目 Domains 提示；不要先删旧记录 |
+| Cloudflare Workers | 自定义域名要求 NS 在 Cloudflare | 同左 | 在 Worker 的 Domains & Routes 添加；Workers 没有外部 CNAME 路径 |
+| Vercel Hobby / Pro | CNAME 到 Vercel 提示的目标 | A 记录或 nameserver | 按项目 Domains 提示；不要先删旧记录 |
 | Netlify | CNAME 到 `<site>.netlify.app` | Netlify DNS / nameserver 或 A 记录 | 自动 TLS；先绑定再切换 |
 | Render | CNAME 到 Render 提示的目标 | A 记录 | 按控制台提示；免费 Web Service 会休眠 |
 

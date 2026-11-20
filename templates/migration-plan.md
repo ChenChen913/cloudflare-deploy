@@ -15,16 +15,18 @@
 
 ## 迁移前检查
 
+状态定义：`provided` 用户提供但未验证；`inferred` 从配置或矩阵推断；`verified` 实际验证通过；`pending` 尚未确认；`blocked` 存在阻断；`not_applicable` 不适用。
+
 | 检查项 | 状态 | 证据 / 备注 |
 |---|---|---|
-| 构建命令与输出目录 | {{confirmed / pending / unknown}} | {{build_command}} / {{output_dir}} |
-| 环境变量键名 | {{confirmed / pending}} | {{只写键名，不写值}} |
-| 自定义域名与 DNS | {{pending / confirmed}} | {{域名、DNS 提供商、CNAME / A / nameserver、TTL}} |
-| 重定向 / headers / 平台配置 | {{pending / confirmed}} | {{_redirects / vercel.json / netlify.toml / render.yaml}} |
-| 平台特有能力依赖 | {{pending / confirmed}} | {{base path、Forms、Functions、CNAME 文件等}} |
-| 回滚保留时长 | {{confirmed}} | 源平台至少保留 7 天；关键业务 2–4 周 |
-| 目标平台渲染支持 | {{confirmed / blocked}} | {{矩阵声明支持 / 不支持，需换平台或 Functions}} |
-| 目标预览验收 | {{pending}} | 首页、内页、资源、404、重定向、HTTPS、API / SSR |
+| 构建命令与输出目录 | {{provided / pending}} | {{build_command}} / {{output_dir}}；不代表已构建成功 |
+| 环境变量键名 | {{provided / pending}} | {{只写键名，不写值}}；不代表目标平台已配置 |
+| 自定义域名与 DNS | {{provided / pending}} | {{域名、DNS 提供商、CNAME / A / nameserver、TTL}}；DNS 未核实 |
+| 重定向 / headers / 平台配置 | {{pending / verified}} | {{_redirects / vercel.json / netlify.toml / render.yaml / wrangler}} |
+| 平台特有能力依赖 | {{pending / verified}} | {{base path、Forms、Functions、CNAME 文件、D1 / DO 等}} |
+| 回滚保留时长 | {{provided}} | 源平台至少保留 7 天；关键业务 2–4 周；计划值 |
+| 目标平台渲染支持 | {{inferred / blocked}} | {{矩阵声明支持 / 不支持，需换平台或 Functions / Workers}} |
+| 目标预览验收 | {{pending / verified}} | 首页、内页、资源、404、重定向、HTTPS、API / SSR |
 | 数据库迁移 | {{not_applicable / pending}} | 如涉及，必须单独备份、staging、冻结写入、确认 |
 
 ## 双活五步

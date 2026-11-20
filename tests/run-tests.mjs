@@ -445,17 +445,34 @@ assert("环境变量键名：支持 export 前缀与小写键",
 const matrix = loadMatrix();
 const matrixVerdict = validateMatrix(matrix);
 assert("矩阵：加载通过、schema 版本正确", matrix.schema_version === 1 && matrixVerdict.ok, JSON.stringify(matrixVerdict.errors));
-assert("矩阵：五个核心平台 + 三个扩展平台",
-  matrix.platforms.length === 8 && matrix.platforms.filter((p) => p.core).length === 5,
+assert("矩阵：五个核心平台 + 五个扩展/计划",
+  matrix.platforms.length === 10 && matrix.platforms.filter((p) => p.core).length === 5,
   `${matrix.platforms.length} / core=${matrix.platforms.filter((p) => p.core).length}`);
 assert("矩阵：必填字段齐全",
   matrix.platforms.every((p) => p.type && Array.isArray(p.render_support) && p.free_tier_key_points.length
-    && p.custom_domain && p.migration_notes && p.best_for && p.not_for),
+    && p.custom_domain && p.migration_notes && p.best_for && p.not_for
+    && p.family && Number.isFinite(p.order) && Array.isArray(p.selection_pools)
+    && typeof p.paid_only === "boolean" && p.commercial_use && p.mainland_china_risk.evidence_level),
   matrix.platforms.map((p) => p.id).join(","));
-assert("矩阵：ID 唯一且 render_support 取值合法",
+assert("矩阵：ID 唯一且 render_support / selection_pools 合法",
   new Set(matrix.platforms.map((p) => p.id)).size === matrix.platforms.length
-    && matrix.platforms.every((p) => p.render_support.every((m) => ["static", "ssg", "spa", "ssr", "api"].includes(m))),
-  matrix.platforms.map((p) => `${p.id}:${p.render_support.join("/")}`).join(" | "));
+    && matrix.platforms.every((p) => p.render_support.every((m) => ["static", "ssg", "spa", "ssr", "api"].includes(m)))
+    && matrix.platforms.every((p) => p.selection_pools.every((m) => ["static", "ssr", "long-running", "database-auth"].includes(m))),
+  matrix.platforms.map((p) => `${p.id}:${p.render_support.join("/")}:${p.selection_pools.join("/")}`).join(" | "));
+assert("矩阵：Cloudflare Pages 与 Workers 是独立条目",
+  matrix.byId["cloudflare-pages"]?.product === "pages" && matrix.byId["cloudflare-workers"]?.product === "workers"
+    && matrix.byId["cloudflare-pages"].id !== matrix.byId["cloudflare-workers"].id,
+  JSON.stringify({ pages: matrix.byId["cloudflare-pages"]?.id, workers: matrix.byId["cloudflare-workers"]?.id }));
+assert("矩阵：Vercel Hobby 禁止商业，Pro 允许商业",
+  matrix.byId["vercel-hobby"]?.commercial_use === "not_allowed"
+    && matrix.byId["vercel-pro"]?.commercial_use === "allowed"
+    && matrix.byId["vercel-pro"]?.paid_only === true,
+  JSON.stringify({ hobby: matrix.byId["vercel-hobby"]?.commercial_use, pro: matrix.byId["vercel-pro"]?.commercial_use }));
+assert("矩阵：大陆风险有证据等级，不伪装成官方结论",
+  matrix.platforms.every((p) => ["official", "observation", "unverified", "not_applicable"].includes(p.mainland_china_risk.evidence_level))
+    && matrix.byId["vercel-hobby"].mainland_china_risk.evidence_level === "observation"
+    && matrix.byId["render-free"].mainland_china_risk.evidence_level === "unverified",
+  matrix.platforms.map((p) => `${p.id}:${p.mainland_china_risk.evidence_level}`).join(" | "));
 assert("矩阵：checked_at 和 sources 可追溯",
   /^\d{4}-\d{2}-\d{2}$/.test(matrix.checked_at) && fs.existsSync(MATRIX_PATH)
     && matrix.platforms.some((p) => Array.isArray(p.sources) && p.sources.length > 0),
@@ -470,53 +487,125 @@ assert("矩阵：重复平台 ID 被拒绝", !validateMatrix(badDup).ok, JSON.st
 const badMissing = JSON.parse(JSON.stringify(matrix));
 delete badMissing.platforms[0].best_for;
 assert("矩阵：缺必填字段被拒绝", !validateMatrix(badMissing).ok, JSON.stringify(validateMatrix(badMissing).errors));
+const badCommercial = JSON.parse(JSON.stringify(matrix));
+badCommercial.platforms[0].commercial_use = "nope";
+assert("矩阵：非法 commercial_use 被拒绝", !validateMatrix(badCommercial).ok, JSON.stringify(validateMatrix(badCommercial).errors));
+const badEvidence = JSON.parse(JSON.stringify(matrix));
+badEvidence.platforms[0].mainland_china_risk.evidence_level = "official-guarantee";
+assert("矩阵：非法大陆风险证据等级被拒绝", !validateMatrix(badEvidence).ok, JSON.stringify(validateMatrix(badEvidence).errors));
+const badPools = JSON.parse(JSON.stringify(matrix));
+delete badPools.platforms[0].selection_pools;
+assert("矩阵：缺少 selection_pools 被拒绝", !validateMatrix(badPools).ok, JSON.stringify(validateMatrix(badPools).errors));
+const newStatic = JSON.parse(JSON.stringify(matrix.byId["github-pages"]));
+newStatic.id = "example-static";
+newStatic.name = "Example Static";
+newStatic.family = "example";
+newStatic.core = false;
+newStatic.order = 15;
+newStatic.selection_pools = ["static"];
+newStatic.commercial_use = "allowed";
+const matrixWithNew = {
+  ...matrix,
+  platforms: [...matrix.platforms, newStatic].sort((a, b) => a.order - b.order),
+  byId: { ...matrix.byId, "example-static": newStatic },
+};
+const filterNewPlatform = filterCandidates({ matrix: matrixWithNew, render: "static", backend: "none", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵：新增平台通过 selection_pools 自动进入候选，不被忽略",
+  filterNewPlatform.candidates.includes("example-static"),
+  filterNewPlatform.candidates.join(","));
 
-const filterStatic = filterCandidates({ matrix, render: "static", backend: "none", budget: "free" });
-assert("矩阵筛选：静态+免费 → 五个核心平台，Cloudflare Pages 排前",
+const filterStatic = filterCandidates({ matrix, render: "static", backend: "none", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵筛选：静态+免费 → 五个核心平台，Cloudflare Pages 排前，不含 Workers",
   filterStatic.candidates.length === 5 && filterStatic.candidates[0] === "cloudflare-pages"
-    && ["github-pages", "vercel-hobby", "netlify-free", "render-free"].every((id) => filterStatic.candidates.includes(id)),
+    && ["github-pages", "vercel-hobby", "netlify-free", "render-free"].every((id) => filterStatic.candidates.includes(id))
+    && !filterStatic.candidates.includes("cloudflare-workers"),
   filterStatic.candidates.join(","));
-const filterSsr = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "free" });
-assert("矩阵筛选：SSR → 排除 GitHub Pages / Netlify 静态托管",
+const filterSsr = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵筛选：SSR → Workers 是候选，Pages 不是新 SSR 默认候选",
   !filterSsr.candidates.includes("github-pages") && !filterSsr.candidates.includes("netlify-free")
-    && ["vercel-hobby", "cloudflare-pages", "render-free"].every((id) => filterSsr.candidates.includes(id))
+    && !filterSsr.candidates.includes("cloudflare-pages")
+    && ["cloudflare-workers", "vercel-hobby", "render-free"].every((id) => filterSsr.candidates.includes(id))
     && filterSsr.excluded.some((e) => e.id === "github-pages")
-    && filterSsr.excluded.some((e) => e.id === "netlify-free"),
+    && filterSsr.excluded.some((e) => e.id === "netlify-free")
+    && filterSsr.excluded.some((e) => e.id === "cloudflare-pages"),
   JSON.stringify({ candidates: filterSsr.candidates, excluded: filterSsr.excluded.map((e) => e.id) }));
-const filterFullstack = filterCandidates({ matrix, render: "fullstack", backend: "serverless", budget: "free" });
+const filterFullstack = filterCandidates({ matrix, render: "fullstack", backend: "serverless", budget: "free", usageType: "personal_noncommercial" });
 assert("矩阵筛选：fullstack 按 SSR 能力匹配", filterFullstack.candidates.join(",") === filterSsr.candidates.join(","), filterFullstack.candidates.join(","));
-const filterLongFree = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "free" });
+const filterSsrCommercialFree = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "free", usageType: "commercial" });
+assert("矩阵筛选：商业 SSR+免费 → 不含 Hobby / Pro，保留 Workers / Render",
+  filterSsrCommercialFree.candidates.includes("cloudflare-workers")
+    && filterSsrCommercialFree.candidates.includes("render-free")
+    && !filterSsrCommercialFree.candidates.includes("vercel-hobby")
+    && !filterSsrCommercialFree.candidates.includes("vercel-pro")
+    && filterSsrCommercialFree.excluded.some((e) => e.id === "vercel-hobby"),
+  JSON.stringify({ candidates: filterSsrCommercialFree.candidates, excluded: filterSsrCommercialFree.excluded.map((e) => e.id) }));
+const filterSsrCommercialPaid = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "paid", usageType: "commercial" });
+assert("矩阵筛选：商业 SSR+付费 → Pro 进入候选，Hobby 仍排除",
+  filterSsrCommercialPaid.candidates.includes("vercel-pro")
+    && filterSsrCommercialPaid.candidates.includes("cloudflare-workers")
+    && !filterSsrCommercialPaid.candidates.includes("vercel-hobby"),
+  filterSsrCommercialPaid.candidates.join(","));
+const filterLongFree = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "free", usageType: "personal_noncommercial" });
 assert("矩阵筛选：长期运行+免费 → 只留 Render，Railway/Fly 标注不承诺免费",
   filterLongFree.candidates.join(",") === "render-free"
     && filterLongFree.excluded.some((e) => e.id === "railway")
     && filterLongFree.excluded.some((e) => e.id === "fly-io"),
   JSON.stringify({ candidates: filterLongFree.candidates, excluded: filterLongFree.excluded.map((e) => e.id) }));
-const filterLongPaid = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "paid" });
+const filterLongPaid = filterCandidates({ matrix, render: "fullstack", backend: "long-running", budget: "paid", usageType: "commercial" });
 assert("矩阵筛选：长期运行+付费 → Railway / Fly / Render",
-  filterLongPaid.candidates.join(",") === "railway,fly-io,render-free",
+  ["railway", "fly-io", "render-free"].every((id) => filterLongPaid.candidates.includes(id)),
   filterLongPaid.candidates.join(","));
 
-const selectStaticMainland = selectPlatforms({ matrix, ...filterStatic, render: "static", backend: "none", audience: "mainland", budget: "free" });
-assert("矩阵选型：静态+大陆 → Cloudflare 首选 / GitHub Pages 备选 / Vercel 不推荐",
+const selectStaticMainland = selectPlatforms({ matrix, ...filterStatic, render: "static", backend: "none", audience: "mainland", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵选型：静态+大陆 → Pages 首选 / GitHub Pages 备选 / Vercel 不推荐",
   selectStaticMainland.primary?.id === "cloudflare-pages"
     && selectStaticMainland.backup.some((b) => b.id === "github-pages")
     && selectStaticMainland.not_recommended.some((n) => n.id === "vercel-hobby"),
   JSON.stringify({ primary: selectStaticMainland.primary?.id, backup: selectStaticMainland.backup.map((b) => b.id), notRec: selectStaticMainland.not_recommended.map((n) => n.id) }));
-const selectSsrMainland = selectPlatforms({ matrix, ...filterSsr, render: "ssr", backend: "serverless", audience: "mainland", budget: "free" });
-assert("矩阵选型：SSR+大陆 → Cloudflare 首选 / Vercel 备选",
-  selectSsrMainland.primary?.id === "cloudflare-pages"
+const selectSsrMainland = selectPlatforms({ matrix, ...filterSsr, render: "ssr", backend: "serverless", audience: "mainland", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵选型：SSR+大陆 → Workers 首选，不能写成 Pages 首选",
+  selectSsrMainland.primary?.id === "cloudflare-workers"
+    && /Workers/.test(selectSsrMainland.primary?.reason || "")
     && selectSsrMainland.backup.some((b) => b.id === "vercel-hobby"),
-  JSON.stringify({ primary: selectSsrMainland.primary?.id, backup: selectSsrMainland.backup.map((b) => b.id) }));
-const selectLongFree = selectPlatforms({ matrix, ...filterLongFree, render: "fullstack", backend: "long-running", audience: "overseas", budget: "free" });
+  JSON.stringify({ primary: selectSsrMainland.primary?.id, reason: selectSsrMainland.primary?.reason, backup: selectSsrMainland.backup.map((b) => b.id) }));
+const selectSsrOverseasPersonal = selectPlatforms({ matrix, ...filterSsr, render: "ssr", backend: "serverless", audience: "overseas", budget: "free", usageType: "personal_noncommercial" });
+assert("矩阵选型：海外 SSR+个人非商业 → Hobby 首选，Workers 备选",
+  selectSsrOverseasPersonal.primary?.id === "vercel-hobby"
+    && selectSsrOverseasPersonal.backup.some((b) => b.id === "cloudflare-workers"),
+  JSON.stringify({ primary: selectSsrOverseasPersonal.primary?.id, backup: selectSsrOverseasPersonal.backup.map((b) => b.id) }));
+const selectSsrCommercialPaid = selectPlatforms({ matrix, ...filterSsrCommercialPaid, render: "ssr", backend: "serverless", audience: "overseas", budget: "paid", usageType: "commercial" });
+assert("矩阵选型：海外 SSR+商业+付费 → Pro 首选，Hobby 不进首选/备选",
+  selectSsrCommercialPaid.primary?.id === "vercel-pro"
+    && !selectSsrCommercialPaid.backup.some((b) => b.id === "vercel-hobby")
+    && !selectSsrCommercialPaid.not_recommended.some((n) => n.id === "vercel-pro"),
+  JSON.stringify({ primary: selectSsrCommercialPaid.primary?.id, backup: selectSsrCommercialPaid.backup.map((b) => b.id), notRec: selectSsrCommercialPaid.not_recommended.map((n) => n.id) }));
+const filterExistingPages = filterCandidates({ matrix, render: "ssr", backend: "serverless", budget: "free", usageType: "personal_noncommercial", existing: "cloudflare-pages", existingStatus: "healthy" });
+const selectExistingPages = selectPlatforms({ matrix, ...filterExistingPages, render: "ssr", backend: "serverless", audience: "overseas", budget: "free", usageType: "personal_noncommercial", existing: "cloudflare-pages", existingStatus: "healthy" });
+assert("矩阵选型：已有 Pages 健康 → 保留 Pages，不强制迁移",
+  selectExistingPages.primary?.id === "cloudflare-pages"
+    && /现有部署健康/.test(selectExistingPages.primary?.reason || "")
+    && selectExistingPages.backup.some((b) => b.id === "cloudflare-workers"),
+  JSON.stringify({ primary: selectExistingPages.primary?.id, reason: selectExistingPages.primary?.reason, backup: selectExistingPages.backup.map((b) => b.id) }));
+const filterExistingWorkers = filterCandidates({ matrix, render: "static", backend: "none", budget: "free", usageType: "personal_noncommercial", existing: "cloudflare-workers", existingStatus: "healthy" });
+const selectExistingWorkers = selectPlatforms({ matrix, ...filterExistingWorkers, render: "static", backend: "none", audience: "overseas", budget: "free", usageType: "personal_noncommercial", existing: "cloudflare-workers", existingStatus: "healthy" });
+assert("矩阵选型：已有 Workers 健康 → 保留 Workers，不强行改 Pages",
+  selectExistingWorkers.primary?.id === "cloudflare-workers"
+    && /现有部署健康/.test(selectExistingWorkers.primary?.reason || ""),
+  JSON.stringify({ primary: selectExistingWorkers.primary?.id, reason: selectExistingWorkers.primary?.reason }));
+const selectLongFree = selectPlatforms({ matrix, ...filterLongFree, render: "fullstack", backend: "long-running", audience: "overseas", budget: "free", usageType: "personal_noncommercial" });
 assert("矩阵选型：长期运行免费 → Render 首选",
   selectLongFree.primary?.id === "render-free" && selectLongFree.not_recommended.some((n) => n.id === "railway"),
   JSON.stringify({ primary: selectLongFree.primary?.id, notRec: selectLongFree.not_recommended.map((n) => n.id) }));
 const cfDetails = platformDetails(matrix, "cloudflare-pages");
-assert("矩阵：平台详情映射免费额度、限制和大陆风险",
-  cfDetails.free_tier_key_points.includes("无限静态带宽") && /pages\.dev/.test(cfDetails.mainland_china_risk) && cfDetails.limits,
-  JSON.stringify(cfDetails));
+const workersDetails = platformDetails(matrix, "cloudflare-workers");
+assert("矩阵：Pages / Workers 详情各自映射产品能力",
+  cfDetails.product === "pages" && workersDetails.product === "workers"
+    && cfDetails.free_tier_key_points.includes("无限静态带宽")
+    && workersDetails.free_tier_key_points.some((k) => /100,000/.test(k))
+    && cfDetails.mainland_china_risk_evidence.level === "observation",
+  JSON.stringify({ pages: cfDetails.product, workers: workersDetails.product, evidence: cfDetails.mainland_china_risk_evidence }));
 
-// ---------------------------------------------------------------- 适配度评分
+// ---------------------------------------------------------------- 适配度评估
 function select(args) {
   const r = spawnSync(process.execPath, [path.join(root, "scripts/select-platform.mjs"), ...args], { encoding: "utf8", timeout: 30000 });
   let parsed = null;
@@ -565,20 +654,90 @@ assert("适配度：地域未说明 → 按含大陆处理",
     && fitDefaultAudience.json.risk.notice.length === 5,
   JSON.stringify(fitDefaultAudience.json?.risk));
 
-const fitSsr = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free"]);
-assert("适配度：SSR 海外 → Vercel 首选，排除 GitHub Pages / Netlify 静态托管",
+const fitSsr = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free", "--usage", "personal_noncommercial"]);
+assert("适配度：SSR 海外+个人非商业 → Vercel Hobby 首选，Workers 备选，排除 GH / Netlify / Pages",
   fitSsr.code === 0 && fitSsr.json?.selection?.primary?.id === "vercel-hobby"
+    && (fitSsr.json?.selection?.backup || []).some((b) => b.id === "cloudflare-workers")
     && !(fitSsr.json?.candidates || []).includes("github-pages")
     && !(fitSsr.json?.candidates || []).includes("netlify-free")
+    && !(fitSsr.json?.candidates || []).includes("cloudflare-pages")
     && (fitSsr.json?.excluded || []).some((e) => e.id === "github-pages")
-    && (fitSsr.json?.excluded || []).some((e) => e.id === "netlify-free"),
+    && (fitSsr.json?.excluded || []).some((e) => e.id === "netlify-free")
+    && (fitSsr.json?.excluded || []).some((e) => e.id === "cloudflare-pages"),
   JSON.stringify({ primary: fitSsr.json?.selection?.primary?.id, candidates: fitSsr.json?.candidates, excluded: fitSsr.json?.excluded?.map((e) => e.id) }));
 
-const fitSsrMainland = select(["--render", "ssr", "--backend", "serverless", "--audience", "mainland", "--budget", "free"]);
-assert("适配度：SSR 含大陆 → Cloudflare 首选，Vercel 备选并带条件",
-  fitSsrMainland.code === 0 && fitSsrMainland.json?.selection?.primary?.id === "cloudflare-pages"
+const fitSsrUnknownUsage = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free"]);
+assert("适配度：SSR 海外+使用性质未知 → Workers 首选，不擅自推荐 Hobby",
+  fitSsrUnknownUsage.code === 0 && fitSsrUnknownUsage.json?.selection?.primary?.id === "cloudflare-workers"
+    && (fitSsrUnknownUsage.json?.selection?.backup || []).some((b) => b.id === "vercel-hobby" && /个人非商业/.test(b.condition))
+    && (fitSsrUnknownUsage.json?.warnings || []).some((w) => /使用性质未确认/.test(w)),
+  JSON.stringify({ primary: fitSsrUnknownUsage.json?.selection?.primary?.id, backup: fitSsrUnknownUsage.json?.selection?.backup?.map((b) => [b.id, b.condition]), warnings: fitSsrUnknownUsage.json?.warnings }));
+
+const fitSsrMainland = select(["--render", "ssr", "--backend", "serverless", "--audience", "mainland", "--budget", "free", "--usage", "personal_noncommercial"]);
+assert("适配度：SSR 含大陆 → Workers 首选，Vercel 备选并带条件，Pages 不是首选",
+  fitSsrMainland.code === 0 && fitSsrMainland.json?.selection?.primary?.id === "cloudflare-workers"
+    && !(fitSsrMainland.json?.candidates || []).includes("cloudflare-pages")
     && (fitSsrMainland.json?.selection?.backup || []).some((b) => b.id === "vercel-hobby" && /自定义域名/.test(b.condition)),
   JSON.stringify({ primary: fitSsrMainland.json?.selection?.primary?.id, backup: fitSsrMainland.json?.selection?.backup?.map((b) => [b.id, b.condition]) }));
+
+const fitSsrCommercialFree = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free", "--usage", "commercial"]);
+assert("适配度：海外 SSR+免费+商业 → Workers 首选，Hobby 不推荐",
+  fitSsrCommercialFree.code === 0 && fitSsrCommercialFree.json?.selection?.primary?.id === "cloudflare-workers"
+    && !(fitSsrCommercialFree.json?.selection?.not_recommended || []).some((n) => n.id === "cloudflare-workers")
+    && (fitSsrCommercialFree.json?.selection?.not_recommended || []).some((n) => n.id === "vercel-hobby")
+    && !(fitSsrCommercialFree.json?.candidates || []).includes("vercel-hobby"),
+  JSON.stringify({ primary: fitSsrCommercialFree.json?.selection?.primary?.id, notRec: fitSsrCommercialFree.json?.selection?.not_recommended?.map((n) => n.id), candidates: fitSsrCommercialFree.json?.candidates }));
+
+const fitSsrCommercialPaid = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "paid", "--usage", "commercial"]);
+assert("适配度：海外 SSR+付费+商业 → Vercel Pro 首选",
+  fitSsrCommercialPaid.code === 0 && fitSsrCommercialPaid.json?.selection?.primary?.id === "vercel-pro"
+    && !(fitSsrCommercialPaid.json?.selection?.backup || []).some((b) => b.id === "vercel-hobby"),
+  JSON.stringify({ primary: fitSsrCommercialPaid.json?.selection?.primary?.id, backup: fitSsrCommercialPaid.json?.selection?.backup?.map((b) => b.id) }));
+
+const fitStaticCommercial = select(["--render", "static", "--audience", "overseas", "--budget", "free", "--usage", "commercial"]);
+assert("适配度：海外静态+免费+商业 → Pages 首选，Hobby / GitHub Pages 不推荐",
+  fitStaticCommercial.code === 0 && fitStaticCommercial.json?.selection?.primary?.id === "cloudflare-pages"
+    && !(fitStaticCommercial.json?.candidates || []).includes("vercel-hobby")
+    && (fitStaticCommercial.json?.selection?.not_recommended || []).some((n) => n.id === "vercel-hobby"),
+  JSON.stringify({ primary: fitStaticCommercial.json?.selection?.primary?.id, candidates: fitStaticCommercial.json?.candidates, notRec: fitStaticCommercial.json?.selection?.not_recommended?.map((n) => n.id) }));
+
+const fitPagesExisting = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free", "--usage", "personal_noncommercial", "--existing", "cloudflare-pages", "--existing-status", "healthy"]);
+assert("适配度：已有 Pages 健康 → 保留 Pages，不强制迁移",
+  fitPagesExisting.code === 0 && fitPagesExisting.json?.selection?.primary?.id === "cloudflare-pages"
+    && /现有部署健康/.test(fitPagesExisting.json?.selection?.primary?.reason || "")
+    && (fitPagesExisting.json?.selection?.backup || []).some((b) => b.id === "cloudflare-workers"),
+  JSON.stringify({ primary: fitPagesExisting.json?.selection?.primary?.id, reason: fitPagesExisting.json?.selection?.primary?.reason, backup: fitPagesExisting.json?.selection?.backup?.map((b) => b.id) }));
+
+const fitWorkersExisting = select(["--render", "static", "--audience", "overseas", "--budget", "free", "--usage", "personal_noncommercial", "--existing", "cloudflare-workers", "--existing-status", "healthy"]);
+assert("适配度：已有 Workers 健康 → 保留 Workers，不强行改 Pages",
+  fitWorkersExisting.code === 0 && fitWorkersExisting.json?.selection?.primary?.id === "cloudflare-workers"
+    && /现有部署健康/.test(fitWorkersExisting.json?.selection?.primary?.reason || ""),
+  JSON.stringify({ primary: fitWorkersExisting.json?.selection?.primary?.id, reason: fitWorkersExisting.json?.selection?.primary?.reason }));
+const fitHobbyExistingUnknown = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free", "--existing", "vercel-hobby", "--existing-status", "healthy"]);
+assert("适配度：已有 Hobby+使用性质未知 → 不保留 Hobby 为首选",
+  fitHobbyExistingUnknown.code === 0 && fitHobbyExistingUnknown.json?.selection?.primary?.id === "cloudflare-workers"
+    && (fitHobbyExistingUnknown.json?.warnings || []).some((w) => /Hobby 的使用性质未确认/.test(w)),
+  JSON.stringify({ primary: fitHobbyExistingUnknown.json?.selection?.primary?.id, warnings: fitHobbyExistingUnknown.json?.warnings }));
+const fitHobbyExistingCommercial = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "free", "--usage", "commercial", "--existing", "vercel-hobby", "--existing-status", "healthy"]);
+assert("适配度：已有 Hobby+商业 → 迁到 Workers / Pro，不保留 Hobby",
+  fitHobbyExistingCommercial.code === 0 && fitHobbyExistingCommercial.json?.selection?.primary?.id === "cloudflare-workers"
+    && !(fitHobbyExistingCommercial.json?.candidates || []).includes("vercel-hobby")
+    && (fitHobbyExistingCommercial.json?.warnings || []).some((w) => /不可用于商业/.test(w)),
+  JSON.stringify({ primary: fitHobbyExistingCommercial.json?.selection?.primary?.id, candidates: fitHobbyExistingCommercial.json?.candidates, warnings: fitHobbyExistingCommercial.json?.warnings }));
+
+for (const [mode, backend, audience, expected] of [
+  ["static", "none", "overseas", "cloudflare-pages"],
+  ["spa", "none", "overseas", "cloudflare-pages"],
+  ["ssg", "none", "overseas", "cloudflare-pages"],
+  ["ssr", "serverless", "mainland", "cloudflare-workers"],
+  ["api", "serverless", "mainland", "cloudflare-workers"],
+  ["fullstack", "serverless", "mainland", "cloudflare-workers"],
+]) {
+  const result = select(["--render", mode, "--backend", backend, "--audience", audience, "--budget", "free", "--usage", "personal_noncommercial"]);
+  assert(`适配度：${mode} 首选符合 Pages/Workers 分工`,
+    result.code === 0 && result.json?.selection?.primary?.id === expected,
+    JSON.stringify({ mode, audience, primary: result.json?.selection?.primary?.id, expected }));
+}
 
 const fitLongFree = select(["--render", "fullstack", "--backend", "long-running", "--audience", "overseas", "--budget", "free"]);
 assert("适配度：长期运行+免费 → Render 首选，Railway/Fly 不承诺免费",
@@ -614,14 +773,25 @@ assert("适配度：渲染模式 unknown → 退出码 1，暂不选型",
   JSON.stringify({ code: fitUnknown.code, selection: fitUnknown.json?.selection, questions: fitUnknown.json?.questions }));
 
 const fitHuman = select(["--project", fitPath, "--audience", "mainland", "--budget", "free", "--human"]);
-assert("适配度：--human 输出评分和大陆风险",
-  fitHuman.code === 0 && /【项目部署适配度】/.test(fitHuman.out) && /【中国大陆访问风险】/.test(fitHuman.out),
+assert("适配度：--human 输出评估和大陆风险",
+  fitHuman.code === 0 && /【项目部署适配度】/.test(fitHuman.out) && /【中国大陆访问风险】/.test(fitHuman.out)
+    && /使用性质/.test(fitHuman.out) && /证据说明/.test(fitHuman.out),
   fitHuman.out.split("\n")[0]);
 
 const fitBad = select(["--render", "nope"]);
 assert("适配度：非法 --render → 退出码 2 + 用法错误", fitBad.code === 2 && /用法错误/.test(fitBad.err), fitBad.err.trim());
 const fitBadJson = select(["--project", path.join(work, "fit/bad.json")]);
 assert("适配度：非法 JSON → 退出码 2", fitBadJson.code === 2 && /用法错误/.test(fitBadJson.err), fitBadJson.err.trim());
+const fitBadUsage = select(["--render", "ssr", "--usage", "nope"]);
+assert("适配度：非法 --usage → 退出码 2", fitBadUsage.code === 2 && /用法错误/.test(fitBadUsage.err), fitBadUsage.err.trim());
+const fitOrphanStatus = select(["--render", "ssr", "--existing-status", "healthy"]);
+assert("适配度：--existing-status 缺少 --existing → 退出码 2", fitOrphanStatus.code === 2 && /需要同时提供/.test(fitOrphanStatus.err), fitOrphanStatus.err.trim());
+const fitBudgetUnknown = select(["--render", "ssr", "--backend", "serverless", "--audience", "overseas", "--budget", "unknown", "--usage", "commercial"]);
+assert("适配度：预算未知+商业 → 免费优先、Workers 首选，不推荐 Pro",
+  fitBudgetUnknown.code === 0 && fitBudgetUnknown.json?.selection?.primary?.id === "cloudflare-workers"
+    && !(fitBudgetUnknown.json?.candidates || []).includes("vercel-pro")
+    && (fitBudgetUnknown.json?.warnings || []).some((w) => /预算未说明/.test(w)),
+  JSON.stringify({ primary: fitBudgetUnknown.json?.selection?.primary?.id, candidates: fitBudgetUnknown.json?.candidates, warnings: fitBudgetUnknown.json?.warnings }));
 
 const fitDir = select(["--project", path.join(work, "jekyll"), "--audience", "overseas", "--budget", "free"]);
 assert("适配度：--project 支持目录并复用识别结果",
@@ -654,8 +824,17 @@ assert("迁移：GitHub Pages → Cloudflare Pages 生成完整计划",
     && migGhCf.rollback.retain_source_days === 7,
   JSON.stringify({ status: migGhCf.status, precheck: migGhCf.precheck.length, steps: migGhCf.dual_live.length }));
 assert("迁移：环境变量只记录键名，不记录值",
-  migGhCf.precheck.some((p) => p.id === "env" && p.detail.includes("SITE_URL") && p.detail.includes("ANALYTICS_ID") && p.detail.includes("不读取")),
+  migGhCf.precheck.some((p) => p.id === "env" && p.detail.includes("SITE_URL") && p.detail.includes("ANALYTICS_ID") && p.detail.includes("清单已提供")),
   migGhCf.precheck.find((p) => p.id === "env")?.detail);
+const migPre = Object.fromEntries(migGhCf.precheck.map((p) => [p.id, p]));
+assert("迁移：用户提供信息只标 provided，不冒充 verified",
+  migPre.build?.status === "provided" && migPre.env?.status === "provided"
+    && migPre.domain?.status === "provided" && migPre.target_support?.status === "inferred"
+    && !migGhCf.precheck.some((p) => p.status === "verified"),
+  JSON.stringify({ build: migPre.build?.status, env: migPre.env?.status, domain: migPre.domain?.status, support: migPre.target_support?.status }));
+assert("迁移：提供域名不等于 DNS 已核实",
+  /DNS 记录和 TTL 尚未核实/.test(migPre.domain?.detail || ""),
+  migPre.domain?.detail);
 assert("迁移：GitHub Pages → Cloudflare Pages 提示控制台导入",
   migGhCf.platform_tips.some((tip) => /Workers & Pages/.test(tip) && /Pages/.test(tip)),
   migGhCf.platform_tips.join(" | "));
@@ -681,6 +860,16 @@ assert("迁移：迁出 Vercel 提示自动 promote 风险",
 assert("迁移：Cloudflare Pages → Vercel 提示 vercel.json",
   migrationPlans[4].platform_tips.some((tip) => /vercel\.json/.test(tip)),
   migrationPlans[4].platform_tips.join(" | "));
+const migPagesWorkers = buildMigrationPlan({ matrix, source: "cloudflare-pages", target: "cloudflare-workers", projectType: "ssr" });
+assert("迁移：Pages → Workers 区分两个产品和配置",
+  migPagesWorkers.status !== "blocked"
+    && migPagesWorkers.platform_tips.some((tip) => /Pages → Workers/.test(tip) && /wrangler/.test(tip)),
+  migPagesWorkers.platform_tips.join(" | "));
+const migHobbyPro = buildMigrationPlan({ matrix, source: "vercel", target: "vercel-pro", projectType: "ssr" });
+assert("迁移：Vercel Hobby → Pro 提示商业限制",
+  migHobbyPro.status !== "blocked"
+    && migHobbyPro.platform_tips.some((tip) => /Hobby → Pro/.test(tip) && /商业/.test(tip)),
+  migHobbyPro.platform_tips.join(" | "));
 
 const migBlocked = buildMigrationPlan({ matrix, source: "vercel", target: "github-pages", projectType: "ssr" });
 assert("迁移：SSR → GitHub Pages 判 blocked",
@@ -719,6 +908,9 @@ const migReport = renderMigrationReport(migGhCf);
 assert("迁移：报告骨架包含检查、DNS、回滚、观察期",
   /迁移前检查/.test(migReport) && /DNS 变更记录/.test(migReport) && /回滚路径/.test(migReport) && /建议观察期/.test(migReport),
   migReport.split("\n").slice(0, 3).join(" / "));
+assert("迁移：报告包含 provided / verified 状态定义",
+  /状态定义/.test(migReport) && /provided/.test(migReport) && /verified/.test(migReport),
+  migReport.split("\n").find((line) => /状态定义/.test(line)) || "");
 
 const migHuman = migration(["--source", "github-pages", "--target", "cloudflare-pages", "--project-type", "ssg", "--human"]);
 assert("迁移：--human 输出计划和报告骨架",

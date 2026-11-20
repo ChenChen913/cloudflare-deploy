@@ -1,55 +1,20 @@
 {
   "schema_version": 1,
   "checked_at": "2026-11-20",
-  "evidence": "需求方提供的 2026 免费额度资料加平台公开文档；引用前复核官方页面",
+  "evidence": "平台官方文档 + 本仓库可复核的数据；免费额度和价格发布前需复核官方页面；大陆网络风险区分官方声明、网络观测和待验证",
   "platforms": [
-    {
-      "id": "github-pages",
-      "name": "GitHub Pages",
-      "core": true,
-      "type": "static",
-      "render_support": ["static", "ssg", "spa"],
-      "free_tier_key_points": [
-        "公开仓库静态发布（GitHub Free）",
-        "免费 HTTPS",
-        "自定义域名"
-      ],
-      "free_tier_limits": {
-        "public_repos": "GitHub Free 下仅公开仓库可发布；私有仓库需付费计划",
-        "published_site_size": "1 GB（软限制）",
-        "bandwidth": "100 GB/月（软限制）",
-        "builds": "10 次/小时（软限制）",
-        "custom_domain": "包含"
-      },
-      "custom_domain": {
-        "supported": true,
-        "methods": ["CNAME", "A"],
-        "notes": "子域用 CNAME，apex 用 A；仓库内 CNAME 文件；启用 Enforce HTTPS"
-      },
-      "mainland_china_risk": {
-        "default_subdomain": "unstable",
-        "custom_domain_improves": "partial",
-        "stable": false,
-        "notes": "*.github.io 在中国大陆访问不稳定，部分网络环境不可达"
-      },
-      "migration_notes": {
-        "base_path": "项目站默认 /<repo>/；绑定自定义域后可改为 /；迁移到其他平台时移除仓库名前缀",
-        "redirects": "没有 _redirects；只能用 404.html 或 meta refresh，能力有限",
-        "headers": "不支持自定义响应头",
-        "platform_features": ["GitHub Actions 部署", "CNAME 文件", "deploy branch", "Jekyll 内置构建"],
-        "exit": "Settings → Pages → Source 设为 None 停止发布，仓库和回滚能力保留"
-      },
-      "best_for": "公开仓库的文档、博客、项目主页；已有 GitHub 工作流且不需要大陆稳定访问",
-      "not_for": "敏感交易、商业 SaaS 主站、需要服务端逻辑或精细重定向 / 响应头的项目",
-      "limits": "只能静态；base path、重定向和响应头能力有限",
-      "sources": ["https://docs.github.com/en/pages"]
-    },
     {
       "id": "cloudflare-pages",
       "name": "Cloudflare Pages",
       "core": true,
       "type": "frontend-plus-functions",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "无限静态带宽",
         "500 次构建/月",
@@ -68,33 +33,201 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME", "nameserver"],
+        "methods": [
+          "CNAME",
+          "nameserver"
+        ],
         "notes": "子域 CNAME 到 <project>.pages.dev；apex 需 NS 在 Cloudflare；先在 Pages 项目 Custom domains 添加，再改 DNS"
       },
       "mainland_china_risk": {
         "default_subdomain": "usually_reachable",
         "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
         "notes": "*.pages.dev 通常可达性更好，但不是中国大陆合规托管"
       },
       "migration_notes": {
         "base_path": "产物按 / 生成；从 GitHub Pages 迁入时移除 /<repo>/ 前缀",
         "redirects": "_redirects 放产物根目录；支持常见 301 / 302 / 200 规则",
         "headers": "_headers 放产物根目录；Functions 必须在代码里处理 CORS，包括 OPTIONS",
-        "platform_features": ["Git 集成", "Direct Upload", "Pages Functions", "KV / D1 / R2 绑定", "预览分支"],
+        "platform_features": [
+          "Git 集成",
+          "Direct Upload",
+          "Pages Functions",
+          "KV / D1 / R2 绑定",
+          "预览分支"
+        ],
         "exit": "删除项目前先导出域名和环境变量键名；Direct Upload 不可逆，删除后不能转 Git"
       },
       "best_for": "静态站、SPA、SSG 的免费默认；需要无限静态带宽和较好大陆可达性",
       "not_for": "必须用托管 Postgres 或常驻 Docker 的项目；需要中国大陆合规托管的项目",
       "limits": "SSR / API 需 Functions 或框架适配器；不是中国大陆合规托管",
-      "sources": ["https://developers.cloudflare.com/pages/"]
+      "sources": [
+        "https://developers.cloudflare.com/pages/"
+      ],
+      "family": "cloudflare",
+      "product": "pages",
+      "order": 10,
+      "selection_pools": [
+        "static"
+      ],
+      "paid_only": false,
+      "commercial_use": "allowed",
+      "commercial_use_note": "免费层可用于商业项目；以官方条款为准",
+      "render_notes": "静态托管 + Pages Functions；SSR / API 需 Functions 或框架适配器；新 SSR 项目优先 Workers"
+    },
+    {
+      "id": "github-pages",
+      "name": "GitHub Pages",
+      "core": true,
+      "type": "static",
+      "render_support": [
+        "static",
+        "ssg",
+        "spa"
+      ],
+      "free_tier_key_points": [
+        "公开仓库静态发布（GitHub Free）",
+        "免费 HTTPS",
+        "自定义域名"
+      ],
+      "free_tier_limits": {
+        "public_repos": "GitHub Free 下仅公开仓库可发布；私有仓库需付费计划",
+        "published_site_size": "1 GB（软限制）",
+        "bandwidth": "100 GB/月（软限制）",
+        "builds": "10 次/小时（软限制）",
+        "custom_domain": "包含"
+      },
+      "custom_domain": {
+        "supported": true,
+        "methods": [
+          "CNAME",
+          "A"
+        ],
+        "notes": "子域用 CNAME，apex 用 A；仓库内 CNAME 文件；启用 Enforce HTTPS"
+      },
+      "mainland_china_risk": {
+        "default_subdomain": "unstable",
+        "custom_domain_improves": "partial",
+        "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
+        "notes": "*.github.io 在中国大陆访问不稳定，部分网络环境不可达"
+      },
+      "migration_notes": {
+        "base_path": "项目站默认 /<repo>/；绑定自定义域后可改为 /；迁移到其他平台时移除仓库名前缀",
+        "redirects": "没有 _redirects；只能用 404.html 或 meta refresh，能力有限",
+        "headers": "不支持自定义响应头",
+        "platform_features": [
+          "GitHub Actions 部署",
+          "CNAME 文件",
+          "deploy branch",
+          "Jekyll 内置构建"
+        ],
+        "exit": "Settings → Pages → Source 设为 None 停止发布，仓库和回滚能力保留"
+      },
+      "best_for": "公开仓库的文档、博客、项目主页；已有 GitHub 工作流且不需要大陆稳定访问",
+      "not_for": "敏感交易、商业 SaaS 主站、需要服务端逻辑或精细重定向 / 响应头的项目",
+      "limits": "只能静态；base path、重定向和响应头能力有限",
+      "sources": [
+        "https://docs.github.com/en/pages"
+      ],
+      "family": "github",
+      "order": 20,
+      "selection_pools": [
+        "static"
+      ],
+      "paid_only": false,
+      "commercial_use": "caution",
+      "commercial_use_note": "公开仓库免费；不适合敏感交易或商业 SaaS 主站，以官方条款为准",
+      "render_notes": "只托管静态文件；SPA 深链依赖 404.html"
+    },
+    {
+      "id": "cloudflare-workers",
+      "name": "Cloudflare Workers",
+      "core": false,
+      "family": "cloudflare",
+      "product": "workers",
+      "order": 25,
+      "type": "fullstack",
+      "selection_pools": [
+        "ssr"
+      ],
+      "paid_only": false,
+      "commercial_use": "allowed",
+      "commercial_use_note": "免费层可用于商业项目；Paid $5/月起；以官方条款为准",
+      "render_notes": "支持静态资源、SSR、API；SSR 需框架适配器 / OpenNext；与 Pages 不是同一个产品",
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
+      "free_tier_key_points": [
+        "100,000 请求/天（Free）",
+        "静态资源请求不计费",
+        "Paid $5/月起，1000 万请求/月"
+      ],
+      "free_tier_limits": {
+        "requests_free": "100000/天",
+        "requests_paid": "1000 万/月",
+        "cpu_free": "10 ms/请求",
+        "cpu_paid": "3000 万 CPU 毫秒/月，单次默认 30 秒",
+        "worker_size": "64 MiB（未压缩）",
+        "env_vars": "Free 64 / Paid 128",
+        "subrequests": "Free 50 / Paid 1000",
+        "static_assets": "静态资源请求不计费"
+      },
+      "custom_domain": {
+        "supported": true,
+        "methods": [
+          "nameserver"
+        ],
+        "notes": "自定义域名要求域名 NS 在 Cloudflare；Workers 没有外部 CNAME 路径"
+      },
+      "mainland_china_risk": {
+        "default_subdomain": "usually_reachable",
+        "custom_domain_improves": "partial",
+        "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
+        "notes": "*.workers.dev 通常可达性更好，但不是中国大陆合规托管"
+      },
+      "migration_notes": {
+        "base_path": "静态资源按 / 配置；SSR / API 由 Worker 处理",
+        "redirects": "Workers Static Assets 的重定向支持与 Pages 不完全相同，以 Workers 文档为准",
+        "headers": "Workers Static Assets 的 headers 支持以文档为准；CORS 在 Worker 代码处理",
+        "platform_features": [
+          "Workers Static Assets",
+          "OpenNext / vinext",
+          "D1 / KV / R2 / DO / Queues / Cron",
+          "Workers Builds"
+        ],
+        "exit": "删除 Worker 前导出 wrangler 配置、绑定和环境变量键名"
+      },
+      "best_for": "新 SSR / 全栈、Next.js + OpenNext、API、需要 D1 / DO / Queues / Cron 的项目、已有 Workers 配置",
+      "not_for": "纯静态且想用 Pages 零配置 Git 集成的项目；现有 Pages 健康且无 Workers 需求；长驻 Docker 进程",
+      "limits": "请求级运行时；Free CPU 10ms；无长驻进程；自定义域名要求 NS 在 Cloudflare",
+      "sources": [
+        "https://developers.cloudflare.com/workers/",
+        "https://developers.cloudflare.com/workers/platform/limits/",
+        "https://developers.cloudflare.com/workers/platform/pricing/"
+      ]
     },
     {
       "id": "vercel-hobby",
       "name": "Vercel Hobby",
       "core": true,
       "type": "frontend-plus-functions",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "100 GB 传输/月",
         "200 个项目",
@@ -111,33 +244,133 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME", "A", "nameserver"],
+        "methods": [
+          "CNAME",
+          "A",
+          "nameserver"
+        ],
         "notes": "子域用 CNAME；apex 用 A 或 Vercel 提示的 nameserver；按项目 Domains 提示操作"
       },
       "mainland_china_risk": {
         "default_subdomain": "dns_polluted",
         "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
         "notes": "*.vercel.app 默认域名在中国大陆已被 DNS 污染，直接访问通常超时；绑定自定义域名可能改善，但 Vercel 官方不保证中国大陆的可用性或性能"
       },
       "migration_notes": {
         "base_path": "Next.js 用 basePath；从 GitHub Pages 迁入时移除仓库名前缀",
         "redirects": "vercel.json 的 redirects / rewrites；不是 _redirects",
         "headers": "vercel.json 的 headers",
-        "platform_features": ["Next.js 原生适配", "Serverless / Edge Functions", "预览部署", "自动 promote"],
+        "platform_features": [
+          "Next.js 原生适配",
+          "Serverless / Edge Functions",
+          "预览部署",
+          "自动 promote"
+        ],
         "exit": "单仓库“源-部署分离”时自动 promote 可能异常，必要时重新导入仓库恢复自动更新；删除前导出环境变量键名和域名配置"
       },
       "best_for": "Next.js / SSR 低摩擦、海外个人项目",
       "not_for": "商业用途（Hobby 仅个人非商业）、大陆稳定访问、需要长期运行服务",
       "limits": "Hobby 仅个人非商业；默认域名大陆不可用；不适合长期运行服务",
-      "sources": ["https://vercel.com/docs/limits"]
+      "sources": [
+        "https://vercel.com/docs/limits"
+      ],
+      "family": "vercel",
+      "plan": "hobby",
+      "order": 30,
+      "selection_pools": [
+        "static",
+        "ssr"
+      ],
+      "paid_only": false,
+      "commercial_use": "not_allowed",
+      "commercial_use_note": "Hobby 仅个人非商业；商业项目改用 Pro 或其他平台",
+      "render_notes": "Next.js / SSR 适配成熟；Functions / Edge 有额度限制"
+    },
+    {
+      "id": "vercel-pro",
+      "name": "Vercel Pro",
+      "core": false,
+      "family": "vercel",
+      "plan": "pro",
+      "order": 35,
+      "type": "frontend-plus-functions",
+      "selection_pools": [
+        "static",
+        "ssr"
+      ],
+      "paid_only": true,
+      "commercial_use": "allowed",
+      "commercial_use_note": "Pro 允许商业使用；$20/月起；以官方条款为准",
+      "render_notes": "Next.js / SSR 适配成熟；Functions / Edge 额度高于 Hobby；不是长期运行服务",
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
+      "free_tier_key_points": [
+        "$20/月起",
+        "商业使用允许",
+        "团队协作与更高额度"
+      ],
+      "free_tier_limits": {
+        "free_tier": "无",
+        "starting_price": "$20/月起",
+        "commercial_use": "允许"
+      },
+      "custom_domain": {
+        "supported": true,
+        "methods": [
+          "CNAME",
+          "A",
+          "nameserver"
+        ],
+        "notes": "子域用 CNAME；apex 用 A 或 Vercel 提示的 nameserver；按项目 Domains 提示操作"
+      },
+      "mainland_china_risk": {
+        "default_subdomain": "dns_polluted",
+        "custom_domain_improves": "partial",
+        "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
+        "notes": "*.vercel.app 默认域名在中国大陆已被 DNS 污染，直接访问通常超时；绑定自定义域名可能改善，但 Vercel 官方不保证中国大陆的可用性或性能"
+      },
+      "migration_notes": {
+        "base_path": "Next.js 用 basePath；从 GitHub Pages 迁入时移除仓库名前缀",
+        "redirects": "vercel.json 的 redirects / rewrites；不是 _redirects",
+        "headers": "vercel.json 的 headers",
+        "platform_features": [
+          "Next.js 原生适配",
+          "Serverless / Edge Functions",
+          "预览部署",
+          "团队协作"
+        ],
+        "exit": "删除项目或降级 Pro 前导出环境变量键名和域名配置"
+      },
+      "best_for": "商业 SSR / 全栈、团队协作、超出 Hobby 限制",
+      "not_for": "只考虑免费额度的项目；需要长期运行服务或大陆稳定访问",
+      "limits": "$20/月起；默认域名大陆风险与 Hobby 相同；不是长期运行服务",
+      "sources": [
+        "https://vercel.com/pricing",
+        "https://vercel.com/docs/limits"
+      ]
     },
     {
       "id": "netlify-free",
       "name": "Netlify Free",
       "core": true,
       "type": "frontend-plus-functions",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "300 月度 credits",
         "自定义域名 + SSL",
@@ -152,33 +385,62 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME", "A", "nameserver"],
+        "methods": [
+          "CNAME",
+          "A",
+          "nameserver"
+        ],
         "notes": "子域用 CNAME；apex 用 Netlify DNS / nameserver 或 A 记录；自动 TLS"
       },
       "mainland_china_risk": {
         "default_subdomain": "often_unreachable",
         "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "observation",
+        "evidence_note": "社区与用户反馈；本仓库未保存可复现探测记录",
         "notes": "*.netlify.app 在中国大陆常无法直接访问"
       },
       "migration_notes": {
         "base_path": "构建产物按 / 生成；从 GitHub Pages 迁入时移除仓库名前缀",
         "redirects": "仓库根目录 netlify.toml 的 redirects，或产物根目录 _redirects",
         "headers": "netlify.toml 的 headers，或 _headers",
-        "platform_features": ["Deploy Previews", "Netlify Functions", "Netlify Forms", "Identity", "Split Testing"],
+        "platform_features": [
+          "Deploy Previews",
+          "Netlify Functions",
+          "Netlify Forms",
+          "Identity",
+          "Split Testing"
+        ],
         "exit": "删除站点前导出环境变量键名、域名和 Functions 配置"
       },
       "best_for": "需要 Deploy Previews、Forms / Functions、简单 Git 工作流的海外项目",
       "not_for": "大陆稳定访问、需要长期运行服务或数据库为主的项目",
       "limits": "默认域名大陆常不可达；SSR 需 Functions / Edge",
-      "sources": ["https://docs.netlify.com/"]
+      "sources": [
+        "https://docs.netlify.com/"
+      ],
+      "family": "netlify",
+      "order": 40,
+      "selection_pools": [
+        "static"
+      ],
+      "paid_only": false,
+      "commercial_use": "allowed",
+      "commercial_use_note": "免费层可用于商业项目；以官方条款为准",
+      "render_notes": "静态托管；SSR 需 Functions / Edge，另行评估"
     },
     {
       "id": "render-free",
       "name": "Render Free",
       "core": true,
       "type": "fullstack",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "免费静态站",
         "免费 Web Service（15 分钟无流量休眠）",
@@ -192,33 +454,63 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME", "A"],
+        "methods": [
+          "CNAME",
+          "A"
+        ],
         "notes": "子域用 CNAME；apex 用 A；按控制台提示操作"
       },
       "mainland_china_risk": {
         "default_subdomain": "unknown",
-        "custom_domain_improves": "unknown",
+        "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "unverified",
+        "evidence_note": "本仓库未保存中国大陆实测记录",
         "notes": "未实测；按海外托管默认风险处理，不承诺大陆稳定访问"
       },
       "migration_notes": {
         "base_path": "静态站 publish path 按 / 生成",
         "redirects": "render.yaml 或控制台的 Redirects / Rewrites；不是 _redirects",
         "headers": "render.yaml 的 headers（以官方支持为准）",
-        "platform_features": ["Static Sites", "Web Services", "Postgres", "Key Value", "Blueprint"],
+        "platform_features": [
+          "Static Sites",
+          "Web Services",
+          "Postgres",
+          "Key Value",
+          "Blueprint"
+        ],
         "exit": "删除服务前导出环境变量键名、磁盘和域名配置；免费 Web Service 会休眠"
       },
       "best_for": "需要 Web Service + Postgres + 静态站的一体化免费起步；可接受冷启动",
       "not_for": "要求常驻无冷启动、需要稳定大陆访问、需要复杂定时任务或长连接的项目",
       "limits": "免费 Web Service 15 分钟无流量休眠；大陆访问未实测",
-      "sources": ["https://render.com/docs/free"]
+      "sources": [
+        "https://render.com/docs/free"
+      ],
+      "family": "render",
+      "order": 50,
+      "selection_pools": [
+        "static",
+        "ssr",
+        "long-running"
+      ],
+      "paid_only": false,
+      "commercial_use": "allowed",
+      "commercial_use_note": "免费层可用于商业项目；以官方条款为准",
+      "render_notes": "静态站、Web Service、Postgres；免费 Web Service 15 分钟无流量休眠"
     },
     {
       "id": "railway",
       "name": "Railway",
       "core": false,
       "type": "fullstack",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "按量计费",
         "注册通常有试用额度",
@@ -230,33 +522,60 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME"],
+        "methods": [
+          "CNAME"
+        ],
         "notes": "按控制台提示绑定自定义域名"
       },
       "mainland_china_risk": {
         "default_subdomain": "unknown",
-        "custom_domain_improves": "unknown",
+        "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "unverified",
+        "evidence_note": "本仓库未保存中国大陆实测记录",
         "notes": "未实测；按海外托管默认风险处理"
       },
       "migration_notes": {
         "base_path": "按应用根路径",
         "redirects": "按应用或反向代理配置；没有统一 _redirects",
         "headers": "按应用或反向代理配置",
-        "platform_features": ["Docker / Nixpacks", "Volumes", "数据库模板", "按量计费"],
+        "platform_features": [
+          "Docker / Nixpacks",
+          "Volumes",
+          "数据库模板",
+          "按量计费"
+        ],
         "exit": "删除项目或服务前导出变量键名和卷信息"
       },
       "best_for": "Docker、长驻服务、数据库，愿意按量付费",
       "not_for": "完全免费静态站、大陆稳定访问",
       "limits": "按量计费，不承诺长期免费",
-      "sources": ["https://docs.railway.com/"]
+      "sources": [
+        "https://docs.railway.com/"
+      ],
+      "family": "railway",
+      "order": 60,
+      "selection_pools": [
+        "ssr",
+        "long-running"
+      ],
+      "paid_only": true,
+      "commercial_use": "allowed",
+      "commercial_use_note": "按量计费；以官方条款为准",
+      "render_notes": "Docker / 长驻服务；不承诺长期免费"
     },
     {
       "id": "fly-io",
       "name": "Fly.io",
       "core": false,
       "type": "fullstack",
-      "render_support": ["static", "ssg", "spa", "ssr", "api"],
+      "render_support": [
+        "static",
+        "ssg",
+        "spa",
+        "ssr",
+        "api"
+      ],
       "free_tier_key_points": [
         "按量计费",
         "免费额度随政策调整",
@@ -268,33 +587,58 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["A", "AAAA", "CNAME"],
+        "methods": [
+          "A",
+          "AAAA",
+          "CNAME"
+        ],
         "notes": "用 flyctl certs 管理证书；按控制台提示配置 DNS"
       },
       "mainland_china_risk": {
         "default_subdomain": "unknown",
-        "custom_domain_improves": "unknown",
+        "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "unverified",
+        "evidence_note": "本仓库未保存中国大陆实测记录",
         "notes": "未实测；按海外托管默认风险处理"
       },
       "migration_notes": {
         "base_path": "按应用根路径",
         "redirects": "按应用配置；没有统一 _redirects",
         "headers": "按应用配置",
-        "platform_features": ["Docker", "Volumes", "多区域", "flyctl"],
+        "platform_features": [
+          "Docker",
+          "Volumes",
+          "多区域",
+          "flyctl"
+        ],
         "exit": "删除应用前导出 secrets 键名和卷信息"
       },
       "best_for": "全球边缘部署、Docker、长驻服务",
       "not_for": "零运维静态站、完全免费、大陆合规",
       "limits": "按量计费，免费额度不承诺长期",
-      "sources": ["https://fly.io/docs/"]
+      "sources": [
+        "https://fly.io/docs/"
+      ],
+      "family": "fly",
+      "order": 70,
+      "selection_pools": [
+        "ssr",
+        "long-running"
+      ],
+      "paid_only": true,
+      "commercial_use": "allowed",
+      "commercial_use_note": "按量计费；以官方条款为准",
+      "render_notes": "Docker / 长驻服务；全球区域部署"
     },
     {
       "id": "supabase",
       "name": "Supabase",
       "core": false,
       "type": "database-auth",
-      "render_support": ["api"],
+      "render_support": [
+        "api"
+      ],
       "free_tier_key_points": [
         "免费 Postgres / Auth / Storage",
         "免费项目长期无活动可能暂停",
@@ -308,26 +652,47 @@
       },
       "custom_domain": {
         "supported": true,
-        "methods": ["CNAME"],
+        "methods": [
+          "CNAME"
+        ],
         "notes": "API / Auth 自定义域名通常为付费附加；前端域名由前端托管平台绑定"
       },
       "mainland_china_risk": {
         "default_subdomain": "unknown",
-        "custom_domain_improves": "unknown",
+        "custom_domain_improves": "partial",
         "stable": false,
+        "evidence_level": "unverified",
+        "evidence_note": "本仓库未保存中国大陆实测记录",
         "notes": "API 域名可达性未实测；前端仍取决于前端托管平台"
       },
       "migration_notes": {
         "base_path": "不托管前端；前端 base path 由托管平台决定",
         "redirects": "Auth redirect URLs 在 Supabase 控制台配置",
         "headers": "不适用",
-        "platform_features": ["Postgres", "Auth", "Storage", "RLS", "Edge Functions"],
+        "platform_features": [
+          "Postgres",
+          "Auth",
+          "Storage",
+          "RLS",
+          "Edge Functions"
+        ],
         "exit": "迁移前导出 schema / RLS / Storage 清单；不要直接删项目"
       },
       "best_for": "需要托管 Postgres + Auth + Storage，前端部署到任意静态平台",
       "not_for": "静态前端托管（不是它的职责）、中国大陆合规托管",
       "limits": "不托管前端；免费项目长期无活动可能暂停",
-      "sources": ["https://supabase.com/docs"]
+      "sources": [
+        "https://supabase.com/docs"
+      ],
+      "family": "supabase",
+      "order": 80,
+      "selection_pools": [
+        "database-auth"
+      ],
+      "paid_only": false,
+      "commercial_use": "allowed",
+      "commercial_use_note": "免费 / 付费套餐均可用于商业项目；以官方条款为准",
+      "render_notes": "不托管前端；提供 Postgres / Auth / Storage / API"
     }
   ]
 }

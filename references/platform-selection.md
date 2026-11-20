@@ -2,7 +2,16 @@
 
 核实日期：2026-11-14。价格和额度会变，引用前重新核对官方页面。
 
-> 平台层选型（GitHub Pages / Cloudflare Pages / Vercel / Netlify / Render 的首选 / 备选 / 不推荐）先走 SKILL.md 第 2 步和 `scripts/select-platform.mjs`；候选数据源是 `references/platform-matrix.json`。本文只负责 Cloudflare 家族内部的 Pages vs Workers。目标用户含中国大陆时，先读 `references/mainland-china-access.md`。
+> 平台层选型（GitHub Pages / Cloudflare Pages / Cloudflare Workers / Vercel / Netlify / Render 的首选 / 备选 / 不推荐）先走 SKILL.md 第 2 步和 `scripts/select-platform.mjs`；候选数据源是 `references/platform-matrix.json`。本文只负责 Cloudflare 家族内部的 Pages vs Workers。目标用户含中国大陆时，先读 `references/mainland-china-access.md`。
+>
+> 矩阵里 `cloudflare-pages` 与 `cloudflare-workers` 是两个独立条目：Pages 是静态托管 + Pages Functions；Workers 是 Workers Static Assets / SSR / API，不是 Pages 的别名。静态站默认 Pages；新 SSR / 全栈优先 Workers；已有 Pages 且 Functions 运行正常时不强制迁移。Vercel 也区分 Hobby 与 Pro，商业项目不能使用 Hobby。
+
+## 0. 矩阵数据与代码策略
+
+- **矩阵数据**：`references/platform-matrix.json` 记录平台能力、免费/付费额度、`render_support`、`selection_pools`、`commercial_use`、自定义域名、大陆风险证据等级和迁移说明。
+- **代码策略**：`platform-matrix.mjs` 保留五个核心平台、预算/使用性质/地域排序、既有部署保留、首选/备选/不推荐规则。不要把策略伪装成平台能力数据。
+- **新增平台**：在矩阵里加条目并声明 `selection_pools`（static / ssr / long-running / database-auth），校验和测试会覆盖；不再需要修改多份硬编码平台列表。
+- **能力边界**：`render_support` 只表示平台大类能力，不等于所有框架、运行时、数据库和依赖都兼容；实际项目仍要做运行时和构建验证。
 
 ## 1. 默认值已经变了
 
@@ -15,6 +24,8 @@ Cloudflare 的 Pages 文档顶部现在写着：
 - **新项目** → 默认推荐 Workers。
 - **已有 Pages 且运行正常** → 保留。Pages 仍在支持，官方文档没有强制迁移期限。
 - **纯静态站** → Workers 也能托管；Pages 仍然赢在零配置 Git 部署，以及 DNS 不在 Cloudflare 的子域。
+
+这里的“新项目默认 Workers”是 Cloudflare 对应用的官方建议；本技能的平台层对纯静态站仍默认 Pages，新 SSR / 全栈优先 Workers。两者不矛盾：先按渲染模式和后端需求选产品，再按免费层和 Git 集成做取舍。
 
 不要把“纯静态 → Pages”说成平台规则。它只是一个取舍。
 

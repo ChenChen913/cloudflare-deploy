@@ -26,7 +26,9 @@ const PROJECT_TYPES = ["static", "ssg", "spa", "ssr", "fullstack"];
 const PLATFORM_ALIASES = {
   "github-pages": "github-pages",
   "cloudflare-pages": "cloudflare-pages",
+  "cloudflare-workers": "cloudflare-workers",
   vercel: "vercel-hobby",
+  "vercel-pro": "vercel-pro",
   netlify: "netlify-free",
   render: "render-free",
 };
@@ -35,7 +37,9 @@ const MIGRATION_PLATFORMS = Object.keys(PLATFORM_ALIASES);
 const IMPORT_ACTIONS = {
   "github-pages": "推送到部署分支，或走 GitHub Actions 发布",
   "cloudflare-pages": "Cloudflare Dashboard → Workers & Pages → Create application → Pages → Import an existing Git repository；填写构建命令和输出目录；或使用 wrangler pages deploy",
+  "cloudflare-workers": "使用 wrangler 部署 Worker，或 Workers Builds 导入仓库；确认静态资源、SSR 入口和绑定，不要把 Workers 配置当成 Pages",
   vercel: "在 Vercel 导入同一仓库，或使用 vercel CLI；先确认框架预设和输出目录",
+  "vercel-pro": "在 Vercel 导入同一仓库，确认项目已升级到 Pro；商业用途不要回到 Hobby",
   netlify: "在 Netlify 导入同一仓库，或使用 netlify deploy；构建配置写在 netlify.toml",
   render: "在 Render 导入同一仓库或使用 Blueprint；静态站选 Static Site，常驻服务选 Web Service",
 };
@@ -159,29 +163,29 @@ function supportStatus(target, mode) {
 function precheckItems({ source, target, projectType, mode, buildCommand, outputDir, envKeys, domain, dnsProvider, retainDays, support }) {
   const pending = "pending";
   const envDetail = envKeys.length
-    ? `已记录 ${envKeys.length} 个键名：${envKeys.join("、")}；不读取、不写入键值`
+    ? `已记录 ${envKeys.length} 个键名：${envKeys.join("、")}；仅代表清单已提供，不代表目标平台已配置`
     : "尚未提供环境变量键名；只记录键名，不读取值";
   return [
     {
       id: "build",
       label: "构建命令与输出目录",
-      status: buildCommand && outputDir ? "confirmed" : pending,
+      status: buildCommand || outputDir ? "provided" : pending,
       detail: buildCommand || outputDir
-        ? `构建：${buildCommand || "未提供"}；输出：${outputDir || "未提供"}`
+        ? `已提供构建：${buildCommand || "未提供"}；输出：${outputDir || "未提供"}；尚未在目标平台构建验证`
         : "需要源平台实际构建命令和输出目录；不要用目标平台默认值代替",
     },
     {
       id: "env",
       label: "环境变量键名",
-      status: envKeys.length ? "confirmed" : pending,
+      status: envKeys.length ? "provided" : pending,
       detail: envDetail,
     },
     {
       id: "domain",
       label: "自定义域名与 DNS",
-      status: pending,
+      status: domain ? "provided" : pending,
       detail: domain
-        ? `域名：${domain}；DNS 提供商：${dnsProvider || "未提供"}；切换前必须确认 TTL 和记录`
+        ? `已提供域名：${domain}；DNS 提供商：${dnsProvider || "未提供"}；DNS 记录和 TTL 尚未核实`
         : "尚未提供自定义域名和 DNS 提供商；切换前必须确认",
     },
     {
@@ -199,15 +203,15 @@ function precheckItems({ source, target, projectType, mode, buildCommand, output
     {
       id: "retention",
       label: "回滚保留时长",
-      status: "confirmed",
-      detail: `源平台至少保留 ${retainDays} 天；关键业务建议 2–4 周`,
+      status: "provided",
+      detail: `计划保留 ${retainDays} 天；这是计划值，不是验证结果；关键业务建议 2–4 周`,
     },
     {
       id: "target_support",
       label: "目标平台渲染支持",
-      status: support === "supported" ? "confirmed" : support === "unsupported" ? "blocked" : pending,
+      status: support === "supported" ? "inferred" : support === "unsupported" ? "blocked" : pending,
       detail: support === "supported"
-        ? `${target.name} 的矩阵声明支持 ${mode}；仍需用目标预览验证`
+        ? `${target.name} 的矩阵声明支持 ${mode}；这是矩阵推断，仍需用目标预览验证`
         : support === "unsupported"
           ? `${target.name} 的矩阵未声明支持 ${mode}；不要直接迁移，先换平台或改用 Functions / Edge / Workers 并另行评估`
           : "目标平台不在矩阵中，无法自动判断渲染支持；按目标平台文档人工确认",
@@ -276,6 +280,18 @@ function buildTips({ source, target, support, projectType }) {
   if (source.id === "github-pages" && target.id === "vercel") {
     tips.push("GitHub Pages → Vercel：导入同一仓库，修正 GitHub Pages 需要的 base path；自定义域名按 Vercel 提示的 DNS 记录迁移；重定向放在 vercel.json。");
   }
+  if (source.id === "cloudflare-pages" && target.id === "cloudflare-workers") {
+    tips.push("Pages → Workers：Pages 的 _redirects / _headers 与 Workers Static Assets 不完全等价；重新核对 wrangler 配置、绑定、SSR 入口和自定义域名要求。");
+  }
+  if (source.id === "cloudflare-workers" && target.id === "cloudflare-pages") {
+    tips.push("Workers → Pages：确认项目不再依赖 Workers 的 D1 / DO / Queues / Cron；Pages Functions 不能替代全部 Workers 能力。");
+  }
+  if (source.id === "vercel" && target.id === "vercel-pro") {
+    tips.push("Vercel Hobby → Pro：商业用途必须升级；确认计费、团队席位和 Functions 额度，不要把 Hobby 的非商业限制带到生产。");
+  }
+  if (source.id === "vercel-pro" && target.id === "vercel") {
+    tips.push("Vercel Pro → Hobby：确认项目确实是个人非商业；商业项目不要降级到 Hobby。");
+  }
   if (target.id === "netlify") {
     tips.push("任意平台 → Netlify：在仓库根目录创建 netlify.toml 管理构建配置，不要只依赖面板设置；重定向和 headers 也写进配置。");
   }
@@ -290,6 +306,9 @@ function buildTips({ source, target, support, projectType }) {
   }
   if (target.id === "cloudflare-pages" && ["ssr", "fullstack"].includes(projectType)) {
     tips.push("Cloudflare Pages 的 SSR / API 依赖 Pages Functions 或框架适配器；新 SSR 项目优先 Workers + vinext / OpenNext，不要把 Pages 当纯静态上传。");
+  }
+  if (target.id === "cloudflare-workers" && ["ssr", "fullstack"].includes(projectType)) {
+    tips.push("Cloudflare Workers 的 SSR 需要框架适配器 / OpenNext；不要复制 Pages Functions 配置，也不要把 Workers 当成 Pages 的别名。");
   }
   if (target.id === "netlify" && ["ssr", "fullstack"].includes(projectType)) {
     tips.push("Netlify 的 SSR 依赖 Functions / Edge；纯静态托管不适用，需另行评估运行时和额度。");
@@ -371,8 +390,10 @@ export function buildMigrationPlan({
   if (support === "unsupported") questions.push("是否改用支持该渲染模式的平台，或在目标平台用 Functions / Edge / Workers 承载？");
 
   const blocked = precheck.some((item) => item.status === "blocked");
-  const pending = precheck.some((item) => item.status === "pending");
-  const status = blocked ? "blocked" : pending ? "needs_input" : "ready";
+  // 本脚本只做计划和清单，不执行构建、DNS 或部署验证；provided / inferred / pending
+  // 都不等于 verified。ready 只有在所有适用项都实际验证通过后才可能出现。
+  const allVerified = precheck.every((item) => item.status === "verified" || item.status === "not_applicable");
+  const status = blocked ? "blocked" : allVerified ? "ready" : "needs_input";
   const plan = {
     schemaVersion: SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
@@ -440,6 +461,8 @@ export function renderMigrationReport(plan) {
 | 检查项 | 状态 | 证据 / 备注 |
 |---|---|---|
 ${precheckRows}
+
+状态定义：provided = 用户提供，尚未验证；inferred = 从配置或矩阵推断；verified = 实际构建 / 探测 / 配置检查通过；pending = 尚未确认；blocked = 存在阻断；not_applicable = 不适用。
 
 ## 双活与验收
 

@@ -1,16 +1,16 @@
 ---
 name: cloudflare-deploy
-description: 把程序项目部署或迁移到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render 的多平台决策与执行技能，也覆盖 Java/Python/PHP/Ruby/.NET、容器或前后端混合项目的路线判断。当用户要求部署、托管、迁移、选择平台，判断项目适合哪个平台，比较 Cloudflare Pages / Workers 或 Vercel / Netlify / Render / GitHub Pages，检查部署后的页面/路由/静态资源/CORS/索引，或排查部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目，给出部署适配度评分与首选/备选/不推荐建议，并强制提示中国大陆访问风险；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
+description: 把程序项目部署或迁移到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render 的多平台决策与执行技能，也覆盖 Java/Python/PHP/Ruby/.NET、容器或前后端混合项目的路线判断。当用户要求部署、托管、迁移、选择平台，判断项目适合哪个平台，比较 Cloudflare Pages / Workers 或 Vercel / Netlify / Render / GitHub Pages，检查部署后的页面/路由/静态资源/CORS/索引，或排查部署失败时使用。先用链路探针确认账号与网络、判定技术可行性，再只读识别项目，给出部署适配度评估与首选/备选/不推荐建议，并强制提示中国大陆访问风险；对不可逆或影响生产的操作先征求确认；部署到预览地址后用真实 HTTP 请求验收，并在报告中区分“已验证 / 失败 / 未验证”。
 agent_created: true
 ---
 
 # 多平台部署决策与 Cloudflare 执行
 
-把一个程序项目变成一次**经过验证**的部署。顺序是：**先验证链路与可行性** → 只读识别项目 → 部署适配度评分 → 平台筛选 → 选型 → 网络与进阶引导 → 写计划 → 部署到预览地址 → 用真实请求验收 → 迁移检查（如适用）→ 写报告。前提不成立就停下来，不要靠「先构建一下看看」去发现问题。
+把一个程序项目变成一次**经过验证**的部署。顺序是：**先验证链路与可行性** → 只读识别项目 → 部署适配度评估 → 平台筛选 → 选型 → 网络与进阶引导 → 写计划 → 部署到预览地址 → 用真实请求验收 → 迁移检查（如适用）→ 写报告。前提不成立就停下来，不要靠「先构建一下看看」去发现问题。
 
 > **能力边界（先读这条）**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当作**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容），数据库写入、登录会话、第三方回调仍需专项验证。运行时兼容性、套餐与成本见 `references/runtime-compat.md`；**Java/Python/PHP/Ruby/.NET 或前后端混合项目**先在 `references/tech-stack-fit.md` 判断路线，不要假设所有技术栈都能用本技能的脚本完整验收。
 >
-> 多平台部分提供**适配度评分、候选筛选和大陆访问风险提示**。非 Cloudflare 平台的部署默认输出人工步骤，不声称自动完成；GitHub Pages、Vercel、Netlify、Render 的账号权限、DNS、运行时和数据库仍需按平台官方流程验证。
+> 多平台部分提供**适配度评估、候选筛选和大陆访问风险提示**。非 Cloudflare 平台的部署默认输出人工步骤，不声称自动完成；GitHub Pages、Vercel、Netlify、Render 的账号权限、DNS、运行时和数据库仍需按平台官方流程验证。
 
 ## 一、先决条件
 
@@ -35,7 +35,7 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 
 详细前提、Token 权限、Account ID：`references/prerequisites.md`。
 
-非 Cloudflare 平台按需准备账号，不要求一次全部开通：GitHub（GitHub Pages）、Vercel、Netlify、Render。选择哪个平台，先在部署适配度评分里确认；不要为了“都试一遍”注册全部平台。
+非 Cloudflare 平台按需准备账号，不要求一次全部开通：GitHub（GitHub Pages）、Vercel、Netlify、Render。选择哪个平台，先在部署适配度评估里确认；不要为了“都试一遍”注册全部平台。
 
 ## 二、控制台路径
 
@@ -106,8 +106,8 @@ Cloudflare 免费计划注册流程只要求邮箱、密码和邮箱验证，官
 | 用户意图 | 做什么 |
 |---|---|
 | “部署到 Cloudflare” / “迁移这个仓库” | 完整流程，第 0–7 步；如果项目不是 JS/TS 或前后端混合，第 2 步先读 `references/tech-stack-fit.md` |
-| “这个项目适合哪个平台 / 多平台怎么选” | 只做第 1–2 步（识别 + 适配度评分 + 选型），给首选 / 备选 / 不推荐，不部署 |
-| “部署到 Vercel / Netlify / Render / GitHub Pages” | 第 0–2 步评分选型，再给该平台的人工部署步骤和第 6 步验收；不声称自动部署 |
+| “这个项目适合哪个平台 / 多平台怎么选” | 只做第 1–2 步（识别 + 适配度评估 + 选型），给首选 / 备选 / 不推荐，不部署 |
+| “部署到 Vercel / Netlify / Render / GitHub Pages” | 第 0–2 步评估选型，再给该平台的人工部署步骤和第 6 步验收；不声称自动部署 |
 | “Pages 还是 Workers？” | 只做第 1–2 步；先给平台层结论，再按第 2.5 步的三问定 Cloudflare 产品 |
 | “大陆访问不稳定 / 要不要备案” | 第 2.3 步 + `references/mainland-china-access.md`；给两条路线和验证方法 |
 | “Java/Python/PHP 项目能部署吗 / 前后端怎么拆” | 只做第 1–2 步；先给路线初判（Workers / Containers / 外部后端），再列阻塞项和未验证项，不承诺自动部署 |
@@ -165,28 +165,28 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 
 `detect-project.mjs` 的识别范围以 JS/静态生态为主；如果仓库里还有 `pom.xml`/`build.gradle*`、`requirements.txt`/`pyproject.toml`、`composer.json`、`Gemfile`、`*.csproj`、`Dockerfile`，不要因为脚本只报了前端就断定整个项目是静态站——按 `references/tech-stack-fit.md` 先判断后端/容器路线。
 
-### 2. 部署适配度评分与平台选型
+### 2. 部署适配度评估与平台选型
 
-选型分两层：先选平台层的首选 / 备选 / 不推荐，再在 Cloudflare 家族内部选 Pages / Workers。先问四个问题：目标用户在哪（海外 / 含大陆 / 未明确）、有没有后端和数据库（无 / Serverless / PostgreSQL + Auth + Storage / 长期运行）、预算（免费 / 付费）、现有部署是否健康。“未明确”按含大陆处理；`unknown` 要问，不猜。现有部署健康时，首选“保留现平台”。
+选型分两层：先选平台层的首选 / 备选 / 不推荐，再在 Cloudflare 家族内部选 Pages / Workers。先确认：目标用户在哪（海外 / 含大陆 / 未明确）、有没有后端和数据库（无 / Serverless / PostgreSQL + Auth + Storage / 长期运行）、预算（免费 / 付费）、使用性质（个人非商业 / 商业 / 未知）、现有部署平台和是否健康。“未明确”按含大陆处理；`unknown` 要问，不猜。现有部署健康时，首选“保留现平台”。
 
-#### 2.1 四维评分
+#### 2.1 四维适配度评估
 
 | 维度 | 结论 |
 |---|---|
-| A 渲染模式 | 纯静态 / SSG / SPA → 五平台全候选；SSR / 全栈 → 排除 GitHub Pages 和 Netlify 纯静态托管，优先 Vercel / Cloudflare Workers / Render / Railway / Fly.io |
+| A 渲染模式 | 纯静态 / SSG / SPA → 五个核心平台候选；SSR / 全栈 / API → 排除 GitHub Pages 和 Netlify 纯静态托管，优先 Cloudflare Workers / Vercel / Render / Railway / Fly.io；Pages 仅已有 Functions 或明确选择时保留 |
 | B 后端与数据库 | 无后端 → 静态优先；PostgreSQL / Auth / Storage → Supabase 后端，前端仍可静态；长期运行 / Docker → Render / Railway / Fly.io |
-| C 用户地域 | 海外 → Cloudflare Pages / Vercel / Netlify 均可；含大陆或未明确 → 必须输出大陆风险提示 |
-| D 预算 | 免费优先 → 首推 Cloudflare Pages；愿意付费 → Workers Paid 或 Vercel Pro |
+| C 用户地域 | 海外 → Cloudflare Pages / Vercel / Netlify 均可；含大陆或未明确 → 必须输出大陆风险提示，并标注证据等级 |
+| D 预算与使用性质 | 免费优先 → 首推 Cloudflare Pages；愿意付费 → Workers Paid 或 Vercel Pro；商业项目不使用 Vercel Hobby |
 
-排除必须写原因。核心平台固定五个：GitHub Pages、Cloudflare Pages、Vercel Hobby、Netlify Free、Render Free；扩展池按需：Railway、Fly.io、Supabase、国内云 / 备案托管。候选与排除由 `references/platform-matrix.json` 驱动；矩阵字段至少包含 type、render_support、free_tier_key_points、custom_domain、mainland_china_risk、migration_notes、best_for、not_for，引用前看 `checked_at`。Cloudflare Pages 能承载 SSR / API 是因为 Functions / 适配器；新 SSR 项目仍优先 Workers。
+排除必须写原因。核心平台固定五个：GitHub Pages、Cloudflare Pages、Vercel Hobby、Netlify Free、Render Free；扩展池按需：Cloudflare Workers、Vercel Pro、Railway、Fly.io、Supabase、国内云 / 备案托管。候选与排除由 `references/platform-matrix.json` 驱动；矩阵字段至少包含 type、render_support、selection_pools、free_tier_key_points、custom_domain、commercial_use、mainland_china_risk、migration_notes、best_for、not_for，引用前看 `checked_at`。**这不是数值评分。** 四维只给判断结果、证据来源和置信度；硬性不兼容、商业使用限制和套餐要求单独标 `blocked` 或明确警告，不能被综合分数掩盖。Cloudflare Pages 与 Workers 是两个独立产品：Pages 是静态托管 + Pages Functions；Workers 是 Workers Static Assets / SSR / API，新 SSR / 全栈优先 Workers。
 
 #### 2.2 选型输出
 
-给出 1 个首选、1–2 个备选、1–2 个不推荐。每个平台附理由、免费额度关键点、适合场景、主要限制；含大陆时再附默认域名风险。示例：首选 Cloudflare Pages（免费、静态带宽无限）；备选 GitHub Pages（已有仓库且不需要大陆稳定访问）；不推荐 Vercel 默认域名（大陆 DNS 污染）。
+给出 1 个首选、1–2 个备选、1–2 个不推荐。每个平台附理由、免费额度关键点、适合场景、主要限制；含大陆时再附默认域名风险和证据等级。示例：首选 Cloudflare Pages（免费、静态带宽无限）；备选 GitHub Pages（已有仓库且不需要大陆稳定访问）；不推荐 Vercel Hobby（大陆默认域名风险，且仅个人非商业）。
 
 #### 2.3 中国大陆访问风险
 
-只要目标用户含中国大陆，或未明确说“只面向海外”，必须输出以下提示，不得折叠、省略或只放在报告末尾：
+只要目标用户含中国大陆，或未明确说“只面向海外”，必须输出以下提示，不得折叠、省略或只放在报告末尾。以下是网络观测结论，不是平台官方声明；本仓库没有保存大陆实测数据：
 
 - Vercel 的 `*.vercel.app` 默认域名在中国大陆已被 DNS 污染，直接访问通常超时；绑定自定义域名可能改善，但 Vercel 官方明确不保证中国大陆的可用性或性能。
 - GitHub Pages 的 `*.github.io` 在中国大陆访问不稳定，部分网络环境不可达。
@@ -196,11 +196,11 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 
 报告单独用一节输出路线 A（海外托管 + 自定义域名 + 自托管关键资源，承认可能被限速 / 阻断）和路线 B（ICP 备案 + 国内云 / CDN）。详见 `references/mainland-china-access.md`。
 
-#### 2.4 评分脚本
+#### 2.4 评估脚本
 
-`node "<技能目录>/scripts/select-platform.mjs" --project "<JSON 或目录>" --audience mainland --budget free --human`
+`node "<技能目录>/scripts/select-platform.mjs" --project "<JSON 或目录>" --audience mainland --budget free --usage personal_noncommercial --existing none --human`
 
-退出码 `0` 有结论、`1` 信息不足或矩阵不可用、`2` 用法错误；只读、不访问网络、不写项目文件。脚本读取平台矩阵；矩阵校验、筛选和排序的纯函数在 `platform-matrix.mjs`。脚本给的是候选和理由，不是部署保证。
+退出码 `0` 有结论、`1` 信息不足或矩阵不可用、`2` 用法错误；只读、不访问网络、不写项目文件。脚本读取平台矩阵；矩阵校验、筛选和排序的纯函数在 `platform-matrix.mjs`。输出包含四维判断、使用性质、现有部署、候选和理由；不是部署保证。商业项目必须传 `--usage commercial`，否则 Hobby 不会被当作首选。
 
 #### 2.5 Cloudflare 家族内部：Pages 还是 Workers
 
@@ -208,7 +208,7 @@ Monorepo 里如果有多个应用，脚本只会列出 `project.workspaces`；�
 
 ### 3. 写部署计划
 
-填 `templates/deployment-plan.md`。保持一屏以内：可行性结论、当前架构、部署适配度评分、目标平台与成本档、部署方式、构建环境、要改的文件、命令、环境变量/密钥、数据/文件/API 影响、GitHub Pages 取舍、中国大陆访问风险、风险、**止损线**、回滚。
+填 `templates/deployment-plan.md`。保持一屏以内：可行性结论、当前架构、部署适配度评估、目标平台与成本档、部署方式、构建环境、要改的文件、命令、环境变量/密钥、数据/文件/API 影响、GitHub Pages 取舍、中国大陆访问风险、风险、**止损线**、回滚。
 
 低风险且符合用户请求时，可以直接继续。碰到下面任何一项，**停下来问**：
 
@@ -315,15 +315,16 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 ### 7. 写报告
 
-填 `templates/deployment-report.md`。包含：部署地址、目标平台、适配度评分、选型理由、中国大陆访问风险（如适用）、迁移路径（如适用）、方式、改动文件、每项检查的 通过/失败/未验证、遗留问题、GitHub Pages 状态、回滚方式。迁移场景可用 `templates/migration-report.md`。没测过的写 **未验证** 和原因。
+填 `templates/deployment-report.md`。包含：部署地址、目标平台、适配度评估、选型理由、中国大陆访问风险（如适用）、迁移路径（如适用）、方式、改动文件、每项检查的 通过/失败/未验证、遗留问题、GitHub Pages 状态、回滚方式。迁移场景可用 `templates/migration-report.md`。没测过的写 **未验证** 和原因。
 
 ## 五、必须遵守的判断
 
 - **Cloudflare 链路 blocked 就不往下走。** 环境问题先于工程问题，构建成功不等于能上线。非 Cloudflare 目标只把网络 / Git 失败当作阻断；probe 的 Cloudflare API / 登录失败只说明 Cloudflare 路径不可用，不能解释成所有平台都不可部署。
-- **评分不是可行性结论。** 适配度评分只回答“哪类平台更合适”，不能替代 probe、运行时可行性判定和账号检查；`unknown` 要问，不要猜。
+- **评估不是可行性结论。** 适配度评估只回答“哪类平台更合适”，不能替代 probe、运行时可行性判定和账号检查；`unknown` 要问，不要猜。
 - **含大陆或未明确地域时必须输出完整大陆风险提示。** 不得折叠、省略或只放在报告末尾；自定义域名只能缓解，不能保证稳定。
 - **不读取、不写入密钥值。** 只记环境变量键名；DNS、自定义域名、数据库和删除操作没有用户确认就不执行。
 - **现有部署健康时优先不迁移。** 没有具体问题、没有验收方案、没有回滚方案的迁移，首选结论应是保留现平台。
+- **商业项目不得使用 Vercel Hobby。** Hobby 仅个人非商业；商业项目用 Pro 或允许商业用途的平台。Pages 与 Workers 是独立产品，不能把 Pages 的 SSR 理由写成 Workers。
 - **迁移先双活。** 目标预览未通过验收，不切 DNS、不删源平台；DNS / 域名 / 数据库 / 删除必须确认。
 - **允许得出「不建议迁移」的结论。** 运行时硬冲突时，给换依赖 / 换方案 / 换平台的代价，别闷头试。
 - **本地 `wrangler dev` 跑通 ≠ 线上跑通。** 体积上限、TLS/TCP、冷启动、真实 Secrets、本地数据库都不同。
@@ -359,7 +360,7 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 - **静态资源 404** → 构建里写死了 `/repo/`；用 `/` 重新构建。
 - **自定义域名 522 / 证书 pending** → 域名没有先在 Pages 添加、DNS 顺序错误、CAA 阻止签发。
 - **CORS 报错** → 查重复 ACAO、`*` 配凭证、缺 `Vary: Origin`、Functions 没处理 `OPTIONS`。
-- **非 Cloudflare 平台部署失败** → 按该平台构建日志和官方文档排查；本技能的脚本只做评分和 HTTP 验收，不声称自动部署。不要用 Cloudflare 的 `_headers` / `_redirects` 规则解释其他平台。
+- **非 Cloudflare 平台部署失败** → 按该平台构建日志和官方文档排查；本技能的脚本只做评估和 HTTP 验收，不声称自动部署。不要用 Cloudflare 的 `_headers` / `_redirects` 规则解释其他平台。
 
 ## 七、参考资料
 
@@ -371,9 +372,9 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 | `references/console-paths.md` | 登录后各功能在控制台的路径 |
 | `references/cross-platform.md` | Windows / macOS / Linux / WSL / 容器 / CI 的差异 |
 | `references/platform-selection.md` | 选 Pages 还是 Workers、域名限制、Git 集成 |
-| `references/platform-matrix.json` | 平台能力矩阵数据源：5 核心 + 3 扩展，带 `checked_at` 和官方来源 |
+| `references/platform-matrix.json` | 平台能力矩阵数据源：5 核心 + 5 扩展/计划，带 `checked_at` 和官方来源 |
 | `references/mainland-china-access.md` | 中国大陆访问风险、默认域名表现、两条路线、验证方法 |
-| `references/cross-platform-migration.md` | 五平台迁移手册、双活五步、平台提示、安全门、报告字段 |
+| `references/cross-platform-migration.md` | 多平台迁移手册、双活五步、平台提示、安全门、报告字段 |
 | `references/custom-domain-guide.md` | 域名购买、CNAME / A / nameserver、切换顺序、常见误区 |
 | `references/advanced-needs.md` | 免费额度超限、付费选项、后端 / 数据库分层、密钥要求 |
 | `references/runtime-compat.md` | **可行性判定**：已知不可行组合、ORM × 运行时、现行额度/成本、构建环境、止损线 |
@@ -389,11 +390,11 @@ node "<技能目录>/scripts/verify-deployment.mjs" --url "<部署地址>" --mod
 
 模板：`templates/deployment-plan.md`、`templates/deployment-report.md`、`templates/migration-plan.md`、`templates/migration-report.md`、`templates/wrangler.workers.jsonc`、`templates/wrangler.pages.toml`。
 
-脚本：`scripts/probe.mjs`（链路探针）、`deploy-verdict.mjs`（探针 `--deploy` 的可测判定逻辑）、`redirect-policy.mjs`（重定向同源判定）、`net-retry.mjs`（瞬时网络错误分类，verify 重试用）、`detect-project.mjs`、`platform-matrix.mjs`（矩阵读取、校验、筛选、排序）、`select-platform.mjs`（适配度评分与多平台初选）、`migration-plan.mjs`（迁移前检查、双活五步、DNS 门、回滚、报告骨架）、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
+脚本：`scripts/probe.mjs`（链路探针）、`deploy-verdict.mjs`（探针 `--deploy` 的可测判定逻辑）、`redirect-policy.mjs`（重定向同源判定）、`net-retry.mjs`（瞬时网络错误分类，verify 重试用）、`detect-project.mjs`、`platform-matrix.mjs`（矩阵读取、校验、筛选、排序）、`select-platform.mjs`（适配度评估与多平台初选）、`migration-plan.mjs`（迁移前检查、双活五步、DNS 门、回滚、报告骨架）、`check-env.mjs`、`check-build.mjs`、`verify-deployment.mjs`。测试：`tests/run-tests.mjs`；结构自检：`tests/check-skill.mjs`（校验 frontmatter、引用路径、绝对路径残留，不依赖外部工具）。
 
 ## 八、输出要求
 
-部署前：一份一分钟能读完的计划（含可行性结论、适配度评分、目标平台与成本档）。目标用户含中国大陆或未明确时，必须附完整大陆访问风险提示和两条路线。
+部署前：一份一分钟能读完的计划（含可行性结论、适配度评估、目标平台与成本档）。目标用户含中国大陆或未明确时，必须附完整大陆访问风险提示和两条路线。
 不可行时：结论 + 依据 + 换依赖 / 换方案 / 换平台的选项与代价，不要伪装成已完成。
 部署后：一份带 URL、检查表、明确“未验证”项的报告；迁移场景用 `templates/migration-report.md`，写清检查项状态、DNS 变更、回滚和观察期。
 不要只回一句“完成了”。

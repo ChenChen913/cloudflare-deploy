@@ -3,8 +3,8 @@
  * platform-matrix.mjs — 平台能力矩阵的读取、校验、筛选与选型纯函数。
  *
  * 数据源：references/platform-matrix.json。
- * 本模块不访问网络、不写文件；select-platform.mjs 和测试共用这里的规则，
- * 避免把平台能力和排序逻辑复制到多个地方。
+ * 矩阵描述平台能力；本文件保留少量明确的产品策略（五核心、商业限制、
+ * 既有部署保留、首选/备选排序），避免把策略伪装成平台数据。
  */
 
 import fs from "node:fs";
@@ -21,6 +21,9 @@ const RENDER_MODES = ["static", "ssg", "spa", "ssr", "api"];
 const DOMAIN_METHODS = ["CNAME", "A", "AAAA", "nameserver"];
 const RISK_LEVELS = ["dns_polluted", "often_unreachable", "unstable", "usually_reachable", "unknown", "not_applicable"];
 const RISK_IMPROVEMENTS = ["partial", "no", "unknown", "not_applicable"];
+const RISK_EVIDENCE = ["official", "observation", "unverified", "not_applicable"];
+const SELECTION_POOLS = ["static", "ssr", "long-running", "database-auth"];
+const COMMERCIAL_USE = ["allowed", "not_allowed", "caution", "unknown"];
 
 export class MatrixError extends Error {
   constructor(message, errors = []) {
@@ -65,6 +68,8 @@ export function validateMatrix(data) {
     if (p.core === true) coreCount++;
     if (typeof p.name !== "string" || !p.name.trim()) errors.push(`${label}.name 不能为空`);
     if (typeof p.core !== "boolean") errors.push(`${label}.core 必须是布尔值`);
+    if (typeof p.family !== "string" || !p.family.trim()) errors.push(`${label}.family 不能为空`);
+    if (!Number.isFinite(p.order)) errors.push(`${label}.order 必须是数字`);
     if (!TYPES.includes(p.type)) errors.push(`${label}.type 非法：${p.type}`);
     if (!Array.isArray(p.render_support) || p.render_support.length === 0) {
       errors.push(`${label}.render_support 必须是非空数组`);
@@ -72,6 +77,21 @@ export function validateMatrix(data) {
       for (const mode of p.render_support) {
         if (!RENDER_MODES.includes(mode)) errors.push(`${label}.render_support 含非法模式：${mode}`);
       }
+    }
+    if (!Array.isArray(p.selection_pools) || p.selection_pools.length === 0) {
+      errors.push(`${label}.selection_pools 必须是非空数组`);
+    } else {
+      for (const pool of p.selection_pools) {
+        if (!SELECTION_POOLS.includes(pool)) errors.push(`${label}.selection_pools 含非法值：${pool}`);
+      }
+    }
+    if (typeof p.paid_only !== "boolean") errors.push(`${label}.paid_only 必须是布尔值`);
+    if (!COMMERCIAL_USE.includes(p.commercial_use)) errors.push(`${label}.commercial_use 非法：${p.commercial_use}`);
+    if (p.commercial_use_note !== undefined && typeof p.commercial_use_note !== "string") {
+      errors.push(`${label}.commercial_use_note 必须是字符串`);
+    }
+    if (p.render_notes !== undefined && typeof p.render_notes !== "string") {
+      errors.push(`${label}.render_notes 必须是字符串`);
     }
     if (!Array.isArray(p.free_tier_key_points) || p.free_tier_key_points.length === 0) {
       errors.push(`${label}.free_tier_key_points 必须是非空数组`);
@@ -96,6 +116,12 @@ export function validateMatrix(data) {
         errors.push(`${label}.mainland_china_risk.custom_domain_improves 非法：${risk.custom_domain_improves}`);
       }
       if (typeof risk.stable !== "boolean") errors.push(`${label}.mainland_china_risk.stable 必须是布尔值`);
+      if (!RISK_EVIDENCE.includes(risk.evidence_level)) {
+        errors.push(`${label}.mainland_china_risk.evidence_level 非法：${risk.evidence_level}`);
+      }
+      if (typeof risk.evidence_note !== "string" || !risk.evidence_note.trim()) {
+        errors.push(`${label}.mainland_china_risk.evidence_note 不能为空`);
+      }
     }
     const migration = p.migration_notes;
     if (!migration || typeof migration !== "object") {
@@ -112,9 +138,7 @@ export function validateMatrix(data) {
     }
     if (typeof p.best_for !== "string" || !p.best_for.trim()) errors.push(`${label}.best_for 不能为空`);
     if (typeof p.not_for !== "string" || !p.not_for.trim()) errors.push(`${label}.not_for 不能为空`);
-    if (p.limits !== undefined && (typeof p.limits !== "string" || !p.limits.trim())) {
-      errors.push(`${label}.limits 必须是非空字符串`);
-    }
+    if (typeof p.limits !== "string" || !p.limits.trim()) errors.push(`${label}.limits 不能为空`);
     if (p.sources !== undefined && !Array.isArray(p.sources)) {
       errors.push(`${label}.sources 必须是数组`);
     }
@@ -157,10 +181,22 @@ export function platformDetails(matrix, id) {
     name: p.name,
     type: p.type,
     core: p.core,
+    family: p.family,
+    product: p.product || null,
+    plan: p.plan || null,
     free_tier_key_points: p.free_tier_key_points,
     best_for: p.best_for,
-    limits: p.limits || p.not_for,
+    limits: p.limits,
     mainland_china_risk: p.mainland_china_risk?.notes || "",
+    mainland_china_risk_evidence: {
+      level: p.mainland_china_risk?.evidence_level || "unverified",
+      note: p.mainland_china_risk?.evidence_note || "",
+    },
+    commercial_use: p.commercial_use,
+    commercial_use_note: p.commercial_use_note || "",
+    render_notes: p.render_notes || "",
+    selection_pools: p.selection_pools,
+    paid_only: p.paid_only,
   };
 }
 
@@ -169,63 +205,111 @@ function supportsRender(matrix, id, render) {
   return Boolean(matrix.byId[id]?.render_support?.includes(mode));
 }
 
-export function filterCandidates({ matrix, render, backend, budget }) {
+function usageAllows(platform, usageType) {
+  if (usageType === "commercial") return platform.commercial_use === "allowed";
+  return true;
+}
+
+function poolIds(matrix, pool, { render, budget, usageType }) {
+  const paid = budget === "paid";
+  return matrix.platforms
+    .filter((p) => p.selection_pools.includes(pool))
+    .filter((p) => supportsRender(matrix, p.id, render))
+    .filter((p) => !p.paid_only || paid)
+    .filter((p) => usageAllows(p, usageType))
+    .sort((a, b) => a.order - b.order)
+    .map((p) => p.id);
+}
+
+export function filterCandidates({
+  matrix,
+  render,
+  backend,
+  budget,
+  usageType = "unknown",
+  existing = "unknown",
+  existingStatus = "unknown",
+}) {
   if (!matrix?.byId) throw new MatrixError("平台矩阵未加载");
   const paid = budget === "paid";
   const excluded = [];
   const addExcluded = (id, reason) => {
     if (matrix.byId[id] && !excluded.some((e) => e.id === id)) excluded.push({ id, reason });
   };
-  const coreOrder = ["cloudflare-pages", "github-pages", "vercel-hobby", "netlify-free", "render-free"];
-  const coreIds = matrix.platforms
-    .filter((p) => p.core)
-    .map((p) => p.id)
-    .sort((a, b) => coreOrder.indexOf(a) - coreOrder.indexOf(b));
-  const staticPool = coreIds.filter((id) => ["static", "ssg", "spa"].every((mode) => supportsRender(matrix, id, mode)));
-  const ssrPool = paid
-    ? ["vercel-hobby", "cloudflare-pages", "render-free", "railway", "fly-io"]
-    : ["vercel-hobby", "cloudflare-pages", "render-free"];
-  const longPool = paid ? ["railway", "fly-io", "render-free"] : ["render-free"];
+  const staticPool = poolIds(matrix, "static", { render, budget, usageType });
+  const ssrPool = poolIds(matrix, "ssr", { render, budget, usageType });
+  const longPool = poolIds(matrix, "long-running", { render, budget, usageType });
   let candidates = [];
 
-  const keepSupported = (ids) => ids.filter((id) => {
-    if (!matrix.byId[id]) return false;
-    if (supportsRender(matrix, id, render)) return true;
-    addExcluded(id, `平台能力矩阵未声明支持 ${render} 模式`);
-    return false;
-  });
-
   if (backend === "long-running") {
-    candidates = keepSupported(longPool);
+    candidates = longPool;
     if (!paid) {
       addExcluded("railway", "按量计费，不承诺长期免费；免费优先时不作为首选");
       addExcluded("fly-io", "按量计费，不承诺长期免费；免费优先时不作为首选");
+      addExcluded("vercel-pro", "无免费层，免费优先时不作为候选");
     }
     addExcluded("github-pages", "纯静态托管不能运行长期服务");
     addExcluded("cloudflare-pages", "静态托管不承接长期运行进程；如需 Containers 需 Workers Paid，另行评估");
+    addExcluded("cloudflare-workers", "Workers 是请求级运行时，不是长期运行进程");
     addExcluded("vercel-hobby", "Vercel Functions 是 Serverless，不适合长期运行服务");
+    addExcluded("vercel-pro", "Vercel Functions 是 Serverless，不适合长期运行服务");
     addExcluded("netlify-free", "Netlify Functions 是 Serverless，不适合长期运行服务");
     addExcluded("supabase", "Supabase 是数据库 / Auth / Storage，不运行长期服务本体");
   } else if (["static", "ssg", "spa"].includes(render)) {
-    candidates = keepSupported(staticPool);
-  } else if (["ssr", "fullstack"].includes(render)) {
-    candidates = keepSupported(ssrPool);
+    candidates = staticPool;
+    if (usageType === "commercial") {
+      addExcluded("vercel-hobby", "Hobby 仅个人非商业；商业项目改用 Vercel Pro 或其他平台");
+      addExcluded("github-pages", "公开仓库免费，但不适合敏感交易或商业 SaaS 主站；商业项目优先其他平台");
+    }
+    if (!paid) {
+      addExcluded("vercel-pro", "无免费层，免费优先时不作为候选");
+      addExcluded("railway", "按量计费，不是静态站免费层候选");
+      addExcluded("fly-io", "按量计费，不是静态站免费层候选");
+    }
+  } else if (["ssr", "fullstack", "api"].includes(render)) {
+    candidates = ssrPool;
+    if (usageType === "commercial") {
+      addExcluded("vercel-hobby", "Hobby 仅个人非商业；商业项目改用 Vercel Pro 或其他平台");
+    }
     addExcluded("github-pages", "只能托管静态文件，不能运行 SSR / 全栈服务端代码");
-    addExcluded("netlify-free", "纯静态托管不适用；如使用 Netlify Functions / Edge 承载 SSR，需另行评估，不作为本轮默认候选");
-  } else if (render === "api") {
-    candidates = keepSupported(ssrPool);
-    addExcluded("github-pages", "不能运行 API");
-    addExcluded("netlify-free", "纯静态托管不适用；Netlify Functions 需另行评估");
+    addExcluded("netlify-free", "纯静态托管不适用；如使用 Netlify Functions / Edge 承载 SSR，需另行评估，不作为默认候选");
+    addExcluded("cloudflare-pages", "新 SSR / API 项目优先 Cloudflare Workers；Pages Functions 仅在已有 Pages 或明确选择时保留");
+    if (!paid) {
+      addExcluded("vercel-pro", "无免费层，免费优先时不作为候选");
+      addExcluded("railway", "按量计费，不承诺长期免费；免费优先时不作为候选");
+      addExcluded("fly-io", "按量计费，不承诺长期免费；免费优先时不作为候选");
+    }
+  }
+
+  const existingPlatform = existing && existing !== "none" && existing !== "unknown" ? matrix.byId[existing] : null;
+  if (existingStatus === "healthy" && existingPlatform && supportsRender(matrix, existing, render) && usageAllows(existingPlatform, usageType)) {
+    if (!candidates.includes(existing)) candidates = [existing, ...candidates];
+    const index = excluded.findIndex((e) => e.id === existing);
+    if (index >= 0) excluded.splice(index, 1);
   }
 
   return { candidates, excluded };
 }
 
-export function selectPlatforms({ matrix, render, backend, audience, budget, candidates, excluded }) {
+export function selectPlatforms({
+  matrix,
+  render,
+  backend,
+  audience,
+  budget,
+  usageType = "unknown",
+  existing = "unknown",
+  existingStatus = "unknown",
+  candidates,
+  excluded,
+}) {
   const mainland = audience !== "overseas";
   const has = (id) => candidates.includes(id);
   const backup = [];
   const notRecommended = [];
+  const hobbyNotAssumedPersonal = existing === "vercel-hobby" && usageType !== "personal_noncommercial";
+  const existingId = existingStatus === "healthy" && has(existing) && !hobbyNotAssumedPersonal ? existing : null;
+  const existingPlatform = existingId ? matrix.byId[existingId] : null;
   let primaryId = null;
 
   const addBackup = (id, condition) => {
@@ -237,27 +321,53 @@ export function selectPlatforms({ matrix, render, backend, audience, budget, can
     notRecommended.push({ id, reason });
   };
 
-  if (backend === "long-running") {
+  if (existingId) {
+    primaryId = existingId;
+    if (existingId === "cloudflare-pages" && has("cloudflare-workers")) {
+      addBackup("cloudflare-workers", "现有 Pages 健康；只有明确需要 Workers 能力时才迁移");
+    } else if (existingId === "cloudflare-workers" && has("cloudflare-pages")) {
+      addBackup("cloudflare-pages", "现有 Workers 健康；只有纯静态且想用 Pages Git 集成时才迁移");
+    } else if (["static", "ssg", "spa"].includes(render) && has("cloudflare-pages")) {
+      addBackup("cloudflare-pages", "现有部署健康；Pages 仅作为备选");
+    } else if (has("cloudflare-workers")) {
+      addBackup("cloudflare-workers", "现有部署健康；Workers 仅作为备选");
+    }
+  } else if (backend === "long-running") {
     primaryId = budget === "paid" ? "railway" : "render-free";
     if (budget === "paid") {
       addBackup("fly-io", "按量付费；注意区域和冷启动");
       addBackup("render-free", "可接受免费 Web Service 15 分钟无流量休眠");
     }
   } else if (["ssr", "fullstack", "api"].includes(render)) {
-    primaryId = mainland ? "cloudflare-pages" : "vercel-hobby";
+    const commercial = usageType === "commercial";
+    const personal = usageType === "personal_noncommercial";
     if (mainland) {
-      addBackup("vercel-hobby", "绑定自定义域名并接受仍可能被限速；Vercel 不保证中国大陆性能");
+      primaryId = has("cloudflare-workers") ? "cloudflare-workers" : has("vercel-pro") ? "vercel-pro" : "render-free";
+      addBackup("vercel-pro", "商业项目可用 Pro；大陆访问仍可能被限速");
+      addBackup("vercel-hobby", "仅个人非商业；绑定自定义域名并接受大陆风险");
       addBackup("render-free", "大陆访问未实测；可接受冷启动");
+    } else if (commercial) {
+      primaryId = paidAndHas("vercel-pro") ? "vercel-pro" : has("cloudflare-workers") ? "cloudflare-workers" : "render-free";
+      addBackup("cloudflare-workers", "商业用途可用免费层；注意请求额度");
+      addBackup("render-free", "可接受冷启动；商业用途以官方条款为准");
+    } else if (personal) {
+      primaryId = has("vercel-hobby") ? "vercel-hobby" : has("cloudflare-workers") ? "cloudflare-workers" : "render-free";
+      addBackup("cloudflare-workers", "SSR 需适配器；免费请求额度足够时可用");
+      addBackup("render-free", "可接受冷启动；大陆访问未实测");
     } else {
-      addBackup("cloudflare-pages", "SSR 需 Functions / 框架适配器；静态免费层仍便宜");
+      primaryId = has("cloudflare-workers") ? "cloudflare-workers" : has("vercel-hobby") ? "vercel-hobby" : "render-free";
+      addBackup("vercel-hobby", "仅个人非商业，需确认使用性质；绑定自定义域名");
       addBackup("render-free", "可接受冷启动；大陆访问未实测");
     }
   } else if (["static", "ssg", "spa"].includes(render)) {
-    primaryId = "cloudflare-pages";
+    primaryId = has("cloudflare-pages") ? "cloudflare-pages" : candidates[0] || null;
     if (mainland) {
       addBackup("github-pages", "已有仓库且接受中国大陆访问不稳定");
       addNotRecommended("vercel-hobby", "默认域名在中国大陆已被 DNS 污染，直接访问通常超时；除非绑定自定义域名并接受仍可能被限速");
       addNotRecommended("netlify-free", "默认域名在中国大陆常无法直接访问；除非绑定自定义域名并接受风险");
+    } else if (usageType === "commercial") {
+      addBackup("netlify-free", "商业用途可用；默认域名大陆风险不影响海外用户");
+      addBackup("render-free", "静态站免费；可接受冷启动");
     } else {
       addBackup("github-pages", "仓库已在 GitHub，且不需要大陆稳定访问");
       addBackup("vercel-hobby", "海外个人项目；Hobby 仅个人非商业");
@@ -265,6 +375,13 @@ export function selectPlatforms({ matrix, render, backend, audience, budget, can
   }
 
   if (!primaryId || !has(primaryId)) primaryId = candidates[0] || null;
+  if (primaryId === "vercel-hobby" && usageType !== "personal_noncommercial") {
+    const replacement = has("cloudflare-workers") ? "cloudflare-workers" : has("render-free") ? "render-free" : candidates.find((id) => id !== "vercel-hobby");
+    if (replacement) {
+      addBackup("vercel-hobby", usageType === "commercial" ? "不可用于商业；不要选择" : "仅个人非商业，需确认使用性质");
+      primaryId = replacement;
+    }
+  }
   for (const item of excluded) {
     if (notRecommended.length >= 2) break;
     addNotRecommended(item.id, item.reason);
@@ -272,20 +389,31 @@ export function selectPlatforms({ matrix, render, backend, audience, budget, can
 
   const primaryReason = (() => {
     if (!primaryId) return "";
+    if (existingId) return `现有部署健康，迁移收益不足；保留 ${existingPlatform.name}`;
     if (backend === "long-running") {
       return budget === "paid"
         ? "支持 Docker / 长驻服务，按量付费；适合需要常驻进程的项目"
         : "免费 Web Service 可起步；15 分钟无流量休眠，需接受冷启动";
     }
-    if (["ssr", "fullstack", "api"].includes(render)) {
+    if (primaryId === "cloudflare-workers") {
       return mainland
-        ? "Cloudflare 家族默认域名大陆可达性更好；SSR 需 Workers + 框架适配器"
-        : "Next.js / SSR 适配摩擦最低，海外访问稳定";
+        ? "Workers 是请求级 SSR / API 运行时；默认域名大陆可达性通常更好（网络观测，不保证）；Pages Functions 仅在已有 Pages 或明确选择时考虑"
+        : "新 SSR / API 项目优先 Workers；商业用途可用免费层，避开 Hobby 的非商业限制";
     }
-    return mainland
-      ? "免费、静态带宽无限，大陆可达性优于 Vercel 默认域名"
-      : "免费、静态带宽无限，适合静态站零配置起步";
+    if (primaryId === "vercel-pro") return "商业用途允许；$20/月起；Next.js / SSR 适配成熟";
+    if (primaryId === "vercel-hobby") return "个人非商业可用；Next.js / SSR 适配成熟";
+    if (primaryId === "render-free") return "免费 Web Service 可起步；15 分钟无流量休眠，需接受冷启动";
+    if (primaryId === "cloudflare-pages") {
+      return mainland
+        ? "免费、静态带宽无限，大陆可达性优于 Vercel 默认域名；静态站默认 Pages"
+        : "免费、静态带宽无限；Pages 的 Git 集成最简单，静态站默认 Pages";
+    }
+    return "按矩阵能力和规则筛选出的首选";
   })();
+
+  function paidAndHas(id) {
+    return budget === "paid" && has(id);
+  }
 
   const primary = platformDetails(matrix, primaryId);
   return {
@@ -298,5 +426,6 @@ export function selectPlatforms({ matrix, render, backend, audience, budget, can
       const details = platformDetails(matrix, n.id);
       return details ? { ...details, reason: n.reason } : null;
     }).filter(Boolean),
+    existing: existingId ? { id: existingId, name: existingPlatform.name, status: existingStatus } : null,
   };
 }

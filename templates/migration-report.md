@@ -14,14 +14,16 @@
 
 ## 迁移前检查
 
+状态定义：`provided` 用户提供但未验证；`inferred` 从配置或矩阵推断；`verified` 实际验证通过；`pending` 尚未确认；`blocked` 存在阻断；`not_applicable` 不适用。
+
 | 检查项 | 状态 | 证据 / 备注 |
 |---|---|---|
-| 构建命令与输出目录 | {{confirmed / inferred / unknown}} | {{...}} |
-| 环境变量键名 | {{confirmed}} | {{只写键名，不写值}} |
-| 自定义域名与 DNS | {{confirmed / pending}} | {{域名、DNS 提供商、CNAME / A / nameserver、TTL}} |
-| 重定向 / headers / 平台配置 | {{confirmed}} | {{文件或控制台位置}} |
-| 平台特有能力依赖 | {{confirmed / blocked}} | {{替代方案}} |
-| 回滚保留时长 | {{confirmed}} | {{源平台至少保留一周}} |
+| 构建命令与输出目录 | {{provided / verified / pending}} | {{...}} |
+| 环境变量键名 | {{provided / verified}} | {{只写键名，不写值}} |
+| 自定义域名与 DNS | {{provided / verified / pending}} | {{域名、DNS 提供商、CNAME / A / nameserver、TTL}} |
+| 重定向 / headers / 平台配置 | {{pending / verified}} | {{文件或控制台位置}} |
+| 平台特有能力依赖 | {{pending / verified / blocked}} | {{替代方案}} |
+| 回滚保留时长 | {{provided}} | {{源平台至少保留一周；计划值}} |
 
 ## 双活与验收
 

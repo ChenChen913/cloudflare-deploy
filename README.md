@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-一个可复用的 Agent Skill：评估并尽可能把程序项目（静态站、前端、全栈或后端）部署到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render；不适用时给出保留外部后端/容器的替代路线。流程是：**先验证链路与可行性** → 识别仓库 → 部署适配度评分 → 平台筛选 → 选型 → 网络与进阶引导 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 迁移检查（如适用）→ 写报告。
+一个可复用的 Agent Skill：评估并尽可能把程序项目（静态站、前端、全栈或后端）部署到 Cloudflare Pages / Workers、GitHub Pages、Vercel、Netlify、Render；不适用时给出保留外部后端/容器的替代路线。流程是：**先验证链路与可行性** → 识别仓库 → 部署适配度评估 → 平台筛选 → 选型 → 网络与进阶引导 → 写计划 → 构建 → 部署到预览 → 用真实 HTTP 请求验收 → 迁移检查（如适用）→ 写报告。
 
 > **能力边界**：自动化脚本完整覆盖静态站 / SPA / SSG 的构建检查与 HTTP 验收。SSR / 全栈项目请把本技能当**流程清单**使用：`check-build.mjs` 对它不适用，`verify-deployment.mjs` 只验证 HTTP 层（首页、API、服务端渲染内容）。运行时兼容性、套餐与成本见 `references/runtime-compat.md`；Java/Python/PHP/Ruby/.NET 或前后端混合项目先看 `references/tech-stack-fit.md`，不要假设所有技术栈都能被脚本完整验收。
 
@@ -11,7 +11,7 @@
 ## 状态
 
 - 格式校验：`quick_validate.py` 通过；仓库自带的 `node tests/check-skill.mjs` 也通过。
-- 本地测试：794/794 通过（`node tests/run-tests.mjs`）。
+- 本地测试：829/829 通过（`node tests/run-tests.mjs`）。
 - 真实 Cloudflare 部署：**本自动化测试环境没有执行**（没有账号/Token，Wrangler 未安装）。另一个真实项目的迁移与线上实测经验记录在 `references/migration-guide.md`（带「实测」标注），但那是历史项目的证据，不等于本环境的自动化验证；本地自动化测试也不构成 Cloudflare 账号级部署验证。哪些验证过、哪些没有，见 `tests/results.md`。
 
 ## 它能做什么
@@ -19,10 +19,10 @@
 **第 0 步是熔断，不是可选项**：`scripts/probe.mjs` 先验证账号、网络、权限，`blocked` 就硬停；再用 10 分钟判定技术可行性，不可行就把「换依赖 / 换方案 / 换平台」的代价摆出来。构建连续失败 2 次、或单次 15 分钟无进展也要止损。
 
 1. **识别**：框架、构建命令、输出目录、base path、SPA/SSR/API 类型、GitHub Pages 配置、现有 Wrangler 配置、绑定、环境变量键名、PWA、子应用、锁文件、风险信号；每个关键字段标注 `confirmed` / `inferred` / `unknown`。
-2. **评分与选型**：按渲染模式、后端与数据库、用户地域、预算四维给出部署适配度；候选由 `references/platform-matrix.json` 驱动，在多平台里给首选 / 备选 / 不推荐，再由 DNS、部署方式、未来后端需求决定 Cloudflare Pages 还是 Workers。目标用户含中国大陆或未明确时，强制输出完整访问风险提示。
+2. **适配度评估与选型**：按渲染模式、后端与数据库、用户地域、预算四维给出部署适配度；另外评估使用性质（个人非商业 / 商业 / 未知）和现有部署是否健康。候选由 `references/platform-matrix.json` 驱动，在多平台里给首选 / 备选 / 不推荐。静态站默认 Cloudflare Pages，新 SSR / 全栈优先 Cloudflare Workers，已有 Pages 健康时不强制迁移；商业项目不使用 Vercel Hobby。目标用户含中国大陆或未明确时，强制输出完整访问风险提示，并标注证据等级。
 3. **计划与迁移**：写清改动和回滚；DNS、自定义域名、生产密钥、数据库、删除、不可逆配置必须先确认。迁移场景生成迁移前检查、双活五步、DNS 确认门、回滚和报告骨架，不执行 DNS / 部署 / 数据库操作。
 4. **构建检查**：部署前按站点模式、套餐和部署目标检查产物。默认 Free 20,000 文件；`--plan paid --target pages` 要 Wrangler v4 + `PAGES_WRANGLER_MAJOR_VERSION=4`，`--plan paid --target workers` 要 Wrangler >= 4.34.0，才按 100,000。目标未知、版本非法或证据不足一律退回 20,000 并给 `warn`；`ssr` 明确报告「不适用」。
-5. **部署**：Cloudflare 先到 `pages.dev` / `workers.dev` 或预览分支；其他平台按官方 Git 集成或 CLI 人工执行，不声称自动部署。
+5. **部署**：Cloudflare Pages 和 Workers 分开部署，先到 `pages.dev` / `workers.dev` 或预览分支；其他平台按官方 Git 集成或 CLI 人工执行，不声称自动部署。
 6. **验收**：首页（只自动跟随同源重定向，最多 5 次并额外请求最终地址；跨源、协议变化、非 HTTP(S) 目标不请求，只记录并分类；3xx 里只有 301/302/303/307/308 是重定向，304 与其他 3xx 单独分类；只有最终 200 才做内容检查）、按模式判定的 404/回退、资源（HTML 由共享 tokenizer 解析，注释/script/style/textarea/template 内的伪标签不算；只取真实子资源属性，按 `<base href>` / 最终页面 URL 解析；304 不进入重定向链）、响应头、canonical/noindex（href 缺失 / 空值 / 无法解析分别判失败；只统计真正的 `<link rel=canonical>`）、CORS（预检只发送显式提供的方法/请求头，未提供的断言只进 `notChecked`；CORS URL 非 2xx/重定向不判通过）、备用站独立性、DNS、数据、性能，按项目类型选择；`ssr` 额外检查服务端渲染内容（RAWTEXT 不计入可见文本）、单次 TTFB 和 `--api` 接口的状态 / JSON 结构。
 7. **报告**：每项写 通过/失败/警告/未验证，不编造没跑过的测试。
 
@@ -39,9 +39,9 @@ cloudflare-deploy/
 │   ├── console-paths.md      # 登录后的控制台路径
 │   ├── cross-platform.md     # Windows / macOS / Linux / WSL / 容器 / CI
 │   ├── platform-selection.md # Pages vs Workers、额度、价格
-│   ├── platform-matrix.json  # 平台能力矩阵数据源（5 核心 + 3 扩展）
+│   ├── platform-matrix.json  # 平台能力矩阵数据源（5 核心 + 5 扩展/计划）
 │   ├── mainland-china-access.md # 中国大陆访问风险、默认域名、两条路线
-│   ├── cross-platform-migration.md # 五平台迁移手册、双活五步、安全门
+│   ├── cross-platform-migration.md # 多平台迁移手册、双活五步、安全门
 │   ├── custom-domain-guide.md # 域名购买、CNAME / A / nameserver
 │   ├── advanced-needs.md     # 付费额度、后端 / 数据库分层
 │   ├── runtime-compat.md     # 可行性判定、ORM × 运行时、成本、止损线
@@ -64,7 +64,7 @@ cloudflare-deploy/
 │   ├── wrangler-auth.mjs     # 登录态判定的唯一权威（check-env 与 probe 共用）
 │   ├── detect-project.mjs
 │   ├── platform-matrix.mjs   # 矩阵读取、校验、筛选与选型纯函数
-│   ├── select-platform.mjs   # 部署适配度评分与多平台初选
+│   ├── select-platform.mjs   # 部署适配度评估与多平台初选
 │   ├── migration-plan.mjs    # 迁移前检查、双活五步、DNS 门、报告骨架
 │   ├── check-env.mjs
 │   ├── check-build.mjs
@@ -150,7 +150,7 @@ ln -s /path/to/cloudflare-deploy ~/.workbuddy/skills/cloudflare-deploy
 - 检查部署后的页面、路由和静态资源
 - 帮我修复部署失败
 
-Agent 先运行 `scripts/probe.mjs --repo "$PWD"`（退出码表达链路结论，包含代码托管检查），链路通了再运行 `scripts/detect-project.mjs` 识别项目；用 `scripts/select-platform.mjs` 做适配度评分和平台初选；构建或部署前运行 `scripts/check-env.mjs`（同样用退出码表达结论）；迁移场景用 `scripts/migration-plan.mjs` 生成计划和报告骨架；部署到预览后运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md` 或 `templates/migration-report.md`。
+Agent 先运行 `scripts/probe.mjs --repo "$PWD"`（退出码表达链路结论，包含代码托管检查），链路通了再运行 `scripts/detect-project.mjs` 识别项目；用 `scripts/select-platform.mjs` 做适配度评估和平台初选；构建或部署前运行 `scripts/check-env.mjs`（同样用退出码表达结论）；迁移场景用 `scripts/migration-plan.mjs` 生成计划和报告骨架；部署到预览后运行 `scripts/verify-deployment.mjs`，最后填 `templates/deployment-report.md` 或 `templates/migration-report.md`。
 
 ## 脚本
 
@@ -166,9 +166,9 @@ node scripts/check-build.mjs --dir dist --mode static [--plan free|paid] [--targ
 node scripts/verify-deployment.mjs --url https://site.example.com --mode static --json [--retries 1]
 ```
 
-`select-platform.mjs` 是只读评分脚本：读取 `references/platform-matrix.json`，按渲染模式、后端、地域、预算输出候选平台和首选 / 备选 / 不推荐；目标用户含大陆或未明确时，输出完整大陆风险提示。退出码 `0` 有结论、`1` 信息不足或矩阵不可用、`2` 用法错误；不访问网络、不写项目文件。矩阵校验、筛选和排序的纯函数在 `platform-matrix.mjs`，测试直接覆盖。
+`select-platform.mjs` 是只读评估脚本：读取 `references/platform-matrix.json`，按渲染模式、后端、地域、预算、使用性质和现有部署输出候选平台和首选 / 备选 / 不推荐；目标用户含大陆或未明确时，输出完整大陆风险提示和证据说明。退出码 `0` 有结论、`1` 信息不足或矩阵不可用、`2` 用法错误；不访问网络、不写项目文件。矩阵校验、筛选和排序的纯函数在 `platform-matrix.mjs`，测试直接覆盖。商业项目必须传 `--usage commercial`；静态站默认 Pages，新 SSR / 全栈优先 Workers，已有 Pages 健康时不强制迁移。
 
-`migration-plan.mjs` 是只读迁移计划生成器：校验 `source` / `target` / `project_type`，输出迁移前检查、双活五步、DNS 确认门、回滚段和报告骨架。`--env-keys` 只接受键名，拒绝 `KEY=value`；`--human` 输出计划，`--report` 只输出报告骨架。它不执行 DNS、部署或数据库操作；目标平台不支持该渲染模式时返回 `blocked`。
+`migration-plan.mjs` 是只读迁移计划生成器：校验 `source` / `target` / `project_type`（含 Cloudflare Workers、Vercel Pro），输出迁移前检查、双活五步、DNS 确认门、回滚段和报告骨架。`--env-keys` 只接受键名，拒绝 `KEY=value`；`--human` 输出计划，`--report` 只输出报告骨架。它不执行 DNS、部署或数据库操作；目标平台不支持该渲染模式时返回 `blocked`。
 
 `--mode` 决定 404 的判定：`static` / `ssg` 要求未知路径 404；`spa` 要求返回 app shell；`ssr` 通常 404，返回 200 只报警告。构建检查和验收必须用同一个值。`detect-project` 会识别 HashRouter（建议 static + 404.html）与 BrowserRouter/history 路由（spa + 显式 fallback）；**没有任何路由证据时返回 `unknown`，要求人工确认，不默认推荐 spa**。`verify-deployment` 默认对连接类瞬时错误重试 1 次（`--retries 0..3`）……，HTTP 4xx/5xx、证书/DNS 解析错误和脚本自身单次超时不重试；连接超时/重置可重试。detail 会区分网络失败和 HTTP 断言失败。
 
@@ -207,7 +207,7 @@ node scripts/verify-deployment.mjs \
 ## 测试
 
 ```bash
-node tests/run-tests.mjs        # 794 项，分层覆盖（core 350 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、平台矩阵、适配度评分、跨平台迁移、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
+node tests/run-tests.mjs        # 829 项，分层覆盖（core 385 / adversarial 276 / boundary 43 / combination 5 / unit 120）：识别、平台矩阵、Pages/Workers 分工、商业用途、适配度评估、跨平台迁移、套餐与产物、HTML tokenizer / HTML5 状态机、真实 HTTP 验收、CORS、重定向与 SSRF、canonical、3xx、CLI、JSON、链路探针
 node tests/check-skill.mjs      # 结构自检，不依赖外部工具
 node tests/browser-diff.mjs     # 可选：用本机 Chrome/Edge 做真实解析器差分（Node 22+；无浏览器/Node<22 退出码 2 跳过，不一致退出码 1）
 ```
@@ -238,5 +238,6 @@ node tests/browser-diff.mjs     # 可选：用本机 Chrome/Edge 做真实解析
 - CLI 不能代替控制台连接 Git 集成 / Workers Builds。
 - DNS、自定义域名、生产密钥、数据库迁移、删除操作必须用户确认；迁移脚本只生成计划，不执行这些操作。
 - SSR / 全栈的脚本能力只到 HTTP 层，`check-build.mjs` 对它不适用。
+- Vercel Hobby 仅个人非商业；商业项目必须使用 Pro 或其他平台。Cloudflare Pages 与 Workers 是独立产品，配置、限制和迁移方式不能混用。
 - 本仓库的自动化测试全部在本机跑合成夹具，没有执行真实 Cloudflare 部署，也没有执行真实的 Vercel / Netlify / Render / GitHub Pages 迁移；实战记录见 `references/migration-guide.md`，两者不是一回事。
 - HTML tokenizer 不是完整 HTML5 tree builder：不建模隐式闭合、foster parenting、活动格式化元素重建与完整的 foreign content 树构建；SVG/MathML 用显式命名空间栈覆盖根/集成点/MathML 文本集成点/annotation-xml encoding 分支/breakout，但不做其完整树构建；对浏览器会丢弃的 table-internal/structural 开始标签、select 插入模式、HTML 祖先回退的 scope 边界只做最小近似；script data 覆盖 escaped/double-escaped，但仍有历史解析怪癖未覆盖；命名实体只覆盖常用集合（legacy 无分号实体为常见子集）；DOCTYPE 只保证 token 边界，不暴露 force-quirks/compatMode。需要 DOM 级精确结论时人工用浏览器复核。
